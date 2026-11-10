@@ -1,0 +1,70 @@
+name: Build APK
+
+# 手动触发；也可以在打 tag / 发 release 时自动跑
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # 与 README 一致：arm64-only、Cronet、混淆 + 分离 debug 符号
+      # Gradle / Kotlin 从 GitHub 拉包容易 504，失败就重试
+      - name: Build APK
+        run: |
+          for attempt in 1 2 3; do
+            flutter build apk \
+              --release \
+              --target-platform android-arm64 \
+              --dart-define=cronetHttpNoPlay=true \
+              --obfuscate \
+              --split-debug-info=build/symbols \
+              -t lib/next/main.dart \
+              && exit 0
+            [ "$attempt" = 3 ] || sleep 120
+          done
+          exit 1
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p dist
+          # 版本号从 pubspec 取，方便下载时认
+          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | tr -d ' ')
+          cp build/app/outputs/flutter-apk/app-release.apk "dist/ark_novel-${VERSION}-arm64.apk"
+          # 可选：把符号也打包，方便以后还原崩溃栈
+          if [ -d build/symbols ]; then
+            tar -czf "dist/symbols-${VERSION}.tar.gz" -C build symbols
+          fi
+          ls -lh dist/
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: ark-novel-apk
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
