@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.5](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.0.4...ark_novel-v1.0.5) (2026-11-10)
+
+
+### Features
+
+* 美化阅读菜单、阅读设置面板和设置页 ([6eb3f4b](https://github.com/chenshi221/ark_novel/commit/6eb3f4b541720bb173293b2573c537785c29266c))
+* 美化阅读菜单、阅读设置面板和设置页 ([b77f112](https://github.com/chenshi221/ark_novel/commit/b77f11213e235cf4676b452ec204c89731568913))
+
 ## [1.0.4](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.0.3...ark_novel-v1.0.4) (2026-11-09)
 
 

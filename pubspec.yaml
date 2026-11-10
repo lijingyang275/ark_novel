@@ -3,7 +3,7 @@ description: "Ark Novel — 第三方轻小说文库（wenku8）客户端"
 
 publish_to: 'none'
 
-version: 1.0.4+34
+version: 1.0.5+35
 
 environment:
   sdk: ^3.12.2

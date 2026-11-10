@@ -53,7 +53,7 @@ class VolumeStack extends StatelessWidget {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, c) {
       Widget sheet(String url, double dim) => DecoratedBox(
-        decoration: BoxDecoration(borderRadius: BorderRadius.circular(6), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 3, offset: const Offset(1, 0))]),
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(6), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.32), blurRadius: 4, offset: const Offset(1.5, 0))]),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(6),
           child: Stack(fit: StackFit.expand, children: [CoverImage(url), if (dim > 0) ColoredBox(color: Colors.black.withValues(alpha: dim))]),
@@ -327,7 +327,16 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
               child: SliderTheme(
                 data: SliderTheme.of(
                   context,
-                ).copyWith(activeTrackColor: Colors.white, inactiveTrackColor: Colors.white24, thumbColor: Colors.white, valueIndicatorColor: Colors.black87),
+                ).copyWith(
+                  activeTrackColor: Colors.white,
+                  inactiveTrackColor: Colors.white24,
+                  thumbColor: Colors.white,
+                  valueIndicatorColor: Colors.black87,
+                  // 细轨道、小圆点：默认的大圆点压过封面
+                  trackHeight: 2,
+                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6, elevation: 0, pressedElevation: 0),
+                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+                ),
                 child: Slider(
                   value: cur.toDouble(),
                   max: vols.length - 1.0,
@@ -691,8 +700,6 @@ class _Summary extends StatelessWidget {
           textAlign: TextAlign.center,
           style: const TextStyle(color: Colors.white70, fontSize: 13),
         ),
-        const SizedBox(height: 12),
-        const Text('点封面开始读 · 长按换封面', style: TextStyle(color: Colors.white38, fontSize: 12)),
       ],
     ),
   );
@@ -838,6 +845,9 @@ class _DetailsState extends State<_Details> {
             child: ListTile(
               dense: true,
               contentPadding: EdgeInsets.zero,
+              // 默认给前面的图标留 40 宽再空 16，章节名左边空一大块
+              minLeadingWidth: 20,
+              horizontalTitleGap: 8,
               leading: _picked.isNotEmpty
                   ? Icon(_picked.contains(cid) ? Icons.check_box : Icons.check_box_outline_blank, size: 20, color: Colors.white70)
                   : (read.contains(cid) ? const Icon(Icons.check, size: 16, color: Colors.white38) : const SizedBox(width: 16)),

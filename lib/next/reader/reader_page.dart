@@ -35,6 +35,7 @@ import '../settings.dart';
 import '../stats.dart';
 import '../sync.dart';
 import '../volumes.dart';
+import '../theme.dart';
 import '../theme_doodle.dart';
 import '../theme_squire.dart';
 import '../unlock.dart';
@@ -906,6 +907,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     _syncVolumeKeys(prefs.volumeKeys);
     _applyChrome(prefs);
     final palette = _paletteOf(prefs, Theme.of(context).colorScheme);
+    // 菜单里的强调色：有章节标题色（晴空、角色主题）就用它，和正文是一套
+    final accent = _headingAccent(context, prefs, palette)?.$1 ?? Theme.of(context).colorScheme.primary;
     final novel = ref.watch(novelProvider(widget.aid)).value;
     final chapters = novel?.catalogue.expand((v) => v.chapters).toList() ?? const <CatChapter>[];
     final index = chapters.indexWhere((c) => c.cid == _cid);
@@ -1095,7 +1098,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
               right: 0,
               child: Material(
                 color: palette.bg,
-                elevation: 2,
+                shape: Border(bottom: BorderSide(color: palette.fg.withValues(alpha: 0.12))), // 不要阴影：阴影会把正文一行字切成两半
                 child: SafeArea(
                   bottom: false,
                   child: Row(
@@ -1123,7 +1126,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
               right: 0,
               child: Material(
                 color: palette.bg,
-                elevation: 2,
+                shape: Border(top: BorderSide(color: palette.fg.withValues(alpha: 0.12))),
                 child: SafeArea(
                   top: false,
                   child: Column(
@@ -1144,15 +1147,16 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Padding(
-                                  padding: const EdgeInsets.fromLTRB(16, 6, 8, 0),
+                                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
                                   child: Row(
                                     children: [
                                       Expanded(
                                         child: Text(
                                           _slide == null ? label : '$title · $label',
+                                          textAlign: _back == null || _slide != null ? TextAlign.center : TextAlign.start,
                                           maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
-                                          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: palette.fg, fontWeight: _slide == null ? null : FontWeight.w600),
+                                          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: palette.fg.withValues(alpha: _slide == null ? 0.6 : 1), fontWeight: _slide == null ? null : FontWeight.w600),
                                         ),
                                       ),
                                       if (_back case final b? when _slide == null)
@@ -1176,7 +1180,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                     }),
                                     Expanded(
                                       child: total > 1
-                                          ? Slider(
+                                          ? SliderTheme(
+                                              data: _menuSlider(context, accent, palette),
+                                              child: Slider(
                                               min: 0,
                                               max: (total - 1).toDouble(),
                                               divisions: paged ? total - 1 : null,
@@ -1189,6 +1195,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                                 paged ? _nav.toPage?.call(v.round()) : _nav.toFraction?.call(v / 100);
                                                 WidgetsBinding.instance.addPostFrameCallback((_) => _scrubbing = false);
                                               },
+                                            ),
                                             )
                                           : const SizedBox(height: 48),
                                     ),
@@ -1205,7 +1212,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                       Row(
                         children: [
                           for (final (icon, label, onTap) in <(IconData, String, VoidCallback)>[
-                            (Icons.menu_book_outlined, '目录', () => _showCatalogue(novel?.catalogue ?? const [], _cid)),
+                            (Icons.format_list_bulleted_rounded, '目录', () => _showCatalogue(novel?.catalogue ?? const [], _cid)),
                             (Bookmarks.has(widget.aid, _cid, _offset) ? Icons.bookmark : Icons.bookmark_border, '书签', _addBookmark),
                             (_speaking ? Icons.stop_circle_outlined : Icons.record_voice_over_outlined, _speaking ? '停止' : '朗读', () => _speaking ? _stopTts() : content.whenData(_startTts)),
                             (Icons.tune, '朗读设置', _showTtsSettings),
@@ -1216,7 +1223,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                 onTap: onTap,
                                 child: Padding(
                                   padding: const EdgeInsets.symmetric(vertical: 8),
-                                  child: Column(mainAxisSize: MainAxisSize.min, children: [Icon(icon, size: 22, color: palette.fg), const SizedBox(height: 2), Text(label, style: TextStyle(fontSize: 11, color: palette.fg))]),
+                                  child: Column(mainAxisSize: MainAxisSize.min, children: [Icon(icon, size: 21, weight: 300, color: palette.fg.withValues(alpha: 0.85)), const SizedBox(height: 3), Text(label, style: TextStyle(fontSize: 11, color: palette.fg.withValues(alpha: 0.65)))]),
                                 ),
                               ),
                             ),
@@ -1233,6 +1240,18 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       )),
     );
   }
+
+  SliderThemeData _menuSlider(BuildContext context, Color accent, _Palette palette) => SliderTheme.of(context).copyWith(
+    activeTrackColor: accent,
+    thumbColor: accent,
+    overlayColor: accent.withValues(alpha: 0.12),
+    inactiveTrackColor: palette.fg.withValues(alpha: 0.15),
+    activeTickMarkColor: Colors.transparent,
+    inactiveTickMarkColor: Colors.transparent,
+    trackHeight: 2,
+    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6, elevation: 0, pressedElevation: 0),
+    overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+  );
 
   /// 灰度、反色、暖色滤镜：套在整个阅读界面外面（盖在文字和背景上，不改排版）
   Widget _filtered(ReaderPrefs p, Widget child) {
@@ -1461,28 +1480,59 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     }
   }
 
+  /// 上次停在设置面板的哪一页（显示 / 排版 / 翻页）
+  int _settingsTab = 0;
+
   void _showSettings() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      showDragHandle: true,
-      builder: (context) => Consumer(
+      barrierColor: Colors.transparent, // 不压暗正文：改字号、配色时要看得到效果
+      builder: (context) => StatefulBuilder(builder: (context, setSheet) => Consumer(
         builder: (context, ref, _) {
           final prefs = ref.watch(readerPrefsProvider);
           void set(ReaderPrefs p) => ref.read(readerPrefsProvider.notifier).update(p);
           final android = !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
-          final scheme = Theme.of(context).colorScheme;
-          return SafeArea(
+          // 面板跟阅读配色走（纸色底、正文字色），不用应用主题的底色
+          final app = Theme.of(context);
+          final pal = _paletteOf(prefs, app.colorScheme);
+          final scheme = app.colorScheme.copyWith(
+            primary: _headingAccent(this.context, prefs, pal)?.$1,
+            surface: pal.bg,
+            onSurface: pal.fg,
+            onSurfaceVariant: pal.fg.withValues(alpha: 0.6),
+            outline: pal.fg.withValues(alpha: 0.18),
+            outlineVariant: pal.fg.withValues(alpha: 0.18),
+          );
+          final tab = _settingsTab;
+          return Theme(
+            data: app.copyWith(colorScheme: scheme, sliderTheme: appSliderTheme(scheme), switchTheme: appSwitchTheme(scheme), dividerTheme: app.dividerTheme.copyWith(color: scheme.outline),
+              // 字体标签的底色：主题里的颜色会盖过标签自己的，所以选中、没选中都在这里给
+              canvasColor: pal.bg,
+              chipTheme: app.chipTheme.copyWith(color: WidgetStateProperty.resolveWith((st) => st.contains(WidgetState.selected) ? Color.alphaBlend(scheme.primary.withValues(alpha: 0.14), pal.bg) : pal.bg)),
+            ),
+            child: Material(
+            color: pal.bg,
+            shape: Border(top: BorderSide(color: scheme.outline)),
+            child: SafeArea(
+            // 半屏高：上面一半留给正文
+            child: SizedBox(
+              height: MediaQuery.sizeOf(context).height * 0.46,
+              child: Column(
+                children: [
+                  XSegments<int>(value: tab, options: const {0: '显示', 1: '排版', 2: '翻页'}, onChanged: (v) => setSheet(() => _settingsTab = v)),
+                  Expanded(
             child: SingleChildScrollView(
+              key: ValueKey(tab), // 换分页时回到顶上
               padding: const EdgeInsets.only(bottom: 16),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const XGroupTitle('显示'),
+                  if (tab == 0) ...[
                   // 一排背景色样：色块里写个"文"字，选中的外面一圈
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 10, 20, 4),
+                    padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -1497,7 +1547,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                   padding: const EdgeInsets.all(2.5),
                                   decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: prefs.theme == i ? scheme.primary : Colors.transparent, width: 2)),
                                   child: Builder(builder: (context) {
-                                    final pal = _paletteOf(prefs.copyWith(theme: i), scheme);
+                                    final pal = _paletteOf(prefs.copyWith(theme: i), app.colorScheme);
                                     return DecoratedBox(
                                       decoration: BoxDecoration(shape: BoxShape.circle, color: pal.bg, border: Border.all(color: scheme.outline)),
                                       child: Center(child: Text('文', style: TextStyle(fontSize: 14, color: i == 5 ? _skyAccent.$1 : pal.fg))),
@@ -1521,8 +1571,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                   XSlider(title: '暖色滤镜', label: prefs.warm == 0 ? '关闭' : '${(prefs.warm * 200).round()}%', slider: Slider(min: 0, max: 0.5, divisions: 10, value: prefs.warm, onChanged: (v) => set(prefs.copyWith(warm: v)))),
                   XSwitch(title: '灰度', value: prefs.grayscale, onChanged: (v) => set(prefs.copyWith(grayscale: v))),
                   XSwitch(title: '反色', value: prefs.invert, onChanged: (v) => set(prefs.copyWith(invert: v))),
-                  const XDivider(),
-                  const XGroupTitle('排版'),
+                  ],
+                  if (tab == 1) ...[
                   _LayoutSlider(title: '字号', label: (v) => '${v.round()}', min: 14, max: 32, divisions: 18, value: prefs.fontSize, onCommit: (v) => set(prefs.copyWith(fontSize: v))),
                   _LayoutSlider(title: '行距', label: (v) => v.toStringAsFixed(1), min: 1.3, max: 2.4, divisions: 11, value: prefs.lineHeight, onCommit: (v) => set(prefs.copyWith(lineHeight: v))),
                   _LayoutSlider(title: '页边距', label: (v) => '${v.round()}', min: 8, max: 48, divisions: 20, value: prefs.margin, onCommit: (v) => set(prefs.copyWith(margin: v))),
@@ -1545,8 +1595,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                         ),
                     ],
                   ),
-                  const XDivider(),
-                  const XGroupTitle('翻页'),
+                  ],
+                  if (tab == 2) ...[
                   XSegments<int>(value: prefs.mode, options: const {0: '滚动', 1: '滑动', 2: '仿真', 3: '覆盖'}, onChanged: (v) => set(prefs.copyWith(mode: v))),
                   // 点击区域、音量键、预加载这些在设置页
                   XTile(
@@ -1563,12 +1613,19 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                       _syncVolumeKeys(ref.read(readerPrefsProvider).volumeKeys);
                     },
                   ),
+                  ],
                 ],
               ),
             ),
+                  ),
+                ],
+              ),
+            ),
+            ),
+            ),
           );
         },
-      ),
+      )),
     );
   }
 }

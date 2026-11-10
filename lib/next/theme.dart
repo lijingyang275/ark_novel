@@ -69,6 +69,20 @@ const appPalettes = [
       bgLight: Color(0xFFF6F0E5), cardLight: Color(0xFFDDEBE6), lineLight: Color(0xFFDCD0BD), bgDark: Color(0xFF13222A), cardDark: Color(0xFF1C313B), lineDark: Color(0xFF2E4752), secondary: Color(0xFFD9A03F), scene: true),
 ];
 
+/// 滑块没拖到的那段轨道：默认色在浅底上看不见，用文字色的淡影。阅读设置面板换了底色，也用这两个。
+SliderThemeData appSliderTheme(ColorScheme s) => SliderThemeData(inactiveTrackColor: s.onSurface.withValues(alpha: 0.14));
+
+/// 关着的开关：默认的边框和圆点跟着分隔线的颜色，太淡，看不出是开关。
+SwitchThemeData appSwitchTheme(ColorScheme s) {
+  WidgetStateProperty<Color?> off(Color c) => WidgetStateProperty.resolveWith((st) => st.contains(WidgetState.selected) || st.contains(WidgetState.disabled) ? null : c);
+  return SwitchThemeData(
+    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap, // 设置里整行都能点，不用开关自己撑高一圈
+    thumbColor: off(s.onSurfaceVariant.withValues(alpha: 0.8)),
+    trackColor: off(s.onSurface.withValues(alpha: 0.06)),
+    trackOutlineColor: off(s.onSurfaceVariant.withValues(alpha: 0.38)),
+  );
+}
+
 /// [pureBlack]：深色时底色用纯黑（AMOLED 屏黑色像素不发光），卡片和边框也压到接近黑。
 ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPalette('陶土', AppColors.terracotta, AppColors.terracottaLight, bgLight: AppColors.cream, cardLight: AppColors.creamDeep, lineLight: AppColors.line, bgDark: AppColors.night, cardDark: AppColors.nightRaised, lineDark: AppColors.lineDark), bool pureBlack = false]) {
   final dark = brightness == Brightness.dark;
@@ -164,6 +178,8 @@ ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPa
       elevation: 0,
     ),
     dividerTheme: DividerThemeData(color: scheme.outline, thickness: 1, space: 1),
+    sliderTheme: appSliderTheme(scheme),
+    switchTheme: appSwitchTheme(scheme),
     popupMenuTheme: const PopupMenuThemeData(position: PopupMenuPosition.under),
     snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
     dialogTheme: palette.scene ? DialogThemeData(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))) : null,

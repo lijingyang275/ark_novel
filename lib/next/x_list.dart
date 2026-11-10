@@ -82,7 +82,7 @@ class XGroupTitle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(20, 14, 20, 2),
+    padding: const EdgeInsets.fromLTRB(20, 14, 20, 6),
     child: Text(text, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Theme.of(context).colorScheme.onSurface)),
   );
 }
@@ -132,7 +132,10 @@ class XTile extends StatelessWidget {
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-        child: Row(
+        // 带开关、带箭头、只有文字的行一样高
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 32),
+          child: Row(
           children: [
             if (leading != null) ...[leading!, const SizedBox(width: 14)],
             Expanded(
@@ -159,6 +162,7 @@ class XTile extends StatelessWidget {
             ),
             if (trailing != null) ...[const SizedBox(width: 12), trailing!],
           ],
+        ),
         ),
       ),
     );
