@@ -9,6 +9,8 @@ import 'package:ark_novel/next/history.dart';
 import 'package:ark_novel/next/library.dart';
 import 'package:ark_novel/next/rules.dart';
 import 'package:ark_novel/next/stats.dart';
+import 'package:ark_novel/next/settings.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ark_novel/next/sync.dart';
 import 'package:ark_novel/next/volumes.dart';
 
@@ -471,6 +473,92 @@ void main() {
     await box.put('history2', [h('4', now - 1000)]);
     await Sync.merge(remote(extra: {'tomb': {'h:4': now}}));
     expect(box.get('history2'), isEmpty);
+  });
+
+  test('新设备也按固定类型和范围校验阅读、书架设置，不接收未知键', () async {
+    await AppPrefs.write(P.syncReaderPrefs, true);
+    await AppPrefs.write(P.syncShelfPrefs, true);
+    await Sync.merge(remote(extra: {
+      'readerPrefs': {'ts': 10, 'r': {'r.fontSize': 20, 'r.theme': 'bad', 'r.mode': 100, 'r.prefetch': -1, 'r.dim': 2, 'r.dual': false, 'r.unknown': 'x'}},
+      'shelfPrefs': {'ts': 10, 'p': {'p.${P.hiddenTabs}': 'bad'}, 'shelfOpts': {'sort': 'bad', 'reverse': 'bad', 'display': 99, 'unread': 1}},
+    }));
+    expect(box.get('r.fontSize'), 20.0);
+    for (final key in ['r.theme', 'r.mode', 'r.prefetch', 'r.dim', 'r.unknown', 'p.${P.hiddenTabs}']) {
+      expect(box.get(key), isNull, reason: key);
+    }
+    expect(box.get('r.dual'), false);
+    expect(box.get('shelfOpts'), {'unread': 1});
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    expect(container.read(readerPrefsProvider).theme, 5);
+  });
+
+  test('统计格式不对或快照身份无效：整份拒绝，不持久化错误或改动其他数据', () async {
+    await box.put('progress:1', ['local', 0, 1]);
+    for (final stats in [
+      {'chapters': 'bad'}, {'chapters': -1}, {'day': {'2026-01-01': 'bad'}}, {'meta': {'1': {'t': 7}}},
+      {'days': {'1': [7]}}, {'ch': {'1': {'c': {'2026-01-01': 'bad'}}}},
+    ]) {
+      await expectLater(Sync.merge(remote(extra: {'progress': {'1': ['remote', 0, 2]}, 'stats': stats})), throwsFormatException);
+      expect(box.get('progress:1'), ['local', 0, 1]);
+      expect(box.get('sync:stats:other'), isNull);
+    }
+    for (final extra in [
+      {'v': 4}, {'device': '../bad'}, {'device': ''}, {'at': 'bad'}, {'v': 3},
+    ]) {
+      await expectLater(Sync.merge(remote(extra: extra)), throwsFormatException);
+    }
+  });
+
+  test('本机超过 90 天没同步：联网和上传之前停止，旧数据不改成新快照', () async {
+    final server = await HttpServer.bind('127.0.0.1', 0);
+    addTearDown(() => server.close(force: true));
+    final requests = <String>[];
+    server.listen((req) async {
+      requests.add(req.method);
+      await req.response.close();
+    });
+    await Sync.save(url: 'http://127.0.0.1:${server.port}/dav/', user: 'test', pass: 'test', folder: 'ArkNovel');
+    final old = DateTime.now().subtract(const Duration(days: 100)).millisecondsSinceEpoch;
+    await box.putAll({'sync:last': old, 'lib:books': {'1': const LibBook(aid: '1', title: 'old', img: '', added: 1).toMap()}});
+    await expectLater(Sync.run(), throwsA(isA<LocalSyncExpiredException>()));
+    expect(requests, isEmpty);
+    expect(Sync.lastSync, old);
+    expect((box.get('lib:books') as Map).keys, ['1']);
+  });
+
+  test('本机同步时间缺失或换回旧目录：检查云端本机文件，过期时不覆盖；新目录仍可同步', () async {
+    final old = DateTime.now().subtract(const Duration(days: 100)).millisecondsSinceEpoch;
+    final requests = <String>[];
+    final server = await HttpServer.bind('127.0.0.1', 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((req) async {
+      requests.add(req.method);
+      await req.drain<void>();
+      if (req.method == 'PROPFIND') {
+        req.response.statusCode = 207;
+        req.response.write('<d:multistatus xmlns:d="DAV:"></d:multistatus>');
+      } else if (req.method == 'GET' && req.uri.path.contains('/Old/')) {
+        req.response.write(jsonEncode(remote(extra: {'device': Sync.deviceId, 'at': old})));
+      } else if (req.method == 'GET') {
+        req.response.statusCode = 404;
+      } else {
+        req.response.statusCode = 201;
+      }
+      await req.response.close();
+    });
+    await Sync.save(url: 'http://127.0.0.1:${server.port}/dav/', user: 'test', pass: 'test', folder: 'Old');
+    await expectLater(Sync.run(), throwsA(isA<LocalSyncExpiredException>()));
+    expect(requests, isNot(contains('PUT')));
+    expect(Sync.lastSync, 0);
+    await box.putAll({'sync:last': old, 'sync:avatarUp': 7});
+    await Sync.save(url: 'http://127.0.0.1:${server.port}/dav/', user: 'test', pass: 'changed', folder: 'Old');
+    expect(Sync.lastSync, old); // 仅改密码不能绕过过期检查
+    await Sync.save(url: 'http://127.0.0.1:${server.port}/dav/', user: 'test', pass: 'test', folder: 'New');
+    expect(Sync.lastSync, 0);
+    expect(box.get('sync:avatarUp'), isNull);
+    expect(await Sync.run(), 0);
+    expect(requests, contains('PUT'));
   });
 
   test('超过 90 天没更新的快照不合并，免得删掉的东西复活', () async {

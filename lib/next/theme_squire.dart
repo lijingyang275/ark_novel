@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'text.dart';
 
 /// 「遗迹·晴空」主题的美术：全部用代码画的扁平插画（天空、两层云、科林斯石柱、断墙、芥末色三角旗），
 /// 浅色是晴天，深色是黄昏（星星、月牙、石柱压暗）。另外有一套同风格的底部导航图标和旗形角标。

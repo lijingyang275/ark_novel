@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.1.2](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.1.1...ark_novel-v1.1.2) (2026-11-11)
+
+
+### Bug Fixes
+
+* 换号后首次同步保留新账号的书架操作，繁体界面开关恢复同步 ([8c3d048](https://github.com/chenshi221/ark_novel/commit/8c3d04863562778546e5811bb839d662e3532760))
+* 换号后首次同步保留新账号的书架操作，繁体界面开关恢复同步 ([3b4d7b1](https://github.com/chenshi221/ark_novel/commit/3b4d7b14e358fe7a04d1a169f7eb0011223af9f4))
+
+## [1.1.1](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.1.0...ark_novel-v1.1.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* 修复同步、账号切换和并发写入的数据安全问题 ([bad2466](https://github.com/chenshi221/ark_novel/commit/bad24662971133bc5a86deabe9040f985792e228))
+* 修复同步、账号切换和并发写入的数据安全问题 ([2c77fad](https://github.com/chenshi221/ark_novel/commit/2c77fad62e75f88c835cb8e7680247471e56a434))
+
+## [1.1.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.0.5...ark_novel-v1.1.0) (2026-11-11)
+
+
+### Features
+
+* 繁体中文（台湾写法）：正文和界面分别切换 ([3685dfe](https://github.com/chenshi221/ark_novel/commit/3685dfe163827368ac8627dfebe38fd41b1a39cf))
+* 繁体中文（台湾写法）：正文和界面分别切换 ([1560231](https://github.com/chenshi221/ark_novel/commit/1560231478789a6324d313d8f870d7e76ef68e38))
+
 ## [1.0.5](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.0.4...ark_novel-v1.0.5) (2026-11-10)
 
 

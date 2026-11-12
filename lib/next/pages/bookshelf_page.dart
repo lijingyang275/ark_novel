@@ -1,7 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show ValueListenable, listEquals;
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -31,6 +31,7 @@ import '../x_list.dart';
 import 'categories_page.dart';
 import 'cover_picker_page.dart';
 import 'volumes_page.dart';
+import '../text.dart';
 
 enum ShelfSort {
   added('加入时间'),
@@ -480,7 +481,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
       title: _searching
           ? TextField(
               autofocus: true,
-              decoration: const InputDecoration(hintText: '在书架中搜索', border: InputBorder.none, enabledBorder: InputBorder.none, focusedBorder: InputBorder.none, filled: false),
+              decoration: const InputDecoration(hint: Text('在书架中搜索', maxLines: 1, overflow: TextOverflow.ellipsis), border: InputBorder.none, enabledBorder: InputBorder.none, focusedBorder: InputBorder.none, filled: false),
               onChanged: ref.read(shelfQueryProvider.notifier).set,
             )
           : Text('书架 · ${lib.books.length}'),
@@ -492,9 +493,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
             if (!_searching) ref.read(shelfQueryProvider.notifier).set('');
           },
         ),
-        IconButton(tooltip: '筛选、排序、显示', icon: Icon(Icons.filter_list, color: o.filtering ? Theme.of(context).colorScheme.primary : null), onPressed: _showOptions),
+        IconButton(tooltip: hz(context, '筛选、排序、显示'), icon: Icon(Icons.filter_list, color: o.filtering ? Theme.of(context).colorScheme.primary : null), onPressed: _showOptions),
         PopupMenuButton<String>(
-          tooltip: '更多',
+          tooltip: hz(context, '更多'),
           onSelected: (v) {
             if (v == 'random') {
               _openRandom();
@@ -643,7 +644,7 @@ class _ResumeBar extends ConsumerWidget {
                     ),
                     const SizedBox(width: 12),
                     IconButton.filled(
-                      tooltip: '继续阅读',
+                      tooltip: hz(context, '继续阅读'),
                       style: IconButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black87, fixedSize: const Size(44, 44)),
                       icon: const Icon(Icons.play_arrow_rounded, size: 26),
                       onPressed: open,
@@ -655,7 +656,7 @@ class _ResumeBar extends ConsumerWidget {
                 top: 4,
                 right: 4,
                 child: IconButton(
-                  tooltip: '关闭',
+                  tooltip: hz(context, '关闭'),
                   visualDensity: VisualDensity.compact,
                   iconSize: 16,
                   color: Colors.white60,
@@ -833,8 +834,8 @@ class _OptionsSheetState extends ConsumerState<_OptionsSheet> with SingleTickerP
               tabs: [
                 // 有筛选时标签旁边一个小圆点，换到别的页也知道筛着
                 Tab(child: Badge(smallSize: 6, isLabelVisible: o.filtering, backgroundColor: scheme.primary, offset: const Offset(8, -2), child: const Text('筛选'))),
-                const Tab(text: '排序'),
-                const Tab(text: '显示'),
+                const Tab(child: Text('排序')),
+                const Tab(child: Text('显示')),
               ],
             ),
             Expanded(child: TabBarView(controller: _tabs, children: [_filters(o), _sorts(o), _display(o)])),
@@ -949,7 +950,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
                 maxLines: 4,
                 keyboardType: TextInputType.text, // 多行显示，但回车是确定不是换行
                 textInputAction: TextInputAction.done,
-                decoration: InputDecoration(hintText: b.title),
+                decoration: InputDecoration(hint: Text(b.title, maxLines: 1, overflow: TextOverflow.ellipsis)),
                 onSubmitted: (v) => Navigator.pop(context, v),
               ),
             ],
@@ -1088,13 +1089,13 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
                     IconButton(icon: const Icon(Icons.close), onPressed: () => setState(_selected.clear)),
                     Expanded(child: Text('${_selected.length} 本', maxLines: 1, softWrap: false, overflow: TextOverflow.fade)),
                     // 和 Mihon 一样只放图标（长按看名字），文字按钮一行放不下
-                    IconButton(tooltip: '全选', icon: const Icon(Icons.select_all), onPressed: () => setState(() => _selected.addAll(books.map((b) => b.aid)))),
-                    if (_selected.length == 1) IconButton(tooltip: '改名', icon: const Icon(Icons.drive_file_rename_outline), onPressed: _rename),
-                    if (_selected.length == 1) IconButton(tooltip: '封面', icon: const Icon(Icons.image_outlined), onPressed: _pickCover),
-                    IconButton(tooltip: '分类', icon: const Icon(Icons.label_outline), onPressed: _setCats),
-                    IconButton(tooltip: '移出书架', icon: const Icon(Icons.delete_outline), onPressed: _remove),
+                    IconButton(tooltip: hz(context, '全选'), icon: const Icon(Icons.select_all), onPressed: () => setState(() => _selected.addAll(books.map((b) => b.aid)))),
+                    if (_selected.length == 1) IconButton(tooltip: hz(context, '改名'), icon: const Icon(Icons.drive_file_rename_outline), onPressed: _rename),
+                    if (_selected.length == 1) IconButton(tooltip: hz(context, '封面'), icon: const Icon(Icons.image_outlined), onPressed: _pickCover),
+                    IconButton(tooltip: hz(context, '分类'), icon: const Icon(Icons.label_outline), onPressed: _setCats),
+                    IconButton(tooltip: hz(context, '移出书架'), icon: const Icon(Icons.delete_outline), onPressed: _remove),
                     PopupMenuButton<VoidCallback>(
-                      tooltip: '更多',
+                      tooltip: hz(context, '更多'),
                       onSelected: (f) => f(),
                       itemBuilder: (_) => [
                         PopupMenuItem(value: _download, child: const ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.download_outlined), title: Text('下载'))),
@@ -1131,7 +1132,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     final p = ReadingProgress.of(b.aid);
     if (p == null || _selected.isNotEmpty || !AppPrefs.read(P.resumeButton, true)) return null;
     return IconButton.filledTonal(
-      tooltip: '继续阅读',
+      tooltip: hz(context, '继续阅读'),
       visualDensity: VisualDensity.compact,
       iconSize: 18,
       icon: const Icon(Icons.play_arrow),

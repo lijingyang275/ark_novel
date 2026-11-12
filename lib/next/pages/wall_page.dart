@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -7,6 +7,7 @@ import '../router.dart';
 import '../stats.dart';
 import '../volumes.dart';
 import '../widgets.dart';
+import '../text.dart';
 
 /// 书籍墙：读完的每一卷（参考豆瓣的年度记录），按年份分组，每年顶部是数量和每月柱状图。点一卷进它的阅读报告。
 class WallPage extends ConsumerWidget {

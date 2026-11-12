@@ -74,10 +74,17 @@ class Api {
 
   /// 提交表单；返回"出现错误！"页（太频繁、没权限等）当失败处理，让界面保留用户输入。
   Future<void> _submit(String url, Object data) async {
-    final html = await _client.postForm(url, data);
+    _checkAction(await _client.postForm(url, data));
+  }
+
+  void _checkAction(String html) {
+    final doc = parse(html);
+    if (doc.querySelector('input[name="username"]') != null && doc.querySelector('input[name="password"]') != null) {
+      throw const Wenku8UnexpectedPageException('登录已失效，请重新登录后再提交');
+    }
     if (Wenku8Parser.isErrorPage(html)) {
-      final why = parse(html).getElementsByClassName('blockcontent').firstOrNull?.text.trim();
-      throw Wenku8UnexpectedPageException(why == null || why.isEmpty ? '提交失败，请稍后再试' : why);
+      final why = doc.getElementsByClassName('blockcontent').firstOrNull?.text.trim();
+      throw Wenku8ActionRejectedException(why == null || why.isEmpty ? '提交失败，请稍后再试' : why);
     }
   }
 
@@ -163,10 +170,10 @@ class Api {
 
   /// 加入默认书架。wenku8 返回"出现错误！"页时说明失败（例如书架满了）。
   Future<void> addToBookshelf(String aid) async {
-    if (Wenku8Parser.isErrorPage(await _client.getPage(_urls.addToBookshelf(aid)))) throw const Wenku8UnexpectedPageException('加入书架失败，书架可能已满');
+    _checkAction(await _client.getPage(_urls.addToBookshelf(aid)));
   }
 
-  Future<void> removeFromBookshelf(String bid) => _client.getPage(_urls.removeFromBookshelf(bid));
+  Future<void> removeFromBookshelf(String bid) async => _checkAction(await _client.getPage(_urls.removeFromBookshelf(bid)));
 
   Future<void> removeBooks(List<String> bids, int classId) =>
       _submit(_urls.bookshelfAction(), {'checkid[]': bids, 'classlist': classId, 'checkall': 'checkall', 'newclassid': -1, 'classid': classId});

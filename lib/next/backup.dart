@@ -39,6 +39,7 @@ class Backup {
     'sync:passMoved',
     'lib:imported',
     'lib:ops',
+    'lib:opsFor',
     'imgShrunk2',
     'imgHq',
     'coverSkipDropped',

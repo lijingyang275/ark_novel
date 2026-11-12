@@ -1,9 +1,10 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../data.dart';
 import '../widgets.dart';
+import '../text.dart';
 
 /// 搜索：按书名 / 作者，记住最近 20 条搜索词。
 class SearchPage extends ConsumerStatefulWidget {
@@ -57,7 +58,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
           controller: _controller,
           autofocus: widget.author == null,
           textInputAction: TextInputAction.search,
-          decoration: InputDecoration(hintText: _byAuthor ? '搜索作者' : '搜索书名', border: InputBorder.none, enabledBorder: InputBorder.none, focusedBorder: InputBorder.none, filled: false),
+          decoration: InputDecoration(hint: Text(_byAuthor ? '搜索作者' : '搜索书名', maxLines: 1, overflow: TextOverflow.ellipsis), border: InputBorder.none, enabledBorder: InputBorder.none, focusedBorder: InputBorder.none, filled: false),
           onSubmitted: _search,
         ),
         actions: [
@@ -95,7 +96,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                         ListTile(
                           leading: const Icon(Icons.history),
                           title: Text(h),
-                          trailing: IconButton(tooltip: '删除', icon: const Icon(Icons.close), onPressed: () => setState(() => _box.put('searchHistory', _history.where((e) => e != h).toList()))),
+                          trailing: IconButton(tooltip: hz(context, '删除'), icon: const Icon(Icons.close), onPressed: () => setState(() => _box.put('searchHistory', _history.where((e) => e != h).toList()))),
                           onTap: () => _search(h),
                         ),
                     ],

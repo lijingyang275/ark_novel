@@ -13,10 +13,12 @@ class _FakeAdapter implements HttpClientAdapter {
 
   final Map<String, ResponseBody Function()> routes;
   final List<Uri> requested = [];
+  final List<String> methods = [];
 
   @override
   Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
     requested.add(options.uri);
+    methods.add(options.method);
     return routes[options.uri.path]!();
   }
 
@@ -51,6 +53,38 @@ void main() {
     expect(html, '登录');
     expect(adapter.requested.map((u) => u.path), ['/a.php', '/b.php', '/c.php', '/login.php']);
     expect(adapter.requested.first.query, '&charset=gbk');
+  });
+
+  test('POST 跳到登录页（包括间接跳转）不能报告提交成功，也不重发请求体', () async {
+    final adapter = _FakeAdapter({
+      '/submit.php': () => _redirect('/result.php'),
+      '/result.php': () => _redirect('/login.php'),
+    });
+    await expectLater(_client(adapter).postForm('https://www.wenku8.net/submit.php', 'body=test'), throwsA(isA<Wenku8UnexpectedPageException>()));
+    expect(adapter.methods, ['POST', 'GET']);
+    expect(adapter.requested.map((u) => u.path), ['/submit.php', '/result.php']);
+  });
+
+  test('POST 成功后用 GET 读取 303 结果页，正常返回解码结果', () async {
+    final adapter = _FakeAdapter({
+      '/submit.php': () => ResponseBody.fromBytes(const [], 303, headers: {'location': ['/result.php']}),
+      '/result.php': () => _page([0xB5, 0xC7, 0xC2, 0xBC]),
+    });
+    expect(await _client(adapter).postForm('https://www.wenku8.net/submit.php', 'body=test'), '登录');
+    expect(adapter.methods, ['POST', 'GET']);
+  });
+
+  test('POST 的重定向循环、缺少目标、307/308 均按结果未确认处理', () async {
+    for (final status in [302, 307, 308]) {
+      final adapter = _FakeAdapter({
+        '/submit.php': () => ResponseBody.fromBytes(const [], status, headers: status == 302 ? {} : {'location': ['/result.php']}),
+      });
+      await expectLater(_client(adapter).postForm('https://www.wenku8.net/submit.php', 'body=test'), throwsA(isA<Wenku8UnexpectedPageException>()));
+      expect(adapter.methods, ['POST']);
+    }
+    final loop = _FakeAdapter({'/submit.php': () => _redirect('/submit.php')});
+    await expectLater(_client(loop).postForm('https://www.wenku8.net/submit.php', 'body=test'), throwsA(isA<Wenku8UnexpectedPageException>()));
+    expect(loop.methods, ['POST', 'GET', 'GET', 'GET', 'GET', 'GET']);
   });
 
   test('charsetParam: false 时 GBK 不带 charset 参数、繁体仍带；referer 会发出去', () async {

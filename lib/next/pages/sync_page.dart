@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
@@ -12,6 +12,7 @@ import '../app_prefs.dart';
 import '../sync.dart';
 import '../widgets.dart';
 import '../x_list.dart';
+import '../text.dart';
 
 /// 同步设置：坚果云（或其他 WebDAV）。应用密码在坚果云网页端"账户信息 → 安全选项 → 第三方应用管理"里生成。
 class SyncPage extends ConsumerStatefulWidget {
@@ -130,8 +131,8 @@ class _SyncPageState extends ConsumerState<SyncPage> {
         autocorrect: false,
         keyboardType: type,
         decoration: InputDecoration(
-          labelText: label,
-          helperText: helper,
+          label: Text(label),
+          helper: helper == null ? null : Text(helper),
           helperMaxLines: 2,
           prefixIcon: Icon(icon, size: 20),
           suffixIcon: secret
@@ -139,7 +140,7 @@ class _SyncPageState extends ConsumerState<SyncPage> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     IconButton(
-                      tooltip: '粘贴',
+                      tooltip: hz(context, '粘贴'),
                       icon: const Icon(Icons.content_paste_outlined, size: 19),
                       onPressed: () async {
                         final data = await Clipboard.getData(Clipboard.kTextPlain);
@@ -151,7 +152,7 @@ class _SyncPageState extends ConsumerState<SyncPage> {
                       },
                     ),
                     IconButton(
-                      tooltip: _showPass ? '隐藏密码' : '显示密码',
+                      tooltip: hz(context, _showPass ? '隐藏密码' : '显示密码'),
                       icon: Icon(_showPass ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 19),
                       onPressed: () => setState(() => _showPass = !_showPass),
                     ),

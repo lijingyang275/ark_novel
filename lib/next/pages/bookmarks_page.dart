@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -12,6 +12,7 @@ import '../stats.dart';
 import '../volumes.dart';
 import '../widgets.dart';
 import 'updates_page.dart';
+import '../text.dart';
 
 /// 所有书签，按书分组：每本书一张卡片，顶上是封面和书名，下面每条书签是章节、第几页、那一段原文和时间。
 /// 点一下回到书签那一页，左滑删除。

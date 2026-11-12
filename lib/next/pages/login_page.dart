@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -7,6 +7,7 @@ import '../env.dart';
 import '../router.dart';
 import '../session.dart';
 import 'login_webview_page.dart';
+import '../text.dart';
 
 /// 登录页。游客在需要账号时按需打开，登录成功后自动返回上一页。
 ///
@@ -127,7 +128,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       TextField(
         controller: _username,
         enabled: !_busy,
-        decoration: const InputDecoration(labelText: '用户名'),
+        decoration: const InputDecoration(label: Text('用户名')),
         textInputAction: TextInputAction.next,
         autofillHints: const [AutofillHints.username],
       ),
@@ -136,7 +137,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
         controller: _password,
         enabled: !_busy,
         obscureText: true,
-        decoration: const InputDecoration(labelText: '密码'),
+        decoration: const InputDecoration(label: Text('密码')),
         autofillHints: const [AutofillHints.password],
         onSubmitted: (_) => _submit(),
       ),
@@ -175,7 +176,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
         TextField(
           controller: _proxy,
           enabled: !_busy,
-          decoration: const InputDecoration(labelText: 'HTTP 代理（可选）', hintText: '127.0.0.1:7890'),
+          decoration: const InputDecoration(label: Text('HTTP 代理（可选）'), hint: Text('127.0.0.1:7890', maxLines: 1, overflow: TextOverflow.ellipsis)),
         ),
         const SizedBox(height: 4),
         Text('连不上时填写。App 不会读取系统代理，需要在这里填。', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),

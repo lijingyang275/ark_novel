@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../color_picker.dart';
@@ -6,6 +6,7 @@ import '../reader/reader_page.dart';
 import '../rules.dart';
 import '../widgets.dart';
 import '../x_list.dart';
+import '../text.dart';
 
 /// 正则规则管理：替换（去广告、统一用字）和高亮（给人物名染色、点一下写备注）。改动后已打开的章节会重新生成。
 class RulesPage extends ConsumerStatefulWidget {
@@ -68,7 +69,7 @@ class _RulesPageState extends ConsumerState<RulesPage> {
     final replaces = [for (final (i, r) in _rules.indexed) if (r.kind == RuleKind.replace) (i, r)];
     final marks = [for (final (i, r) in _rules.indexed) if (r.kind != RuleKind.replace) (i, r)];
     return Scaffold(
-      appBar: AppBar(title: const Text('正则规则'), actions: [IconButton(tooltip: '添加规则', icon: const Icon(Icons.add), onPressed: () => _edit(null))]),
+      appBar: AppBar(title: const Text('正则规则'), actions: [IconButton(tooltip: hz(context, '添加规则'), icon: const Icon(Icons.add), onPressed: () => _edit(null))]),
       body: _rules.isEmpty
           ? XEmpty(icon: Icons.find_replace, title: '还没有规则', detail: '替换：去除章节中的广告、统一用字\n着色 / 高亮：标出人名等关键词，阅读时点按可添加备注', action: '添加规则', onAction: () => _edit(null))
           : contentWidth(ListView(
@@ -106,13 +107,13 @@ Future<ReplaceRule?> showRuleDialog(BuildContext context, {ReplaceRule? initial}
                 onSelectionChanged: (s) => setLocal(() => kind = s.first),
               ),
               const SizedBox(height: 12),
-              TextField(controller: pattern, decoration: InputDecoration(labelText: '匹配内容（正则表达式）', errorText: error)),
+              TextField(controller: pattern, decoration: InputDecoration(label: Text('匹配内容（正则表达式）'), errorText: error)),
               const SizedBox(height: 12),
               if (kind == RuleKind.replace)
-                TextField(controller: replacement, decoration: const InputDecoration(labelText: '替换为', helperText: r'留空则删除匹配内容；用 $1 引用分组'))
+                TextField(controller: replacement, decoration: const InputDecoration(label: Text('替换为'), helper: Text(r'留空则删除匹配内容；用 $1 引用分组')))
               else ...[
                 if (kind == RuleKind.highlight) ...[
-                  TextField(controller: name, decoration: const InputDecoration(labelText: '名称（可选）', helperText: '例如人物名，备注按名称归类')),
+                  TextField(controller: name, decoration: const InputDecoration(label: Text('名称（可选）'), helper: Text('例如人物名，备注按名称归类'))),
                   const SizedBox(height: 12),
                 ],
                 ColorPickerField(color: color, highlight: kind == RuleKind.highlight, sample: name.text.isNotEmpty ? name.text : '示例', onChanged: (c) => setLocal(() => color = c)),

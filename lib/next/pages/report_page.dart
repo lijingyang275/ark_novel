@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'dart:ui' as ui;
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
@@ -15,6 +15,7 @@ import '../theme.dart';
 import '../volumes.dart';
 import '../widgets.dart';
 import 'cover_picker_page.dart';
+import '../text.dart';
 
 String _date(String key) => key.replaceAll('-', '.');
 
@@ -192,8 +193,8 @@ class _ReportPageState extends ConsumerState<ReportPage> {
         backgroundColor: Colors.transparent,
         foregroundColor: Colors.white,
         actions: [
-          if (v != null) IconButton(tooltip: '换这一卷的封面', icon: const Icon(Icons.image_outlined), onPressed: () => pickVolumeCover(context, aid, v)),
-          IconButton(tooltip: '保存为图片并分享', icon: const Icon(Icons.ios_share), onPressed: () => _share(info.title)),
+          if (v != null) IconButton(tooltip: hz(context, '换这一卷的封面'), icon: const Icon(Icons.image_outlined), onPressed: () => pickVolumeCover(context, aid, v)),
+          IconButton(tooltip: hz(context, '保存为图片并分享'), icon: const Icon(Icons.ios_share), onPressed: () => _share(info.title)),
         ],
       ),
       extendBodyBehindAppBar: true,

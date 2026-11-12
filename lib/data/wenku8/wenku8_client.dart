@@ -113,8 +113,9 @@ class Wenku8Client {
       data: data,
       options: Options(contentType: Headers.formUrlEncodedContentType),
     );
-    _checkStatus(response);
-    return Wenku8Charset.decode(response.data as Uint8List, currentCharset);
+    // 成功提交常用 302/303 跳到结果页；只用 GET 确认，不重发 POST。跳到登录页不能冒充成功。
+    final bytes = await _followRedirect(response, submitting: true);
+    return Wenku8Charset.decode(bytes, currentCharset);
   }
 
   /// 4xx/5xx 不是页面，抛出让调用方走"网络问题"分支（403 已由 Cloudflare 拦截器处理）。
@@ -127,14 +128,21 @@ class Wenku8Client {
   /// 好让解析层拿到最终页面并判断出"未登录"等情况。
   /// - location 可能是相对路径（`userdetail.php`、`/login.php`）或绝对地址，基于当前请求地址解析
   /// - 最多跟随 [maxRedirects] 次，防止重定向死循环
-  Future<Uint8List> _followRedirect(Response response, {int maxRedirects = 5}) async {
+  Future<Uint8List> _followRedirect(Response response, {int maxRedirects = 5, bool submitting = false}) async {
     var current = response;
     for (var i = 0; i < maxRedirects; i++) {
       final status = current.statusCode;
       if (status == null || status < 300 || status >= 400) break;
       final location = current.headers.value('location');
       if (location == null || location.isEmpty) break;
-      current = await dio.getUri(current.requestOptions.uri.resolve(location));
+      final target = current.requestOptions.uri.resolve(location);
+      if (submitting && target.path.toLowerCase().endsWith('/login.php')) throw const Wenku8UnexpectedPageException('登录已失效，请重新登录后再提交');
+      // 307/308 要保留 POST 方法和请求体，不能改成 GET，也不自动重发可能已有副作用的请求。
+      if (submitting && (status == 307 || status == 308)) throw const Wenku8UnexpectedPageException('提交请求被重定向，结果未确认，请刷新后检查');
+      current = await dio.getUri(target);
+    }
+    if (submitting && (current.statusCode ?? 0) >= 300 && (current.statusCode ?? 0) < 400) {
+      throw const Wenku8UnexpectedPageException('提交结果未确认，请刷新后检查');
     }
     _checkStatus(current);
     return current.data as Uint8List;

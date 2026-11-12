@@ -1,6 +1,6 @@
 import 'dart:io';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -11,6 +11,7 @@ import '../image_cache.dart';
 import '../router.dart';
 import '../stats.dart';
 import '../x_list.dart';
+import '../text.dart';
 
 /// 存储空间：各部分占多少、每本书的章节缓存多大；可以一键清掉读过的章节。网页预览不进这页。
 class StoragePage extends ConsumerStatefulWidget {
@@ -91,7 +92,7 @@ class _StoragePageState extends ConsumerState<StoragePage> {
                 subtitle: '${ChapterCache.count(aid)} 章 · ${ChapterCache.sizeLabel(aid)}',
                 onTap: () => context.push(Routes.cacheBook(aid)).then((_) => mounted ? _refresh() : null),
                 trailing: IconButton(
-                  tooltip: '删除缓存',
+                  tooltip: hz(context, '删除缓存'),
                   icon: Icon(Icons.delete_outline, color: scheme.onSurfaceVariant),
                   onPressed: () async {
                     if (!await _ask('删除这本书的缓存？', '再读时重新下载。')) return;

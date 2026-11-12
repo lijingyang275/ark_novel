@@ -51,6 +51,10 @@ class ChapterCache {
     _index = await Hive.openBox('chapter_index');
     PageStore._box = await Hive.openLazyBox('pages');
     PageStore._stamp = _index;
+    PageStore._lastWrite = _index.keys.whereType<String>().where((k) => k.startsWith('pt|')).fold<int>(0, (last, k) {
+      final time = (_index.get(k) as int?) ?? 0;
+      return time > last ? time : last;
+    });
     await _migrate();
     for (final k in _index.keys.where(_isChapter)) {
       _tally((k as String).split(':').first, 1, (_index.get(k) as int?) ?? 0);
@@ -236,6 +240,7 @@ class PageStore {
   static late LazyBox _box;
   static late Box _stamp;
   static const _cap = 400;
+  static int _lastWrite = 0;
 
   static int _time(String key) => (_stamp.get('pt|$key') as int?) ?? 0;
 
@@ -252,7 +257,9 @@ class PageStore {
 
   static Future<void> put(String key, String html) async {
     await _box.put(key, html);
-    await _stamp.put('pt|$key', DateTime.now().millisecondsSinceEpoch);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _lastWrite = now > _lastWrite ? now : _lastWrite + 1; // 同一毫秒内也有严格顺序，不让淘汰结果取决于 Hive 的键排序
+    await _stamp.put('pt|$key', _lastWrite);
     final loose = _box.keys.whereType<String>().where((k) => !_pinned(k)).toList();
     while (loose.length > _cap) {
       final oldest = loose.reduce((a, b) => _time(a) <= _time(b) ? a : b);

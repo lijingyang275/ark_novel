@@ -6,9 +6,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'app_prefs.dart';
+import 'hant.dart';
 import 'router.dart';
 import 'security.dart';
 import 'settings.dart';
+import 'text.dart';
 import 'theme.dart';
 
 class NextApp extends ConsumerWidget {
@@ -17,6 +19,7 @@ class NextApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     ref.watch(appPrefsProvider);
+    final hant = AppPrefs.read(P.uiHant, false) ? ref.watch(_hantProvider).value : null;
     return MaterialApp.router(
       title: 'Ark Novel',
       debugShowCheckedModeBanner: false,
@@ -26,7 +29,7 @@ class NextApp extends ConsumerWidget {
       routerConfig: ref.watch(routerProvider),
       scrollBehavior: const _MouseDragBehavior(),
       builder: (context, child) {
-        Widget w = AppGuard(child: child ?? const SizedBox.shrink());
+        Widget w = UiHant(hant: hant, child: AppGuard(child: child ?? const SizedBox.shrink()));
         if (!kIsWeb && defaultTargetPlatform == TargetPlatform.macOS) {
           final mq = MediaQuery.of(context);
           final top = math.max(mq.padding.top, 28.0);
@@ -43,6 +46,8 @@ class NextApp extends ConsumerWidget {
     );
   }
 }
+
+final _hantProvider = FutureProvider((ref) => Hant.load());
 
 /// 桌面端默认不能用鼠标拖动滚动，卷轮播、横向标签这些只能拖的地方就动不了。
 class _MouseDragBehavior extends MaterialScrollBehavior {

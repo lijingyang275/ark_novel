@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -7,6 +7,7 @@ import '../library.dart' show LibraryStore;
 import '../router.dart';
 import '../widgets.dart';
 import 'novel_page.dart';
+import '../text.dart';
 
 /// 单本书的缓存管理：按卷列出章节，标出已缓存的，可选中若干章下载或删除。
 class CacheBookPage extends ConsumerStatefulWidget {

@@ -79,6 +79,7 @@ class P {
 
   // 外观
   static const pureBlack = 'ui.pureBlack'; // bool 深色时用 AMOLED 纯黑底
+  static const uiHant = 'ui.hant'; // bool 界面用繁体（台湾写法），阅读正文另有开关
   static const sceneMotion = 'ui.sceneMotion'; // bool 插画主题的云和旗子动起来
 
   // 阅读

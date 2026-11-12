@@ -1,5 +1,6 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:hive_ce_flutter/hive_flutter.dart';
+import 'text.dart';
 
 /// 详情页目录的筛选、排序、显示方式（Mihon 的"章节设置"）。每本书一份，可以存成默认、也可以重置回默认。
 /// 筛选是三态：0 不限 1 必须满足 2 必须不满足。

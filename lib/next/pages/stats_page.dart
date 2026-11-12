@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -13,6 +13,7 @@ import '../router.dart';
 import '../stats.dart';
 import '../volumes.dart';
 import '../widgets.dart';
+import '../text.dart';
 
 String _duration(int seconds) => seconds >= 3600 ? '${seconds ~/ 3600} 小时 ${(seconds % 3600) ~/ 60} 分' : '${(seconds / 60).ceil()} 分钟';
 
@@ -531,7 +532,7 @@ class _ManageStatsPageState extends State<_ManageStatsPage> {
           return ListTile(
             title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
             subtitle: Text(_duration(e.value)),
-            trailing: IconButton(tooltip: '删除', icon: const Icon(Icons.delete_outline), onPressed: () => _delete(e.key, title)),
+            trailing: IconButton(tooltip: hz(context, '删除'), icon: const Icon(Icons.delete_outline), onPressed: () => _delete(e.key, title)),
           );
         },
       ),

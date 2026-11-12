@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -10,6 +10,7 @@ import '../data.dart';
 import '../library.dart';
 import '../router.dart';
 import '../widgets.dart';
+import '../text.dart';
 
 /// 发现：推荐 / 排行 / 分类 / 完结。
 class DiscoverPage extends ConsumerWidget {
@@ -22,8 +23,8 @@ class DiscoverPage extends ConsumerWidget {
       child: Scaffold(
         appBar: AppBar(
           title: const Text('发现'),
-          actions: [IconButton(icon: const Icon(Icons.search), tooltip: '搜索', onPressed: () => context.push(Routes.search))],
-          bottom: const TabBar(tabs: [Tab(text: '推荐'), Tab(text: '排行'), Tab(text: '分类'), Tab(text: '完结')]),
+          actions: [IconButton(icon: const Icon(Icons.search), tooltip: hz(context, '搜索'), onPressed: () => context.push(Routes.search))],
+          bottom: const TabBar(tabs: [Tab(child: Text('推荐')), Tab(child: Text('排行')), Tab(child: Text('分类')), Tab(child: Text('完结'))]),
         ),
         body: const TabBarView(children: [_RecommendTab(), _RankingTab(), _CategoryTab(), _CompletedTab()]),
       ),
@@ -195,7 +196,7 @@ Widget _hideShelfChip(BuildContext context, WidgetRef ref) {
   return Padding(
     padding: const EdgeInsets.only(right: 6),
     child: _sideIcon(
-      tooltip: '隐藏书架里的书',
+      tooltip: hz(context, '隐藏书架里的书'),
       selected: on,
       icon: const Icon(Icons.library_add_check_outlined),
       selectedIcon: const Icon(Icons.library_add_check),
@@ -308,7 +309,7 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
               children: [
                 const SizedBox(width: 22),
                 Expanded(child: Text('全部标签', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant))),
-                _sideIcon(tooltip: '收起', icon: const Icon(Icons.expand_less), onPressed: () => setState(() => _open = false)),
+                _sideIcon(tooltip: hz(context, '收起'), icon: const Icon(Icons.expand_less), onPressed: () => setState(() => _open = false)),
               ],
             ),
           ),
@@ -343,7 +344,7 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
               value: _tag,
               label: (e) => e,
               onChanged: _pick,
-              trailing: _sideIcon(tooltip: '全部标签', icon: const Icon(Icons.expand_more), onPressed: () => setState(() => _open = true)),
+              trailing: _sideIcon(tooltip: hz(context, '全部标签'), icon: const Icon(Icons.expand_more), onPressed: () => setState(() => _open = true)),
             ),
             _Chips(
               options: categorySorts,

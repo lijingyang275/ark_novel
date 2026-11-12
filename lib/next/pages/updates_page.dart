@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -6,6 +6,7 @@ import '../library.dart';
 import '../router.dart';
 import '../updates.dart';
 import '../widgets.dart';
+import '../text.dart';
 
 String dayLabel(DateTime t) {
   final now = DateTime.now();
@@ -68,7 +69,7 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('更新'),
-        actions: [IconButton(tooltip: '检查更新', icon: const Icon(Icons.refresh), onPressed: progress.running ? null : () => ref.read(updateProvider.notifier).refresh())],
+        actions: [IconButton(tooltip: hz(context, '检查更新'), icon: const Icon(Icons.refresh), onPressed: progress.running ? null : () => ref.read(updateProvider.notifier).refresh())],
         bottom: progress.running ? PreferredSize(preferredSize: const Size.fromHeight(2), child: LinearProgressIndicator(value: progress.total == 0 ? null : progress.done / progress.total, minHeight: 2)) : null,
       ),
       body: ListView(

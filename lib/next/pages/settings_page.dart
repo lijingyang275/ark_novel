@@ -3,7 +3,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -27,10 +27,11 @@ import '../theme_squire.dart';
 import '../unlock.dart';
 import '../widgets.dart';
 import '../x_list.dart';
+import '../text.dart';
 
 /// 设置分成几组（Mihon 那样），主页能搜索：搜到的条目点一下跳到它所在的那一组。
 enum SettingsSection {
-  appearance('外观', Icons.palette_outlined, '主题、配色、屏幕方向'),
+  appearance('外观', Icons.palette_outlined, '主题、配色、语言、屏幕方向'),
   reading('阅读', Icons.book_outlined, '翻页、点击区域、预加载、屏幕、朗读'),
   shelf('书架', Icons.auto_stories_outlined, '封面角标、列数、分类管理'),
   update('更新', Icons.update_outlined, '检查频率、网络条件、检查范围'),
@@ -60,6 +61,8 @@ const _items = <(String, SettingsSection, String)>[
   ('主题', SettingsSection.appearance, '深色 浅色 夜间 跟随系统'),
   ('配色', SettingsSection.appearance, '主题色 颜色'),
   ('屏幕方向', SettingsSection.appearance, '横屏 竖屏 旋转'),
+  ('界面繁体', SettingsSection.appearance, '繁体 繁體 简繁 台湾 语言 language'),
+  ('正文繁体', SettingsSection.appearance, '繁体 繁體 简繁 台湾 正文'),
   ('翻页方式', SettingsSection.reading, '滚动 滑动 仿真 覆盖'),
   ('正则规则', SettingsSection.reading, '替换 去广告 高亮 备注'),
   ('点击区域', SettingsSection.reading, '翻页 点击 反转 双页 动画'),
@@ -136,7 +139,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
               child: TextField(
                 decoration: InputDecoration(
-                  hintText: '搜索设置',
+                  hint: Text('搜索设置', maxLines: 1, overflow: TextOverflow.ellipsis),
                   prefixIcon: const Icon(Icons.search),
                   filled: true,
                   fillColor: scheme.onSurface.withValues(alpha: 0.06),
@@ -293,6 +296,15 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
         ),
       ),
       if (appPalettes[palette].scene) _switch('插画动效', P.sceneMotion, true),
+      const XDivider(),
+      const XGroupTitle('语言'),
+      XSwitch(title: '界面繁体', value: _prefs.get(P.uiHant, false), onChanged: (v) => _prefs.set(P.uiHant, v)),
+      XSwitch(
+        title: '正文繁体',
+        subtitle: '用 OpenCC 词表在本机转换，偶有误转',
+        value: ref.watch(readerPrefsProvider.select((p) => p.hant)),
+        onChanged: (v) => ref.read(readerPrefsProvider.notifier).update(ref.read(readerPrefsProvider).copyWith(hant: v)),
+      ),
       if (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS) ...[
         const XDivider(),
         const XGroupTitle('屏幕方向'),
@@ -592,7 +604,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
         padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
         child: TextFormField(
           initialValue: store.proxy,
-          decoration: const InputDecoration(labelText: 'HTTP 代理', hintText: '127.0.0.1:7890'),
+          decoration: const InputDecoration(label: Text('HTTP 代理'), hint: Text('127.0.0.1:7890', maxLines: 1, overflow: TextOverflow.ellipsis)),
           onChanged: ref.read(proxyProvider.notifier).setLater,
         ),
       ),

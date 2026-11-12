@@ -1,7 +1,8 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 
 import 'app_prefs.dart';
 import 'rules.dart';
+import 'text.dart';
 
 /// 变色 / 高亮选颜色：一排预设色、最近自定义过的颜色，点「调色盘」展开自己调（色相、饱和度、亮度、十六进制），
 /// 上面的预览按正文里真实的样子画——变色只染字，高亮带一层淡底色。

@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import '../text.dart';
 
 /// 启动页：短暂检查登录状态。
 class SplashPage extends StatelessWidget {

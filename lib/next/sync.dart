@@ -18,6 +18,7 @@ import 'library.dart';
 import 'progress.dart';
 import 'settings.dart';
 import 'stats.dart';
+import 'sync_validation.dart';
 import 'theme.dart';
 import 'updates.dart';
 import 'volumes.dart';
@@ -76,7 +77,10 @@ class Sync {
   }
 
   static Future<void> save({required String url, required String user, required String pass, required String folder}) async {
-    await _box.putAll({'sync:url': url.trim(), 'sync:user': user.trim(), 'sync:folder': folder.trim().isEmpty ? defaultFolder : folder.trim()});
+    final nextFolder = folder.trim().isEmpty ? defaultFolder : folder.trim();
+    final changed = url.trim().replaceFirst(RegExp(r'/+$'), '') != Sync.url.replaceFirst(RegExp(r'/+$'), '') || user.trim() != Sync.user || nextFolder != Sync.folder;
+    await _box.putAll({'sync:url': url.trim(), 'sync:user': user.trim(), 'sync:folder': nextFolder});
+    if (changed) await _box.deleteAll(['sync:last', 'sync:avatarUp']); // 新目录没有旧目录的同步基准或头像
     if (_useLocalPass) {
       await _box.put('sync:pass', pass);
       return;
@@ -254,6 +258,7 @@ class Sync {
   ///
   /// 超过 90 天没更新的快照抛 [StaleSnapshotException]：那之前的墓碑已经清掉了，并进来会把删过的东西加回来。
   static Future<void> merge(Map<String, dynamic> remote) async {
+    validateSyncSnapshot(remote);
     if (remote['device'] == deviceId) return;
     if (remote['at'] case final num at when at < _tombCutoff) throw const StaleSnapshotException();
     // 要读写文件的头像先做完：从下面读本机数据到最后一起写入之间不能有 await，
@@ -543,7 +548,10 @@ class Sync {
       final rTs = (sp['ts'] as int?) ?? 0;
       final lTs = (_box.get('sync:prefsTs') as int?) ?? 0;
       if (rTs > lTs) {
-        if (sp['shelfOpts'] is Map) puts['shelfOpts'] = sp['shelfOpts'];
+        if (sp['shelfOpts'] is Map) {
+          final options = syncShelfOptions(sp['shelfOpts'] as Map);
+          if (options.isNotEmpty) puts['shelfOpts'] = {...((_box.get('shelfOpts') as Map?) ?? const {}), ...options};
+        }
         _putPrefs(sp['p'], _isShelfPref, puts);
         puts['sync:prefsTs'] = rTs;
       }
@@ -584,8 +592,8 @@ class Sync {
     puts['sync:stats:${remote['device']}'] = jsonEncode(stats);
     // 删除和写入放在最后一起做：前面出错时本机什么都没改
     dels.removeAll(puts.keys);
-    if (dels.isNotEmpty) await _box.deleteAll(dels);
-    await _box.putAll(puts);
+    // 两个调用都先更新 Hive 内存，再一起等落盘；删除和写入之间不能让出事件循环。
+    await Future.wait([if (dels.isNotEmpty) _box.deleteAll(dels), _box.putAll(puts)]);
     await avatar.cleanup?.call();
     // 先删本机的再记「删过了」：中途被打断的话下次合并会再删一次（按日期删，重复删没有副作用）
     for (final MapEntry(key: aid, value: at) in purge.entries) {
@@ -620,24 +628,15 @@ class Sync {
 
   static bool _isVol(Object? v) => v is Map && v['t'] is String && v['c'] is List && (v['c'] as List).every((c) => c is String) && (v['i'] == null || v['i'] is String);
 
-  /// 可选设置并入 [puts]：只收 [allowed] 的键；值只能是数字、布尔、字符串或字符串列表，本机已有的要同类型（整数不接受小数）。
+  /// 可选设置并入 [puts]：只收本组已知的键，并按固定字段定义检查类型和范围。
   static void _putPrefs(Object? remote, bool Function(String key) allowed, Map<String, Object?> puts) {
     if (remote is! Map) return;
     for (final e in remote.entries) {
       final k = '${e.key}';
       final v = e.value;
       if (!allowed(k) || v == null) continue;
-      final local = _box.get(k);
-      final ok = switch (local) {
-        null => v is num || v is bool || v is String || (v is List && v.every((x) => x is String)),
-        int() => v is int,
-        double() => v is num,
-        bool() => v is bool,
-        String() => v is String,
-        List() => v is List && v.every((x) => x is String),
-        _ => false,
-      };
-      if (ok) puts[k] = local is double ? (v as num).toDouble() : v;
+      final typed = syncPreference(k, v);
+      if (typed != null) puts[k] = typed;
     }
   }
 
@@ -767,8 +766,22 @@ class Sync {
     _running = true;
     Dio? dio;
     try {
+      if (lastSync > 0 && lastSync < _tombCutoff) throw const LocalSyncExpiredException();
       dio = _dio(await password());
       await test();
+      // 首次同步或换回旧目录时，本机没有 lastSync；仍要检查云端属于本机的旧快照，不能直接覆盖成「新」数据。
+      if (lastSync == 0) {
+        final own = await dio.get('${_dir()}$deviceId.json', options: Options(responseType: ResponseType.plain));
+        if (own.statusCode != 404) {
+          _ok(own, '检查本机快照');
+          final previous = jsonDecode(own.data as String) as Map<String, dynamic>;
+          validateSyncSnapshot(previous);
+          if (previous['device'] != deviceId) throw const FormatException('同步目录中的本机快照设备编号不匹配');
+          final at = previous['at'];
+          if (at is! int) throw const FormatException('云端本机快照缺少时间，无法确认是否过期，请先备份并使用新的同步文件夹');
+          if (at < _tombCutoff) throw const LocalSyncExpiredException();
+        }
+      }
       await _pushAvatar(dio);
       final put = await dio.put('${_dir()}$deviceId.json', data: jsonEncode(snapshot()), options: Options(contentType: 'application/json; charset=utf-8'));
       _ok(put, '上传');
@@ -784,6 +797,7 @@ class Sync {
           final r = await dio.get('${_dir()}${Uri.encodeComponent(name)}', options: Options(responseType: ResponseType.plain));
           _ok(r, '下载 $name');
           final remote = jsonDecode(r.data as String) as Map<String, dynamic>;
+          validateSyncSnapshot(remote);
           if (remote['at'] case final num at when at < _tombCutoff) throw const StaleSnapshotException();
           await _pullAvatar(dio, remote);
           await merge(remote);
@@ -816,6 +830,14 @@ class Sync {
       await run();
     } catch (_) {}
   }
+}
+
+/// 本机长期离线时，不把旧数据重新标成最新后上传；继续保留本机和云端原文件。
+class LocalSyncExpiredException implements Exception {
+  const LocalSyncExpiredException();
+
+  @override
+  String toString() => '本机超过 90 天没同步，已停止上传，避免让其他设备删过的数据复活。请先导出完整备份；如需保留并合并本机旧数据，请使用新的同步文件夹，并让其他设备也切换到该文件夹。';
 }
 
 /// 快照超过 90 天没更新：那之前的墓碑已经清掉，合并会让删掉的东西复活，所以不合并。

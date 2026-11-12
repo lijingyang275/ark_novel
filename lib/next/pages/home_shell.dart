@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart' show ValueListenable, defaultTargetPlatform;
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart' show SystemNavigator;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -24,6 +24,7 @@ import '../theme.dart';
 import '../theme_art.dart';
 import '../updates.dart';
 import '../volumes.dart';
+import '../text.dart';
 
 /// 主界面框架：窄屏底部导航，宽屏（平板、电脑、网页）左侧导航。
 class HomeShell extends ConsumerStatefulWidget {
@@ -62,8 +63,9 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       SnackBar(
         content: Text(books.length == 1 ? '$first已在其他设备或网站上移出书架' : '$first等 ${books.length} 本已在其他设备或网站上移出书架'),
         duration: const Duration(seconds: 8),
+        persist: false, // 带按钮的提示默认不会自己消失
         action: SnackBarAction(
-          label: books.length == 1 ? '加回书架' : '全部加回',
+          label: hz(context, books.length == 1 ? '加回书架' : '全部加回'),
           // 点的时候再取：同步完会重建书架的 provider，提前拿的那个已经作废了
           onPressed: () {
             if (mounted) ref.read(libraryProvider.notifier).restore(books);
@@ -317,7 +319,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
                   NavigationBar(
                     selectedIndex: shell.currentIndex,
                     onDestinationSelected: _go,
-                    destinations: [for (final (i, item) in _items.indexed) NavigationDestination(icon: icon(i, false), selectedIcon: icon(i, true), label: item.$3)],
+                    destinations: [for (final (i, item) in _items.indexed) NavigationDestination(icon: icon(i, false), selectedIcon: icon(i, true), label: hz(context, item.$3))],
                   ),
                 ],
               ),

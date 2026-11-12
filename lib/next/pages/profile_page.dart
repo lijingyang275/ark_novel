@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -19,6 +19,7 @@ import '../theme_squire.dart';
 import '../volumes.dart';
 import '../widgets.dart';
 import '../x_list.dart';
+import '../text.dart';
 
 class ProfilePage extends ConsumerWidget {
   const ProfilePage({super.key});

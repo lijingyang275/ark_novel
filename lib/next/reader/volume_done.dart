@@ -1,10 +1,11 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart' show HapticFeedback;
 
 import '../cover_color.dart';
 import '../theme_doodle.dart';
 import '../volumes.dart';
 import '../widgets.dart';
+import '../text.dart';
 
 enum VolumeDoneAction { next, shelf, stay }
 

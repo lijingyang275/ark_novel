@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -8,6 +8,7 @@ import '../data.dart';
 import '../router.dart';
 import '../session.dart';
 import '../widgets.dart';
+import '../text.dart';
 
 /// 分页加载书评 / 回复的通用列表，底部输入框发表。
 class _ThreadList<T> extends ConsumerStatefulWidget {
@@ -111,7 +112,7 @@ class _ThreadListState<T> extends ConsumerState<_ThreadList<T>> {
             child: Row(
               children: [
                 Expanded(
-                  child: TextField(controller: _input, minLines: 1, maxLines: 4, decoration: InputDecoration(hintText: widget.hint)),
+                  child: TextField(controller: _input, minLines: 1, maxLines: 4, decoration: InputDecoration(hint: Text(widget.hint, maxLines: 1, overflow: TextOverflow.ellipsis))),
                 ),
                 IconButton(onPressed: _sending ? null : _send, icon: const Icon(Icons.send_outlined)),
               ],

@@ -4,7 +4,7 @@ import 'dart:math' as math;
 import 'package:battery_plus/battery_plus.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/gestures.dart' show PointerDeviceKind, PointerScrollEvent, PointerSignalEvent;
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -20,6 +20,7 @@ import '../color_picker.dart';
 import '../data.dart';
 import '../env.dart';
 import '../fonts.dart';
+import '../hant.dart';
 import '../history.dart';
 import '../image_cache.dart' show imageStoreProvider;
 import '../incognito.dart';
@@ -45,6 +46,7 @@ import 'paginator.dart';
 import 'reader_body.dart';
 import 'tts_notice.dart';
 import 'volume_done.dart';
+import '../text.dart';
 
 /// 每个非空行当一段：去掉网页里零散的空白，统一首行缩进两个全角空格；全角英文、数字转半角。
 String formatChapter(String raw) => halfWidth(raw).split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).map((l) => '　　$l').join('\n');
@@ -61,6 +63,7 @@ final chapterProvider = FutureProvider.autoDispose.family<Chapter, (String, Stri
   final link = ref.keepAlive();
   final timer = Timer(const Duration(minutes: 3), link.close);
   ref.onDispose(timer.cancel);
+  final hantOn = ref.watch(readerPrefsProvider.select((p) => p.hant));
   var raw = await ChapterCache.get(key.$1, key.$2);
   if (raw != null && isLockedContent(raw) && ref.read(unlockServiceProvider).enabled) raw = null; // 以前存下的「因版权问题…」，重新取
   if (raw == null) {
@@ -79,8 +82,11 @@ final chapterProvider = FutureProvider.autoDispose.family<Chapter, (String, Stri
       } catch (_) {}
     }
   }
-  final text = formatChapter(ReplaceRules.apply(raw.text));
-  return Chapter(text: text, images: raw.images, marks: ReplaceRules.marks(text, null, key.$1));
+  // 繁体：先转正文，规则也转成繁体再套，简体、繁体下做的替换和高亮都能匹配上
+  final hant = hantOn ? await Hant.load() : null;
+  final rules = hant == null ? null : [for (final r in ReplaceRules.all()) r.copyWith(pattern: hant.convert(r.pattern), replacement: hant.convert(r.replacement))];
+  final text = formatChapter(ReplaceRules.apply(hant?.convert(raw.text) ?? raw.text, rules));
+  return Chapter(text: text, images: raw.images, marks: ReplaceRules.marks(text, rules, key.$1));
 });
 
 /// 书签在本章第几屏：按现在的阅读设置（字号、行距、边距、字体、双页）重新排版算出来，所以改了设置页码也跟着对。
@@ -773,17 +779,17 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     anchors: state.contextMenuAnchors,
     buttonItems: [
       ContextMenuButtonItem(
-        label: '复制',
+        label: hz(context, '复制'),
         onPressed: () {
           Clipboard.setData(ClipboardData(text: _selected ?? ''));
           state.hideToolbar();
         },
       ),
-      ContextMenuButtonItem(label: '替换/屏蔽', onPressed: () => _replaceFromSelection(state)),
-      ContextMenuButtonItem(label: '高亮', onPressed: () => _highlightSelection(state)),
-      ContextMenuButtonItem(label: '变色', onPressed: () => _colorSelection(state)),
+      ContextMenuButtonItem(label: hz(context, '替换/屏蔽'), onPressed: () => _replaceFromSelection(state)),
+      ContextMenuButtonItem(label: hz(context, '高亮'), onPressed: () => _highlightSelection(state)),
+      ContextMenuButtonItem(label: hz(context, '变色'), onPressed: () => _colorSelection(state)),
       ContextMenuButtonItem(
-        label: '加书签',
+        label: hz(context, '加书签'),
         onPressed: () {
           final text = _selected ?? '';
           state.hideToolbar();
@@ -870,7 +876,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                TextField(controller: controller, minLines: 3, maxLines: 8, decoration: const InputDecoration(hintText: '写点备注：身份、关系、伏笔……')),
+                TextField(controller: controller, minLines: 3, maxLines: 8, decoration: const InputDecoration(hint: Text('写点备注：身份、关系、伏笔……', maxLines: 1, overflow: TextOverflow.ellipsis))),
                 const SizedBox(height: 12),
                 ColorPickerField(color: color, highlight: true, sample: rule.label.length > 8 ? rule.label.substring(0, 8) : rule.label, onChanged: (c) => setLocal(() => color = c)),
               ],
@@ -991,7 +997,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                 if (v == null) return null;
                 return ChapterPeek(
                   chapter: v,
-                  title: ch.title,
+                  title: _bodyTitle(ch.title),
                   spanOf: (from, to) => buildSpan(v, from, to, style, noted),
                   cover: _coverOf(ch.cid, prefs, fallbackCover),
                   volumeProgress: (f) => _volumeProgress(f, ch.cid),
@@ -1004,7 +1010,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                       spanOf: spanOf,
                       style: style,
                       margin: prefs.margin,
-                      title: title,
+                      title: _bodyTitle(title),
                       headingAccent: heading,
                       startOffset: _offset,
                       onOffset: _saveOffset,
@@ -1030,7 +1036,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                       spanOf: spanOf,
                       style: style,
                       margin: prefs.margin,
-                      title: title,
+                      title: _bodyTitle(title),
                       headingAccent: heading,
                       prevChapter: peek(prev),
                       nextChapter: peek(next),
@@ -1174,7 +1180,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                 ),
                                 Row(
                                   children: [
-                                    IconButton(tooltip: '上一章', color: palette.fg, disabledColor: palette.fg.withValues(alpha: 0.3), icon: const Icon(Icons.skip_previous_rounded), onPressed: prev == null ? null : () {
+                                    IconButton(tooltip: hz(context, '上一章'), color: palette.fg, disabledColor: palette.fg.withValues(alpha: 0.3), icon: const Icon(Icons.skip_previous_rounded), onPressed: prev == null ? null : () {
                                       _markBack();
                                       _go(prev.cid);
                                     }),
@@ -1199,7 +1205,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                             )
                                           : const SizedBox(height: 48),
                                     ),
-                                    IconButton(tooltip: '下一章', color: palette.fg, disabledColor: palette.fg.withValues(alpha: 0.3), icon: const Icon(Icons.skip_next_rounded), onPressed: next == null ? null : () {
+                                    IconButton(tooltip: hz(context, '下一章'), color: palette.fg, disabledColor: palette.fg.withValues(alpha: 0.3), icon: const Icon(Icons.skip_next_rounded), onPressed: next == null ? null : () {
                                       _markBack();
                                       _go(next.cid);
                                     }),
@@ -1301,6 +1307,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     }
   }
 
+  /// 正文里的章节标题跟阅读设置的「繁体」走（不跟界面繁体）
+  String _bodyTitle(String t) => ref.read(readerPrefsProvider).hant ? Hant.loaded?.convert(t) ?? t : t;
+
   /// 目录（按卷分层，当前章所在的卷默认展开）、本书的书签、人物备注。
   void _showCatalogue(List<CatVolume> volumes, String current) {
     final theme = Theme.of(context);
@@ -1316,7 +1325,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
           initialChildSize: 0.75,
           builder: (context, scroll) => Column(
             children: [
-              const TabBar(tabs: [Tab(text: '目录'), Tab(text: '书签'), Tab(text: '备注')]),
+              const TabBar(tabs: [Tab(child: Text('目录')), Tab(child: Text('书签')), Tab(child: Text('备注'))]),
               Expanded(
                 child: TabBarView(
                   children: [
@@ -1515,13 +1524,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
             color: pal.bg,
             shape: Border(top: BorderSide(color: scheme.outline)),
             child: SafeArea(
-            // 半屏高：上面一半留给正文
+            // 略高于半屏：三个分页都不用滑，上面留一些正文
             child: SizedBox(
-              height: MediaQuery.sizeOf(context).height * 0.46,
+              height: MediaQuery.sizeOf(context).height * 0.56,
               child: Column(
                 children: [
                   XSegments<int>(value: tab, options: const {0: '显示', 1: '排版', 2: '翻页'}, onChanged: (v) => setSheet(() => _settingsTab = v)),
                   Expanded(
+            child: _ScrollFade(
             child: SingleChildScrollView(
               key: ValueKey(tab), // 换分页时回到顶上
               padding: const EdgeInsets.only(bottom: 16),
@@ -1563,14 +1573,19 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                     ),
                   ),
                   // 越往左越暗：滑块值是亮度，存的是遮罩不透明度
-                  XSlider(title: '页面亮度', label: '${((1 - prefs.dim) * 100).round()}%', slider: Slider(min: 0.3, max: 1.0, divisions: 14, value: (1 - prefs.dim).clamp(0.3, 1.0), onChanged: (v) => set(prefs.copyWith(dim: 1 - v)))),
+                  XSlider(compact: true, title: '页面亮度', label: '${((1 - prefs.dim) * 100).round()}%', slider: Slider(min: 0.3, max: 1.0, divisions: 14, value: (1 - prefs.dim).clamp(0.3, 1.0), onChanged: (v) => set(prefs.copyWith(dim: 1 - v)))),
                   if (android) ...[
                     XSwitch(title: '独立屏幕亮度', help: '不跟随系统亮度，最高能调得比系统更亮；退出阅读后恢复。', value: prefs.customBrightness, onChanged: (v) => set(prefs.copyWith(customBrightness: v))),
-                    if (prefs.customBrightness) XSlider(title: '屏幕亮度', label: '${(prefs.brightness * 100).round()}%', slider: Slider(min: 0.02, max: 1.0, value: prefs.brightness.clamp(0.02, 1.0), onChanged: (v) => set(prefs.copyWith(brightness: v)))),
+                    if (prefs.customBrightness) XSlider(compact: true, title: '屏幕亮度', label: '${(prefs.brightness * 100).round()}%', slider: Slider(min: 0.02, max: 1.0, value: prefs.brightness.clamp(0.02, 1.0), onChanged: (v) => set(prefs.copyWith(brightness: v)))),
                   ],
-                  XSlider(title: '暖色滤镜', label: prefs.warm == 0 ? '关闭' : '${(prefs.warm * 200).round()}%', slider: Slider(min: 0, max: 0.5, divisions: 10, value: prefs.warm, onChanged: (v) => set(prefs.copyWith(warm: v)))),
-                  XSwitch(title: '灰度', value: prefs.grayscale, onChanged: (v) => set(prefs.copyWith(grayscale: v))),
-                  XSwitch(title: '反色', value: prefs.invert, onChanged: (v) => set(prefs.copyWith(invert: v))),
+                  XSlider(compact: true, title: '暖色滤镜', label: prefs.warm == 0 ? '关闭' : '${(prefs.warm * 200).round()}%', slider: Slider(min: 0, max: 0.5, divisions: 10, value: prefs.warm, onChanged: (v) => set(prefs.copyWith(warm: v)))),
+                  XTile(
+                    title: '色彩',
+                    trailing: Row(mainAxisSize: MainAxisSize.min, spacing: 8, children: [
+                      _toggleChip(scheme, '灰度', prefs.grayscale, (v) => set(prefs.copyWith(grayscale: v))),
+                      _toggleChip(scheme, '反色', prefs.invert, (v) => set(prefs.copyWith(invert: v))),
+                    ]),
+                  ),
                   ],
                   if (tab == 1) ...[
                   _LayoutSlider(title: '字号', label: (v) => '${v.round()}', min: 14, max: 32, divisions: 18, value: prefs.fontSize, onCommit: (v) => set(prefs.copyWith(fontSize: v))),
@@ -1595,6 +1610,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                         ),
                     ],
                   ),
+                  XSwitch(title: '繁体', value: prefs.hant, onChanged: (v) => set(prefs.copyWith(hant: v))),
                   ],
                   if (tab == 2) ...[
                   XSegments<int>(value: prefs.mode, options: const {0: '滚动', 1: '滑动', 2: '仿真', 3: '覆盖'}, onChanged: (v) => set(prefs.copyWith(mode: v))),
@@ -1616,6 +1632,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                   ],
                 ],
               ),
+            ),
             ),
                   ),
                 ],
@@ -1653,6 +1670,7 @@ class _LayoutSliderState extends State<_LayoutSlider> {
   Widget build(BuildContext context) {
     final v = (_dragging ?? widget.value).clamp(widget.min, widget.max);
     return XSlider(
+      compact: true,
       title: widget.title,
       label: widget.label(v),
       slider: Slider(
@@ -1668,4 +1686,55 @@ class _LayoutSliderState extends State<_LayoutSlider> {
       ),
     );
   }
+}
+
+/// 两个可以同时选中的标签，样子和 XChips 的一样
+Widget _toggleChip(ColorScheme scheme, String label, bool on, ValueChanged<bool> onChanged) => ChoiceChip(
+  label: Text(label),
+  selected: on,
+  showCheckmark: false,
+  selectedColor: scheme.primary.withValues(alpha: 0.14),
+  labelStyle: TextStyle(color: on ? scheme.primary : scheme.onSurface, fontWeight: on ? FontWeight.w600 : null),
+  side: BorderSide(color: on ? scheme.primary.withValues(alpha: 0.5) : scheme.outline),
+  onSelected: onChanged,
+);
+
+/// 下面还有内容没露出来时，底边渐隐，提示可以往下滑
+class _ScrollFade extends StatefulWidget {
+  const _ScrollFade({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_ScrollFade> createState() => _ScrollFadeState();
+}
+
+class _ScrollFadeState extends State<_ScrollFade> {
+  var _more = false;
+
+  bool _onMetrics(ScrollMetrics m) {
+    final more = m.extentAfter > 1;
+    if (more != _more) setState(() => _more = more);
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) => NotificationListener<ScrollMetricsNotification>(
+    onNotification: (n) => _onMetrics(n.metrics),
+    child: NotificationListener<ScrollNotification>(
+      onNotification: (n) => _onMetrics(n.metrics),
+      child: Scrollbar(
+        child: ShaderMask(
+          blendMode: BlendMode.dstIn,
+          shaderCallback: (r) => LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.black, Colors.black, if (_more) Colors.transparent else Colors.black],
+            stops: [0, r.height <= 48 ? 0 : 1 - 48 / r.height, 1],
+          ).createShader(r),
+          child: widget.child,
+        ),
+      ),
+    ),
+  );
 }

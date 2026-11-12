@@ -1,7 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart' show PointerScrollEvent, PointerSignalEvent;
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart' show HardwareKeyboard, KeyDownEvent, KeyEvent, KeyRepeatEvent, LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -19,6 +19,7 @@ import '../volumes.dart';
 import '../widgets.dart';
 import 'cover_picker_page.dart';
 import 'novel_page.dart';
+import '../text.dart';
 
 /// 书架"卷册"模式点进来：一本书的各卷叠在一起，左右滑把某一卷转到最前面；点最前面那卷像翻开书一样开始读，点下面的横条展开详情和目录。
 class VolumesPage extends ConsumerStatefulWidget {
@@ -465,7 +466,7 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
                   ),
                   actions: [
                     IconButton(
-                      tooltip: '书籍详情',
+                      tooltip: hz(context, '书籍详情'),
                       icon: const Icon(Icons.info_outline),
                       onPressed: () => context.push(Routes.novel(aid)).then((_) {
                         if (mounted) setState(() {});
@@ -810,7 +811,7 @@ class _DetailsState extends State<_Details> {
             ),
             const SizedBox(width: 8),
             IconButton.outlined(
-              tooltip: '换封面',
+              tooltip: hz(context, '换封面'),
               visualDensity: VisualDensity.compact,
               style: IconButton.styleFrom(
                 foregroundColor: Colors.white,
@@ -820,7 +821,7 @@ class _DetailsState extends State<_Details> {
               icon: const Icon(Icons.image_outlined, size: 20),
             ),
             IconButton.outlined(
-              tooltip: '阅读报告',
+              tooltip: hz(context, '阅读报告'),
               visualDensity: VisualDensity.compact,
               style: IconButton.styleFrom(
                 foregroundColor: Colors.white,
@@ -891,7 +892,7 @@ class _DetailsState extends State<_Details> {
                     data: TextButtonThemeData(style: TextButton.styleFrom(foregroundColor: Colors.white)),
                     child: Row(
                       children: [
-                        IconButton(tooltip: '取消', color: Colors.white, icon: const Icon(Icons.close), onPressed: () => setState(_picked.clear)),
+                        IconButton(tooltip: hz(context, '取消'), color: Colors.white, icon: const Icon(Icons.close), onPressed: () => setState(_picked.clear)),
                         Expanded(
                           child: Text('已选 ${_picked.length} 章', style: const TextStyle(color: Colors.white)),
                         ),
@@ -899,7 +900,7 @@ class _DetailsState extends State<_Details> {
                         TextButton(onPressed: () => _mark(false), child: const Text('未读')),
                         // 按钮全摆出来窄屏放不下，不常用的收进"更多"
                         PopupMenuButton<void Function()>(
-                          tooltip: '更多',
+                          tooltip: hz(context, '更多'),
                           iconColor: Colors.white,
                           onSelected: (f) => f(),
                           itemBuilder: (_) => [

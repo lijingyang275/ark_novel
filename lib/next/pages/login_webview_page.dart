@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,6 +9,7 @@ import 'package:go_router/go_router.dart';
 import '../../models/common/wenku8_node.dart';
 import '../session.dart';
 import '../web_fetch.dart';
+import '../text.dart';
 
 class WebSessionResult {
   const WebSessionResult(this.cookies, this.userAgent);
@@ -177,7 +178,7 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
       appBar: AppBar(
         title: Text(widget.title),
         actions: [
-          if (_ready) IconButton(tooltip: '复制诊断信息', icon: const Icon(Icons.bug_report_outlined), onPressed: _copyDiagnostics),
+          if (_ready) IconButton(tooltip: hz(context, '复制诊断信息'), icon: const Icon(Icons.bug_report_outlined), onPressed: _copyDiagnostics),
           if (_ready)
             TextButton(
               onPressed: () async {

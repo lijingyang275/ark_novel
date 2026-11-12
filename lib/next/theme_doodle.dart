@@ -1,8 +1,9 @@
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 
 import 'theme.dart';
+import 'text.dart';
 
 /// 角色主题（杏菜 / 知花 / 天爱星）的蜡笔涂鸦美术：插画来自 assets/theme/`art`_*.webp，
 /// 装饰线和小图案用代码画成抖动、重描的蜡笔笔触。普通配色下这些都返回 null / 不出现。

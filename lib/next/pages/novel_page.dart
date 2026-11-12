@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -21,6 +21,7 @@ import '../router.dart';
 import '../swipe.dart';
 import '../session.dart';
 import '../widgets.dart';
+import '../text.dart';
 
 /// 详情 + 目录：存过的先给（不等网络，挂 VPN 时也秒开），再联网取最新的；联网失败而本地有就不报错。
 final novelProvider = StreamProvider.autoDispose.family<NovelPage, String>((ref, aid) async* {
@@ -339,7 +340,7 @@ class _BodyState extends ConsumerState<_Body> {
               children: [
                 Expanded(child: Text(v.title)),
                 IconButton(
-                  tooltip: '换这一卷的封面',
+                  tooltip: hz(context, '换这一卷的封面'),
                   visualDensity: VisualDensity.compact,
                   icon: Icon(Icons.image_outlined, size: 18, color: theme.colorScheme.onSurfaceVariant),
                   onPressed: () => pickVolumeCover(context, aid, Vol.from(v)),
@@ -348,7 +349,7 @@ class _BodyState extends ConsumerState<_Body> {
                   builder: (context) {
                     final isDone = Volumes.done(aid).containsKey(v.title);
                     return IconButton(
-                      tooltip: isDone ? '取消本卷已读' : '标记本卷读完',
+                      tooltip: hz(context, isDone ? '取消本卷已读' : '标记本卷读完'),
                       visualDensity: VisualDensity.compact,
                       icon: Icon(isDone ? Icons.check_circle : Icons.check_circle_outline, size: 18, color: isDone ? theme.colorScheme.primary : theme.colorScheme.onSurfaceVariant),
                       onPressed: () async {
@@ -415,7 +416,7 @@ class _BodyState extends ConsumerState<_Body> {
               top: false,
               child: Row(
                 children: [
-                  IconButton(tooltip: '取消', icon: const Icon(Icons.close), onPressed: () => setState(_picked.clear)),
+                  IconButton(tooltip: hz(context, '取消'), icon: const Icon(Icons.close), onPressed: () => setState(_picked.clear)),
                   Expanded(child: Text('已选 ${_picked.length} 章', maxLines: 1, overflow: TextOverflow.ellipsis)),
                   TextButton(onPressed: () => _markPicked(true), child: const Text('已读')),
                   TextButton(onPressed: () => _markPicked(false), child: const Text('未读')),
@@ -429,7 +430,7 @@ class _BodyState extends ConsumerState<_Body> {
                   ),
                   // 按钮全摆出来窄屏放不下，不常用的收进"更多"
                   PopupMenuButton<void Function()>(
-                    tooltip: '更多',
+                    tooltip: hz(context, '更多'),
                     onSelected: (f) => f(),
                     itemBuilder: (_) => [
                       // 从第一章选到已选的最后一章，方便"之前的全部标为已读"

@@ -3,7 +3,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../app_prefs.dart';
@@ -15,6 +15,7 @@ import '../image_cache.dart';
 import '../unlock.dart';
 import '../volumes.dart';
 import '../widgets.dart';
+import '../text.dart';
 
 /// 封面框的宽高比（文库的封面大多是这个比例）
 const kCoverAspect = 0.7;

@@ -1,5 +1,5 @@
 import 'package:flutter/foundation.dart' show LicenseEntryWithLineBreaks, LicenseRegistry, debugPrint;
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -8,6 +8,7 @@ import 'cache.dart';
 import 'fonts.dart';
 import 'session.dart';
 import 'settings.dart';
+import 'text.dart';
 
 /// App 入口（lib/main.dart 只是转到这里）。
 ///
@@ -70,5 +71,6 @@ void registerFontLicenses() {
     for (final (name, file) in const [('霞鹜文楷 Lite（LXGW WenKai Lite）', 'LXGWWenKaiLite-OFL.txt'), ('思源宋体（Noto Serif SC）', 'NotoSerifSC-OFL.txt')]) {
       yield LicenseEntryWithLineBreaks([name], await rootBundle.loadString('assets/licenses/$file'));
     }
+    yield LicenseEntryWithLineBreaks(['OpenCC 简繁词表'], await rootBundle.loadString('assets/licenses/OpenCC-Apache-2.0.txt'));
   });
 }

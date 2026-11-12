@@ -70,6 +70,19 @@ void main() {
     await expectLater(api.catalogue('1004'), throwsA(isA<Wenku8UnexpectedPageException>()));
   });
 
+  test('加入、移出书架：业务错误页不冒充成功', () async {
+    adapter.responses.addAll([(200, fixture('error.html')), (200, fixture('error.html'))]);
+    await expectLater(api.removeFromBookshelf('1'), throwsA(isA<Wenku8ActionRejectedException>()));
+    await expectLater(api.addToBookshelf('1'), throwsA(isA<Wenku8ActionRejectedException>()));
+  });
+
+  test('直接返回登录表单：提交和移出书架都不能当成功', () async {
+    const login = '<html><form action="/login.php"><input name="username"><input name="password"></form></html>';
+    adapter.responses.addAll([(200, login), (200, login)]);
+    await expectLater(api.sendComment('1', 'title', 'body'), throwsA(isA<Wenku8UnexpectedPageException>()));
+    await expectLater(api.removeFromBookshelf('1'), throwsA(isA<Wenku8UnexpectedPageException>()));
+  });
+
   test('发评论：返回错误页时抛出，让界面保留输入', () async {
     adapter.responses.add((200, fixture('error.html')));
     await expectLater(api.sendComment('1', '标题', 'A&B+C'), throwsA(isA<Wenku8UnexpectedPageException>()));

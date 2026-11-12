@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -11,6 +11,7 @@ import '../router.dart';
 import '../volumes.dart';
 import '../widgets.dart';
 import 'updates_page.dart';
+import '../text.dart';
 
 /// 阅读历史：按日期分组，显示读到哪一章和时间，点一下接着读。
 class HistoryPage extends StatefulWidget {
@@ -46,7 +47,7 @@ class _HistoryPageState extends State<HistoryPage> {
             leading: SizedBox(width: 40, height: 54, child: CoverImage(e.img)),
             title: Text(LibraryStore.shown(e.aid, e.title), maxLines: 1, overflow: TextOverflow.ellipsis),
             subtitle: Text('${e.chapter} · ${hhmm(e.time)}', maxLines: 1, overflow: TextOverflow.ellipsis),
-            trailing: IconButton(icon: const Icon(Icons.info_outline), tooltip: '详情', onPressed: () => context.push(Routes.novel(e.aid))),
+            trailing: IconButton(icon: const Icon(Icons.info_outline), tooltip: hz(context, '详情'), onPressed: () => context.push(Routes.novel(e.aid))),
             onTap: () => context.push(Routes.reader(e.aid, e.cid)),
           ),
         ),

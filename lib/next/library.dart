@@ -76,6 +76,8 @@ class LibBook {
       LibBook(aid: aid, title: title ?? this.title, img: img ?? this.img, added: added, cats: cats ?? this.cats, bid: bid ?? this.bid, done: done ?? this.done, name: name, ts: ts ?? this.ts);
 
   LibBook withName(String? name, {int? ts}) => LibBook(aid: aid, title: title, img: img, added: added, cats: cats, bid: bid, done: done, name: name, ts: ts ?? this.ts);
+
+  LibBook withoutBid() => LibBook(aid: aid, title: title, img: img, added: added, cats: cats, done: done, name: name, ts: ts);
 }
 
 class LibCategory {
@@ -95,7 +97,9 @@ typedef RemoteBook = ({String bid, String title, String img, int shelf});
 /// - 网站整个是空的：多半是页面不对，不按它删本地的书
 Map<String, LibBook> reconcile(Map<String, LibBook> local, Map<String, RemoteBook> remote, Map<String, String> ops, {required int now, bool firstImport = false}) {
   final out = <String, LibBook>{};
-  for (final b in local.values) {
+  for (final stored in local.values) {
+    // 首次对当前账号：旧账号的 bid 不能用来判断这本书已从网站移出。
+    final b = firstImport ? stored.withoutBid() : stored;
     final r = remote[b.aid];
     if (r != null) {
       out[b.aid] = b.copyWith(bid: r.bid, img: b.img.isEmpty ? r.img : null);
@@ -168,18 +172,40 @@ class LibraryController extends Notifier<LibraryState> {
   static String? _flushingAid;
 
   @override
-  LibraryState build() => LibraryState(
+  LibraryState build() => _load();
+
+  LibraryState _load() => LibraryState(
     {for (final e in ((_box.get('lib:books') as Map?) ?? const {}).entries) e.key as String: LibBook.fromMap(e.value as Map)},
     [for (final m in ((_box.get('lib:cats') as List?) ?? const []).cast<Map>()) LibCategory(m['id'] as String, m['name'] as String, (m['ts'] as int?) ?? 0)],
   );
 
+  // WebDAV 已写入 Hive、但还没通知重建 provider 时，本地修改也必须基于最新数据。
+  void _refresh() => state = _load();
+
   Future<void> _save(Map<String, LibBook> books, [List<LibCategory>? cats]) async {
     state = LibraryState(books, cats ?? state.cats);
-    await _box.put('lib:books', {for (final b in books.values) b.aid: b.toMap()});
-    if (cats != null) await _box.put('lib:cats', [for (final c in cats) {'id': c.id, 'name': c.name, 'ts': c.ts}]);
+    // Hive 在返回 Future 前就更新内存；书籍和分类一起提交，中间不 await，避免其他操作读到半份状态。
+    await _box.putAll({
+      'lib:books': {for (final b in books.values) b.aid: b.toMap()},
+      if (cats != null) 'lib:cats': [for (final c in cats) {'id': c.id, 'name': c.name, 'ts': c.ts}],
+    });
   }
 
   Map<String, Map> _ops() => ((_box.get('lib:ops') as Map?) ?? const {}).map((k, v) => MapEntry(k as String, Map.from(v as Map)));
+
+  /// 把操作队列记到 [uid] 名下。队列还属于对过账的旧账号时先清空：旧账号的操作不能发给新账号，
+  /// 而换号后在新账号下排的操作要留着。游客（从没对过账）排的操作照常保留。
+  /// Hive 在返回前就更新了内存，调用后可以直接读 [_ops]。
+  Future<void> _claimOps(String? uid) {
+    if (uid == null || _box.get('lib:opsFor') == uid) return Future<void>.value();
+    final owner = _box.get('lib:imported');
+    return Future.wait([if (owner != null && owner != uid) _box.delete('lib:ops'), _box.put('lib:opsFor', uid)]);
+  }
+
+  String? get _uid => switch (ref.read(sessionProvider)) {
+    SessionLoggedIn(:final user) => user.uid,
+    _ => null,
+  };
 
   /// 把一个操作并进 [ops]：加了又移（或反过来）且还没推到网站，两个操作抵消（正在推送中的那条不能抵消）。
   /// 移出又加回时返回原来的 bid（书还用它），否则返回 null。
@@ -193,23 +219,29 @@ class LibraryController extends Notifier<LibraryState> {
   }
 
   Future<void> _queue(String aid, Map op) async {
+    final claiming = _claimOps(_uid);
     final ops = _ops();
     final bid = _enqueue(ops, aid, op);
-    if (bid != null && state.books[aid] != null) await _save({...state.books, aid: state.books[aid]!.copyWith(bid: bid)});
-    await _box.put('lib:ops', ops);
+    final saving = bid != null && state.books[aid] != null ? _save({...state.books, aid: state.books[aid]!.copyWith(bid: bid)}) : Future<void>.value();
+    await Future.wait([claiming, saving, _box.put('lib:ops', ops)]);
   }
 
   Future<void> add(String aid, String title, String img, {List<String> cats = const []}) async {
+    _refresh();
     if (state.books.containsKey(aid)) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    await _save({...state.books, aid: LibBook(aid: aid, title: title, img: img, added: now, cats: cats, ts: now)});
-    await _queue(aid, {'op': 'add'});
+    await Future.wait([
+      _save({...state.books, aid: LibBook(aid: aid, title: title, img: img, added: now, cats: cats, ts: now)}),
+      _queue(aid, {'op': 'add'}),
+    ]);
     unawaited(_push());
   }
 
   Future<void> remove(Iterable<String> aids) async {
+    _refresh();
     final books = {...state.books};
     final removed = <String>[];
+    final claiming = _claimOps(_uid);
     final ops = _ops();
     for (final aid in aids) {
       final b = books.remove(aid);
@@ -218,26 +250,31 @@ class LibraryController extends Notifier<LibraryState> {
         _enqueue(ops, aid, {'op': 'remove', 'bid': b.bid});
       }
     }
-    await _box.put('lib:ops', ops); // 一次写完，不按本数一本本重写整份排队
-    await Sync.tombstone(removed);
-    await _save(books);
+    // 先在同一轮事件里提交全部改动，再等落盘；等待期间新增的书不能被旧 books 覆盖。
+    await Future.wait([claiming, _save(books), _box.put('lib:ops', ops), Sync.tombstone(removed)]);
     unawaited(_push());
   }
 
   /// 把同步时被移出的书加回来（见 [LibraryStore.removedElsewhere]），分类和自己起的名字照旧。
   Future<void> restore(List<LibBook> books) async {
+    _refresh();
     final now = DateTime.now().millisecondsSinceEpoch;
     final cats = {for (final c in state.cats) c.id};
     final back = [for (final b in books) if (!state.books.containsKey(b.aid)) restoredBook(b, cats, now)];
     if (back.isEmpty) return;
-    await _save({...state.books, for (final b in back) b.aid: b});
     // 不走 [_queue]：同步排的「移出」要直接换成「加入」，不能当成本机加了又移、互相抵消（网站上可能早就移出了）
-    await _box.put('lib:ops', {..._ops(), for (final b in back) b.aid: {'op': 'add'}});
+    final claiming = _claimOps(_uid);
+    await Future.wait([
+      claiming,
+      _save({...state.books, for (final b in back) b.aid: b}),
+      _box.put('lib:ops', {..._ops(), for (final b in back) b.aid: {'op': 'add'}}),
+    ]);
     unawaited(_push());
   }
 
   /// 改显示名称；空的或和原书名一样就恢复原名
   Future<void> rename(String aid, String? name) async {
+    _refresh();
     final b = state.books[aid];
     if (b == null) return;
     final n = name?.trim();
@@ -246,12 +283,14 @@ class LibraryController extends Notifier<LibraryState> {
   }
 
   Future<void> setCats(Iterable<String> aids, List<String> cats) {
+    _refresh();
     final now = DateTime.now().millisecondsSinceEpoch;
     return _save({...state.books, for (final aid in aids) if (state.books[aid] != null) aid: state.books[aid]!.copyWith(cats: cats, ts: now)});
   }
 
   /// 打开详情页拿到最新信息时顺手记下（书名、封面、是否完结）。
   Future<void> noteDetail(String aid, {required String title, required String img, required String status}) async {
+    _refresh();
     final b = state.books[aid];
     if (b == null) return;
     final next = b.copyWith(title: title, img: img.isEmpty ? null : img, done: status.contains('完'));
@@ -259,25 +298,35 @@ class LibraryController extends Notifier<LibraryState> {
   }
 
   Future<void> addCategory(String name) {
+    _refresh();
     final now = DateTime.now().millisecondsSinceEpoch;
     return _save(state.books, [...state.cats, LibCategory('c${DateTime.now().microsecondsSinceEpoch}', name, now)]);
   }
 
   Future<void> renameCategory(String id, String name) {
+    _refresh();
     final now = DateTime.now().millisecondsSinceEpoch;
     return _save(state.books, [for (final c in state.cats) c.id == id ? LibCategory(id, name, now) : c]);
   }
 
-  Future<void> reorderCategories(List<LibCategory> cats) => _save(state.books, cats);
+  Future<void> reorderCategories(List<LibCategory> cats) {
+    _refresh();
+    final ids = cats.map((c) => c.id).toSet();
+    final current = {for (final c in state.cats) c.id: c};
+    return _save(state.books, [for (final c in cats) if (current[c.id] != null) current[c.id]!, ...state.cats.where((c) => !ids.contains(c.id))]);
+  }
 
   /// 删除分类：里面的书不删，只是不再属于它（没有别的分类就回到"默认"）。
   Future<void> deleteCategory(String id) async {
+    _refresh();
     final now = DateTime.now().millisecondsSinceEpoch;
-    await Sync.tombstone(['cat:$id']);
-    await _save(
-      {for (final b in state.books.values) b.aid: b.cats.contains(id) ? b.copyWith(cats: b.cats.where((c) => c != id).toList(), ts: now) : b},
-      state.cats.where((c) => c.id != id).toList(),
-    );
+    await Future.wait([
+      _save(
+        {for (final b in state.books.values) b.aid: b.cats.contains(id) ? b.copyWith(cats: b.cats.where((c) => c != id).toList(), ts: now) : b},
+        state.cats.where((c) => c.id != id).toList(),
+      ),
+      Sync.tombstone(['cat:$id']),
+    ]);
   }
 
   bool _prefetching = false;
@@ -287,23 +336,34 @@ class LibraryController extends Notifier<LibraryState> {
     return s is SessionLoggedIn && !s.offline;
   }
 
+  bool _sameAccount(String uid) {
+    if (!ref.mounted) return false;
+    final s = ref.read(sessionProvider);
+    return s is SessionLoggedIn && !s.offline && s.user.uid == uid;
+  }
+
   /// 只推本地排队的操作，不拉网站书架（加入 / 移出后马上调）。
   Future<void> _push() async {
-    if (!_online || _syncing) return;
+    if (!ref.mounted || !_online || _syncing) return;
+    final uid = (ref.read(sessionProvider) as SessionLoggedIn).user.uid;
+    // 新账号先拉书架建立自己的绑定，不能把旧账号的队列和 bid 发给它。
+    if (_box.get('lib:imported') != uid) return;
     _syncing = true;
     try {
-      await _flush(ref.read(apiProvider), null);
+      await _flush(ref.read(apiProvider), null, uid);
     } finally {
       _syncing = false;
     }
   }
 
   /// 推送排队的操作。[remote] 不为空时据此跳过网站上已经是那样的、补上缺的 bid，并把结果写回 [remote]。
-  /// 网站拒绝（例如书架满了）：放弃这个操作，书只留在本地；网络问题：停下，留到下次。
-  Future<void> _flush(Api api, Map<String, RemoteBook>? remote) async {
+  /// 加入被网站明确拒绝（例如书架满了）：书只留在本地；删除失败、登录失效或网络问题：保留操作，下次重试。
+  Future<String?> _flush(Api api, Map<String, RemoteBook>? remote, String uid) async {
     final done = <String, Object?>{}; // 处理完的 aid → 当时的操作
+    String? error;
     try {
       for (final MapEntry(key: aid, value: op) in _ops().entries) {
+        if (!_sameAccount(uid)) return null;
         _flushingAid = aid;
         try {
           if (op['op'] == 'add') {
@@ -317,10 +377,17 @@ class LibraryController extends Notifier<LibraryState> {
             }
             remote?.remove(aid);
           }
+          if (!_sameAccount(uid)) return null;
           done[aid] = op['op'];
-        } on Wenku8UnexpectedPageException {
-          done[aid] = op['op'];
-        } catch (_) {
+        } on Wenku8ActionRejectedException catch (e) {
+          if (op['op'] == 'add') {
+            done[aid] = op['op'];
+          } else {
+            error = e.toString();
+            break;
+          }
+        } catch (e) {
+          error = e.toString();
           break;
         }
       }
@@ -328,8 +395,10 @@ class LibraryController extends Notifier<LibraryState> {
       _flushingAid = null;
     }
     // 推送期间用户可能又加 / 移了书：重新读一遍，只去掉处理过且没变的
+    if (!_sameAccount(uid)) return null;
     final ops = _ops()..removeWhere((aid, op) => done.containsKey(aid) && done[aid] == op['op']);
     await _box.put('lib:ops', ops);
+    return error;
   }
 
   /// 和网站书架同步：拉网站全部 6 个书架 → 推本地排队的操作 → 对一遍。没登录、离线时什么都不做。
@@ -340,22 +409,30 @@ class LibraryController extends Notifier<LibraryState> {
     if (s.offline) return force ? '现在是离线模式（没连上网站），点顶部的提示重新连接后再下拉' : null;
     if (_syncing) return force ? '正在同步，稍等一下' : null;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final since = (_box.get('lib:sync') as int?) ?? 0;
-    if (!force && now - since < 30 * 60 * 1000) return null;
+    final owner = _box.get('lib:imported');
+    final first = owner != s.user.uid;
+    final since = first ? 0 : ((_box.get('lib:sync') as int?) ?? 0);
+    if (!first && !force && now - since < 30 * 60 * 1000) return null;
     _syncing = true;
     try {
+      // 旧账号的操作不能发送给新账号；换号后在新账号下排的、游客排的照常推送。
+      await _claimOps(s.user.uid);
+      if (!_sameAccount(s.user.uid)) return null;
       final api = ref.read(apiProvider);
       final remote = <String, RemoteBook>{};
       for (var shelf = 0; shelf < 6; shelf++) {
         if (shelf > 0) await Future<void>.delayed(const Duration(seconds: 1)); // 连续读太快，网站会回 429
-        for (final b in (await api.bookshelf(shelf, fresh: true)).list) {
+        if (!_sameAccount(s.user.uid)) return null;
+        final shelfBooks = (await api.bookshelf(shelf, fresh: true)).list;
+        if (!_sameAccount(s.user.uid)) return null;
+        for (final b in shelfBooks) {
           remote.putIfAbsent(b.aid, () => (bid: b.bid, title: b.title, img: b.img, shelf: shelf));
         }
       }
-      await _flush(api, remote);
-      // 拉书架这几秒里 WebDAV 同步可能已经合并完、重建了书架：这个实例的 state 已经过时，交给新实例下次再对
-      if (!ref.mounted) return null;
-      final first = _box.get('lib:imported') != s.user.uid;
+      final flushError = await _flush(api, remote, s.user.uid);
+      // 网络期间账号可能已改变，或 WebDAV 已重建书架：旧结果不再对账。
+      if (!_sameAccount(s.user.uid)) return null;
+      _refresh();
       var cats = state.cats;
       if (first) {
         // 第一次导入：网站书架 2~6 里有书的，建同名分类，书放进去，以后网站上只用默认书架
@@ -365,14 +442,16 @@ class LibraryController extends Notifier<LibraryState> {
       final ops = {for (final e in _ops().entries) e.key: e.value['op'] as String};
       final next = reconcile(state.books, remote, ops, now: now, firstImport: first);
       // 网站上被移除的：记下删除，不然别的设备下次同步又把它带回来
-      await Sync.tombstone([for (final aid in state.books.keys) if (!next.containsKey(aid)) 'lib:$aid']);
+      final removed = [for (final aid in state.books.keys) if (!next.containsKey(aid)) 'lib:$aid'];
       final readAfter = removedButRead(state.books, next, since: since, lastRead: ReadingProgress.lastRead);
-      await _save(next, cats);
+      await Future.wait([
+        _save(next, cats),
+        Sync.tombstone(removed),
+        _box.putAll({'lib:imported': s.user.uid, 'lib:sync': now}),
+      ]);
       LibraryStore.noteRemovedElsewhere(readAfter);
-      await _box.put('lib:imported', s.user.uid);
-      await _box.put('lib:sync', now);
-      if (details) unawaited(prefetchDetails());
-      return null;
+      if (details && _sameAccount(s.user.uid)) unawaited(prefetchDetails());
+      return flushError;
     } catch (e) {
       return e.toString();
     } finally {

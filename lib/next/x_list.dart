@@ -1,6 +1,7 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 
 import 'theme_doodle.dart';
+import 'text.dart';
 
 /// 「我的」、设置、设置子页面共用的列表零件，照 X（推特）侧边栏的样子：没有卡片和边框，铺在页面底色上，
 /// 线条图标、黑白灰文字，靠字号、粗细、留白和细分隔线分层；强调色只用在开关、选中这些控件上。
@@ -250,15 +251,28 @@ Future<T?> pickOption<T>(BuildContext context, String title, T current, Map<T, S
 
 /// 滑块：标题和当前值一行，滑块在下面
 class XSlider extends StatelessWidget {
-  const XSlider({super.key, required this.title, required this.label, required this.slider});
+  const XSlider({super.key, required this.title, required this.label, required this.slider, this.compact = false});
 
   final String title;
   final String label;
   final Widget slider;
+  final bool compact; // 标题、滑块、当前值挤在一行（阅读设置面板空间小）
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    if (compact) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(20, 2, 20, 2),
+        child: Row(
+          children: [
+            SizedBox(width: 72, child: Text(title, style: TextStyle(fontSize: 15.5, color: scheme.onSurface))),
+            Expanded(child: SliderTheme(data: SliderTheme.of(context).copyWith(padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 10), tickMarkShape: SliderTickMarkShape.noTickMark), child: slider)),
+            SizedBox(width: 44, child: Text(label, textAlign: TextAlign.end, style: TextStyle(fontSize: 15, color: scheme.onSurfaceVariant))),
+          ],
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 10, 20, 4),
       child: Column(
