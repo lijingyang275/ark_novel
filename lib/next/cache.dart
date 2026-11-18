@@ -229,6 +229,8 @@ class ChapterCache {
   static String sizeLabel(String aid) => sizeText(bytesOf(aid));
 }
 
+final chapterCacheChangesProvider = StreamProvider.autoDispose<BoxEvent>((ref) => Hive.box('chapter_index').watch());
+
 String sizeText(int bytes) => bytes > 1 << 20 ? '${(bytes / (1 << 20)).toStringAsFixed(1)} MB' : '${(bytes / 1024).round()} KB';
 
 /// 网页原文的离线备份（详情、目录、书架、用户页）：联网并解析成功后才更新，断网时拿来顶替。

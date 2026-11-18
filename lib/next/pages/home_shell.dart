@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:home_widget/home_widget.dart';
 
+import '../../models/common/wenku8_node.dart';
 import '../app_prefs.dart';
 import '../cache.dart';
 import '../env.dart';
@@ -166,7 +167,12 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       if (ReadingWidget.supported) _pushWidget();
     } else if (state == AppLifecycleState.resumed) {
       Sync.auto();
-      ref.read(libraryProvider.notifier).sync(); // 距上次不到 30 分钟会跳过
+      final s = ref.read(sessionProvider);
+      if (s is SessionLoggedIn && s.offline && !s.needsVerify) {
+        unawaited(ref.read(sessionProvider.notifier).restore(silent: true));
+      } else {
+        ref.read(libraryProvider.notifier).sync(); // 距上次不到 30 分钟会跳过
+      }
     }
   }
 
@@ -219,7 +225,8 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       ref.listen(themeModeProvider, (_, _) => _scheduleWidget());
     }
     ref.listen(sessionProvider, (prev, next) {
-      if (prev is! SessionLoggedIn && next is SessionLoggedIn && !next.offline) _syncAndCheck();
+      final wasOffline = prev is! SessionLoggedIn || prev.offline;
+      if (wasOffline && next is SessionLoggedIn && !next.offline) _syncAndCheck();
     });
     ref.watch(updateProvider);
     final session = ref.watch(sessionProvider);
@@ -240,7 +247,22 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
           Material(
             color: Theme.of(context).colorScheme.surfaceContainer,
             child: InkWell(
-              onTap: () => needsVerify ? context.push(Routes.verify) : ref.read(sessionProvider.notifier).restore(),
+              onTap: needsVerify
+                  ? () => context.push(Routes.verify)
+                  : () async {
+                      final reason = await ref.read(sessionProvider.notifier).restore(silent: true);
+                      if (!mounted || reason == null) return;
+                      final onNet = ref.read(nodeProvider) == Wenku8Node.wwwWenku8Net;
+                      final messenger = ScaffoldMessenger.of(this.context)..hideCurrentSnackBar();
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content: Text(onNet ? '$reason（wenku8.net 可能被本地 DNS 拦截，可切到 wenku8.cc）' : reason),
+                          action: onNet
+                              ? SnackBarAction(label: '切到 wenku8.cc', onPressed: () => ref.read(nodeProvider.notifier).set(Wenku8Node.wwwWenku8Cc))
+                              : null,
+                        ),
+                      );
+                    },
               child: SafeArea(
                 bottom: false,
                 child: Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: Row(children: [const Icon(Icons.cloud_off_outlined, size: 16), const SizedBox(width: 8), Expanded(child: Text(needsVerify ? '被网站的验证拦住了，点这里去验证' : '离线模式，显示的是已保存的内容，点这里重新连接', style: const TextStyle(fontSize: 12)))])),

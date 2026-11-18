@@ -44,6 +44,7 @@ class Backup {
     'imgHq',
     'coverSkipDropped',
     'coverRetrimmed',
+    'unlock:addon',
   };
 
   static bool _isLocal(String k) => _localKeys.contains(k) || k.startsWith('cf:');

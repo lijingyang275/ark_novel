@@ -43,7 +43,9 @@ class _StoragePageState extends ConsumerState<StoragePage> {
     return [('章节正文', text), ('图片', images), ('网页备份', pages), ('其他数据', other)];
   }
 
-  void _refresh() => setState(() => _sizes = _measure());
+  void _refresh() => setState(() {
+    _sizes = _measure();
+  });
 
   Future<bool> _ask(String title, String content) async =>
       await showDialog<bool>(

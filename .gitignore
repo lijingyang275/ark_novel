@@ -52,3 +52,4 @@ app.*.map.json
 # 本机开发信息（路径、设备等），不入库
 AGENTS.local.md
 CLAUDE.local.md
+pubspec_overrides.yaml

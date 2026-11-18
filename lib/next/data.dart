@@ -45,7 +45,7 @@ class Api {
   final Wenku8Urls _urls;
   final String _base;
 
-  /// 受限书的正文改从文库 App 接口或全本 TXT 取
+  /// 受限章节的正文由运行期扩展工具尝试获取
   final UnlockService? unlock;
 
   /// 当前用户 ID（游客为 guest）：账号私有页面（书架）的离线备份按它分开存。
@@ -96,7 +96,7 @@ class Api {
 
   Future<PageResult> category(String tag, String sort, int page) async => _list(await _client.getPage(_urls.category(tag, sort, page), charsetParam: false));
 
-  Future<PageResult> completed(int page) async => _list(await _client.getPage(_urls.completedNovels(page)));
+  Future<PageResult> completed(int page) async => _list(await _client.getPage(_urls.completedNovels(page), charsetParam: false));
 
   DateTime _lastSearch = DateTime(0);
 
@@ -117,7 +117,7 @@ class Api {
   }
 
   Future<PageResult> _search(String keyword, {required bool byAuthor, required int page}) async {
-    final html = await _client.getPage(byAuthor ? _urls.searchByAuthor(keyword, page) : _urls.searchByTitle(keyword, page));
+    final html = await _client.getPage(byAuthor ? _urls.searchByAuthor(keyword, page) : _urls.searchByTitle(keyword, page), charsetParam: false);
     final doc = parse(html);
     lastFailedHtml = null;
     if (Wenku8Parser.isErrorPage(html)) {
@@ -170,10 +170,10 @@ class Api {
 
   /// 加入默认书架。wenku8 返回"出现错误！"页时说明失败（例如书架满了）。
   Future<void> addToBookshelf(String aid) async {
-    _checkAction(await _client.getPage(_urls.addToBookshelf(aid)));
+    _checkAction(await _client.getPage(_urls.addToBookshelf(aid), charsetParam: false));
   }
 
-  Future<void> removeFromBookshelf(String bid) async => _checkAction(await _client.getPage(_urls.removeFromBookshelf(bid)));
+  Future<void> removeFromBookshelf(String bid) async => _checkAction(await _client.getPage(_urls.removeFromBookshelf(bid), charsetParam: false));
 
   Future<void> removeBooks(List<String> bids, int classId) =>
       _submit(_urls.bookshelfAction(), {'checkid[]': bids, 'classlist': classId, 'checkall': 'checkall', 'newclassid': -1, 'classid': classId});
@@ -181,16 +181,16 @@ class Api {
   Future<void> moveBooks(List<String> bids, int classId, int newClassId) =>
       _submit(_urls.bookshelfAction(), {'checkid[]': bids, 'classlist': classId, 'checkall': 'checkall', 'newclassid': newClassId, 'classid': classId});
 
-  Future<String> vote(String aid) async => Wenku8Parser.voteResult(await _client.getPage(_urls.vote(aid)));
+  Future<String> vote(String aid) async => Wenku8Parser.voteResult(await _client.getPage(_urls.vote(aid), charsetParam: false));
 
-  Future<List<CommentItem>> comments(String aid, int page) async => Wenku8Parser.comments(await _client.getPage(_urls.comments(aid, page)));
+  Future<List<CommentItem>> comments(String aid, int page) async => Wenku8Parser.comments(await _client.getPage(_urls.comments(aid, page), charsetParam: false));
 
   Future<void> sendComment(String aid, String title, String content) =>
       _submit(_urls.sendComment(aid), 'ptitle=${_enc(title)}&pcontent=${_enc(content)}&Submit=${_urls.submitButtonValue()}');
 
   Future<void> sendReply(String aid, String rid, String content) => _submit(_urls.sendReply(aid, rid), 'pcontent=${_enc(content)}&Submit=${_urls.submitButtonValue()}');
 
-  Future<List<ReplyItem>> replies(String rid, int page) async => Wenku8Parser.replies(await _client.getPage(_urls.replies(rid, page)));
+  Future<List<ReplyItem>> replies(String rid, int page) async => Wenku8Parser.replies(await _client.getPage(_urls.replies(rid, page), charsetParam: false));
 }
 
 final apiProvider = Provider<Api>((ref) {

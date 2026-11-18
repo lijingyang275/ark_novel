@@ -171,7 +171,8 @@ ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPa
       ),
     ),
     navigationBarTheme: NavigationBarThemeData(
-      backgroundColor: scheme.surface,
+      // 比页面背景深一档，和上面的内容分开
+      backgroundColor: scheme.surfaceContainerLow,
       surfaceTintColor: Colors.transparent,
       indicatorColor: palette.scene ? scheme.secondary.withValues(alpha: 0.26) : scheme.primary.withValues(alpha: 0.14),
       indicatorShape: palette.scene ? RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)) : null,

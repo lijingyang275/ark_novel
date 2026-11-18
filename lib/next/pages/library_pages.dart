@@ -79,6 +79,7 @@ class CachePage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tasks = ref.watch(downloadProvider);
+    ref.watch(chapterCacheChangesProvider);
     ref.watch(volumeChangesProvider); // 卷封面取到了就换上
     final books = ChapterCache.books().entries.toList();
     return Scaffold(

@@ -115,9 +115,14 @@ void main() {
     expect(adapter.requested, hasLength(6));
   });
 
-  test('403 识别为 Cloudflare 拦截', () async {
-    final adapter = _FakeAdapter({'/x.php': () => ResponseBody.fromBytes(const [], 403)});
-    await expectLater(_client(adapter).getPage('https://www.wenku8.net/x.php'), throwsA(isA<Cloudflare403Exception>()));
+  test('403 识别为 Cloudflare 拦截；纯 nginx 403 直接按 HTTP 403 抛出', () async {
+    final cf = _FakeAdapter({'/x.php': () => ResponseBody.fromBytes(const [], 403)});
+    await expectLater(_client(cf).getPage('https://www.wenku8.net/x.php'), throwsA(isA<Cloudflare403Exception>()));
+
+    final nginx = _FakeAdapter({
+      '/x.php': () => ResponseBody.fromBytes(const [], 403, headers: {'server': ['nginx']}),
+    });
+    await expectLater(_client(nginx).getPage('https://www.wenku8.cc/x.php', charsetParam: false), throwsA(isA<Wenku8HttpException>()));
   });
 
   test('带 cf-mitigated: challenge 的 403 识别为需要验证', () async {

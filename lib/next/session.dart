@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cookie_jar/cookie_jar.dart';
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
+import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -223,13 +225,66 @@ final wenku8ClientProvider = Provider<Wenku8Client>((ref) {
   return client;
 });
 
-/// 图片专用的 Dio：和请求页面一样走所选代理，并带上浏览器 UA 和 Referer（图片服务器会检查）。
+typedef ImageChallengeFallback = Future<Uint8List?> Function(String url);
+
+/// 图床专用 cookie jar：与主站分开存放，切换账号或清理登录 cookie 时不影响图床已通过验证的 `cf_clearance`。
+final imageCookieJarProvider = Provider<CookieJar>((ref) => CookieJar());
+
+/// 图床遇到 Cloudflare 拦截时，用无头网页过一次盾并把图床 cookie / UA 写回给后续并发下载复用。
+final imageChallengeProvider = Provider<ImageChallengeFallback?>((ref) {
+  if (kIsWeb) return null;
+  return (url) {
+    final store = ref.read(sessionStoreProvider);
+    final node = ref.read(nodeProvider);
+    final jar = ref.read(imageCookieJarProvider);
+    final origin = 'https://${Uri.parse(url).host}';
+    return webFetchImage(
+      url,
+      referer: '${siteBase(node)}/',
+      proxy: ref.read(proxyProvider),
+      onSession: (cookies, ua) async {
+        await store.setCfCookie(origin, cookies);
+        await jar.saveFromResponse(Uri.parse(origin), Wenku8Client.parseCookieString(cookies));
+        if (ua != null && ua.isNotEmpty && ua != store.userAgent) {
+          await store.setUserAgent(ua);
+          ref.read(wenku8ClientProvider).dio.options.headers['User-Agent'] = ua;
+          ref.read(imageDioProvider).options.headers['User-Agent'] = ua;
+        }
+      },
+    );
+  };
+});
+
+/// 图片专用的 Dio：和请求页面一样走所选代理，并带上浏览器 UA、Referer 与各图床保存的 Cloudflare cookie。
 final imageDioProvider = Provider<Dio>((ref) {
   final store = ref.watch(sessionStoreProvider);
   final node = ref.watch(nodeProvider);
   ref.watch(proxyProvider);
-  return Dio(BaseOptions(responseType: ResponseType.bytes, connectTimeout: const Duration(seconds: 12), receiveTimeout: const Duration(seconds: 25), headers: {'User-Agent': store.userAgent, 'Referer': '${siteBase(node)}/'}))
+  final jar = ref.watch(imageCookieJarProvider);
+  final dio = Dio(BaseOptions(responseType: ResponseType.bytes, connectTimeout: const Duration(seconds: 12), receiveTimeout: const Duration(seconds: 25), headers: {'User-Agent': store.userAgent, 'Referer': '${siteBase(node)}/'}))
     ..httpClientAdapter = store.adapter();
+  if (!kIsWeb) {
+    final restoring = <String, Future<void>>{};
+    dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) async {
+          final host = options.uri.host;
+          if (host.isNotEmpty) {
+            final origin = 'https://$host';
+            await (restoring[origin] ??= () async {
+              final saved = store.cfCookie(origin);
+              if (saved != null && saved.isNotEmpty) {
+                await jar.saveFromResponse(Uri.parse(origin), Wenku8Client.parseCookieString(saved));
+              }
+            }());
+          }
+          handler.next(options);
+        },
+      ),
+    );
+    dio.interceptors.add(CookieManager(jar));
+  }
+  return dio;
 });
 
 final wenku8UrlsProvider = Provider<Wenku8Urls>((ref) => Wenku8Urls(siteBase(ref.watch(nodeProvider)), CharsetType.gbk));
@@ -284,8 +339,8 @@ class SessionController extends Notifier<SessionState> {
   @override
   SessionState build() {
     Future.microtask(restore);
-    // 换节点后重新确认：两个站点的验证状态不一样，顶部"被拦住 / 离线"提示要跟着变
-    ref.listen(nodeProvider, (_, _) => restore());
+    // 换节点后重新确认：两个站点的验证状态不一样，顶部"被拦住 / 离线"提示要跟着变（静默重连不闪回启动页）
+    ref.listen(nodeProvider, (_, _) => restore(silent: true));
     // 本地就能定下来的直接给，第一帧就进主界面，不在启动页停：没登录 → 游客；有上次的账号信息 → 先当已登录，确认在后台做。
     // 只有存了 cookie 却没有账号信息（刚登录完就被杀掉）时才在启动页等确认
     if (_store.cookie == null) return const SessionLoggedOut();
@@ -332,9 +387,9 @@ class SessionController extends Notifier<SessionState> {
     }
   }
 
-  /// 启动时：有保存的登录信息就向网站确认一次（最多等 6 秒）。失效则清除；网络出错、超时、被拦截都按"离线"处理，保留 cookie。
+  /// 启动时：有保存的登录信息就向网站确认一次（最多等 15 秒）。失效则清除；网络出错、超时、被拦截都按"离线"处理，保留 cookie。
   /// 有上次保存的账号信息就先当已登录，直接进主界面，确认在后台做，不在启动页干等。
-  Future<void> restore() async {
+  Future<String?> restore({bool silent = false}) async {
     final epoch = ++_restoreEpoch;
     try {
       await _restoreCookies();
@@ -342,35 +397,58 @@ class SessionController extends Notifier<SessionState> {
       // 出错也要放行：等着它的书架同步、小组件跳转不能一直卡住
       if (!_cookiesReady.isCompleted) _cookiesReady.complete();
     }
-    if (epoch != _restoreEpoch) return;
+    if (epoch != _restoreEpoch) return null;
     final startup = _startup;
     _startup = false;
     final cookie = _store.cookie;
     if (cookie == null) {
       state = const SessionLoggedOut();
-      return;
+      return null;
     }
     // 刚启动时 build 已经按上次的账号信息进了主界面，别再切回"检查中"；
-    // 验证完重新确认（afterVerify）仍走"检查中"，确认后主界面才会重新同步书架
-    if (!(startup && state is SessionLoggedIn)) state = const SessionChecking();
+    // 静默重连时也保持在主界面，避免 GoRouter 重定向闪回启动页。
+    if (!silent && !(startup && state is SessionLoggedIn)) state = const SessionChecking();
     final swaps = _cookieSwaps;
     try {
-      final user = await _fetchUser().timeout(const Duration(seconds: 6));
-      if (epoch != _restoreEpoch) return;
+      final user = await _fetchUser().timeout(const Duration(seconds: 15));
+      if (epoch != _restoreEpoch) return null;
       state = SessionLoggedIn(user);
+      return null;
     } catch (e) {
-      if (epoch != _restoreEpoch) return;
+      if (epoch != _restoreEpoch) return null;
       // 只有确认是要求登录的页面才清登录（见 [_fetchUser]）；途中换过 cookie 时请求可能没带登录 cookie，这个结论不可信
       if (e is Wenku8UnexpectedPageException && swaps == _cookieSwaps) {
         await _clear();
         state = const SessionLoggedOut(message: '登录已过期，请重新登录');
-        return;
+        return null;
       }
       // 联网失败不等于没登录：有 cookie 和上次保存的账号信息就按离线登录处理
       final cached = _tryParseUser(_store.userHtml);
       final verify = isCloudflare(e);
       state = cached == null ? SessionLoggedOut(needsVerify: verify) : SessionLoggedIn(cached, offline: true, needsVerify: verify);
+      return _describeError(e);
     }
+  }
+
+  static String _describeError(Object e) {
+    if (isCloudflare(e)) return '被网站验证拦截，需要完成一次验证';
+    if (e is TimeoutException) return '连接超时（15 秒）';
+    if (e is Wenku8HttpException) return '网站返回 HTTP ${e.status}';
+    if (e is _OddUserPage) return e.toString();
+    if (e is DioException) {
+      if (e.type == DioExceptionType.connectionTimeout || e.type == DioExceptionType.sendTimeout || e.type == DioExceptionType.receiveTimeout) {
+        return '连接超时';
+      }
+      final err = e.error;
+      final detail = err?.toString() ?? e.message ?? e.type.name;
+      if (detail.contains('127.0.0.1') || detail.contains('Connection refused')) {
+        return '连接被拒绝（本地 DNS 可能把域名指向了 127.0.0.1）';
+      }
+      if (err is SocketException) return '网络不可达：${err.osError?.message ?? err.message}';
+      if (err is HandshakeException) return 'TLS 握手失败：${err.message}';
+      return '连接失败：$detail';
+    }
+    return '连接失败：$e';
   }
 
   /// 过完 Cloudflare 验证（或登录）后，WebView 里的 cookie 分流：登录 cookie 全站点通用，其余只属于验证过的站点。
@@ -427,13 +505,15 @@ class SessionController extends Notifier<SessionState> {
   /// 取用户页。不是用户页时：确认是要求登录的页面才抛 [Wenku8UnexpectedPageException]（调用方据此清掉登录），
   /// 其他意外页面（维护页、没认出来的验证页）抛 [_OddUserPage]，按网络问题处理、保留登录。
   Future<UserInfo> _fetchUser() async {
-    final html = await _client.getPage(_urls.userInfo());
+    final html = await _client.getPage(_urls.userInfo(), charsetParam: false);
     final UserInfo user;
     try {
       user = Wenku8Parser.userInfo(html);
     } on Wenku8UnexpectedPageException {
       if (Wenku8Parser.needsLogin(html)) rethrow;
-      throw const _OddUserPage();
+      final m = RegExp(r'<title[^>]*>(.*?)</title>', caseSensitive: false, dotAll: true).firstMatch(html);
+      final title = m?.group(1)?.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+      throw _OddUserPage(title);
     }
     await _store.setUserHtml(html);
     return user;
@@ -464,10 +544,12 @@ class SessionController extends Notifier<SessionState> {
 
 final sessionProvider = NotifierProvider<SessionController, SessionState>(SessionController.new);
 
-/// 用户页的位置拿到的既不是用户页、也不是登录页（维护页、没认出来的验证页）：登录状态未知。
+/// 用户页的位置拿到的既不是用户页、也不是登录页（维护页、403 页、没认出来的验证页）：登录状态未知。
 class _OddUserPage implements Exception {
-  const _OddUserPage();
+  const _OddUserPage([this.title = '']);
+
+  final String title;
 
   @override
-  String toString() => '网站返回了意外的页面，暂时确认不了登录状态，请稍后再试';
+  String toString() => title.isEmpty ? '网站返回了意外页面，暂时确认不了登录状态' : '网站返回异常页面（$title）';
 }

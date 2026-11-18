@@ -10,7 +10,7 @@
 轻小说文库（wenku8）第三方客户端，基于 Flutter，支持 Android 和 macOS。
 
 <img alt="License" src="https://img.shields.io/badge/License-MIT-2F64A8?style=for-the-badge">
-<img alt="Android" src="https://img.shields.io/badge/Android-arm64-3DDC84?style=for-the-badge&logo=android&logoColor=white">
+<img alt="Android" src="https://img.shields.io/badge/Android-arm64%20%7C%20v7a%20%7C%20x86__64-3DDC84?style=for-the-badge&logo=android&logoColor=white">
 <img alt="macOS" src="https://img.shields.io/badge/macOS-Flutter-555555?style=for-the-badge&logo=apple&logoColor=white">
 
 </div>
@@ -85,7 +85,7 @@
 
 | 平台 | 状态 |
 |---|---|
-| Android | 支持（release 包仅含 arm64） |
+| Android | 支持 arm64、armeabi-v7a、x86_64（不加 `--target-platform` 时打通用包） |
 | macOS | 支持，需自行编译 |
 | iOS / Windows / Linux | 不支持 |
 | Web | 仅用于开发时通过 `tool/preview_proxy.dart` 预览界面 |

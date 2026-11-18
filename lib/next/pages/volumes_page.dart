@@ -43,12 +43,13 @@ int stackEdges(int count) => count <= 1 ? 0 : (count <= 4 ? 1 : (count <= 9 ? 2 
 
 /// 书架卷册模式的一叠书：第一卷的封面压着后面几卷（右边露出一条条真封面的边）。按自己的宽度排，飞的时候整叠一起放大。
 class VolumeStack extends StatelessWidget {
-  const VolumeStack({super.key, required this.cover, this.behind = const []});
+  const VolumeStack({super.key, required this.cover, this.behind = const [], this.aid});
 
   final String cover;
 
   /// 后面几卷的封面，近的在前
   final List<String> behind;
+  final String? aid;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -57,7 +58,7 @@ class VolumeStack extends StatelessWidget {
         decoration: BoxDecoration(borderRadius: BorderRadius.circular(6), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.32), blurRadius: 4, offset: const Offset(1.5, 0))]),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(6),
-          child: Stack(fit: StackFit.expand, children: [CoverImage(url), if (dim > 0) ColoredBox(color: Colors.black.withValues(alpha: dim))]),
+          child: Stack(fit: StackFit.expand, children: [CoverImage(url, aid: dim == 0 ? aid : null), if (dim > 0) ColoredBox(color: Colors.black.withValues(alpha: dim))]),
         ),
       );
       return Stack(

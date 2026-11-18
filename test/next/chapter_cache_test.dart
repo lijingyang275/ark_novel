@@ -1,10 +1,15 @@
 import 'dart:io';
 
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
 import 'package:ark_novel/models/content.dart';
 import 'package:ark_novel/next/cache.dart';
+import 'package:ark_novel/next/pages/library_pages.dart';
 import 'package:ark_novel/next/read_state.dart';
+import 'package:ark_novel/next/session.dart';
+import 'package:ark_novel/next/widgets.dart';
 
 void main() {
   setUpAll(() async {
@@ -91,5 +96,37 @@ void main() {
   test('存坏了解压不了的章节当作没缓存，不会一直读失败', () async {
     await Hive.lazyBox('chapters').put('5:x', {'z': [1, 2, 3], 'i': <String>[]});
     expect(await ChapterCache.get('5', 'x'), isNull);
+  });
+
+  testWidgets('离线缓存列表随缓存删除立即更新，不依赖下载任务或重新进入页面', (tester) async {
+    await tester.runAsync(() async {
+      for (final aid in ['10', '11']) {
+        await ChapterCache.put(aid, 'a', Content(text: '缓存正文', images: []));
+        await ChapterCache.setMeta(aid, '测试书 $aid', 1, 'https://example.invalid/cover.jpg', 'a');
+      }
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          sessionProvider.overrideWithBuild((ref, notifier) => const SessionLoggedOut()),
+          imageBytesProvider.overrideWith((ref, url) => throw StateError('本测试不加载封面')),
+        ],
+        child: const MaterialApp(home: CachePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('测试书 10'), findsOneWidget);
+    expect(find.text('测试书 11'), findsOneWidget);
+
+    await tester.runAsync(() => ChapterCache.remove('10'));
+    await tester.pumpAndSettle();
+    expect(find.text('测试书 10'), findsNothing);
+    expect(find.text('测试书 11'), findsOneWidget);
+
+    await tester.runAsync(() => ChapterCache.remove('11'));
+    await tester.pumpAndSettle();
+    expect(find.text('测试书 11'), findsNothing);
+    expect(find.text('还没有缓存'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }

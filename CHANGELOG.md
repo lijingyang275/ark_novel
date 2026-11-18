@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.3.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.2.0...ark_novel-v1.3.0) (2026-11-17)
+
+
+### Features
+
+* 增加 Bangumi 封面临时兜底与阅读页插图加载/失败重试占位 ([7be8062](https://github.com/chenshi221/ark_novel/commit/7be80624f2006fef91486a4c2a146856d14f4cdd))
+* 支持从文件和口令导入妙妙小工具扩展 ([d6d438f](https://github.com/chenshi221/ark_novel/commit/d6d438ff8ed1f5c591618640bb3cb30838a31f9a))
+
+
+### Bug Fixes
+
+* 删除章节缓存后立即更新存储空间和离线缓存列表 ([20c5e2d](https://github.com/chenshi221/ark_novel/commit/20c5e2d7ceba2fd9fa8da3398365c3753bfbe794))
+* 接入备选图床域名并支持图床 Cloudflare 过盾 ([d14a09f](https://github.com/chenshi221/ark_novel/commit/d14a09fa72e7d1561fe189fa4156f10fe9464d22))
+
+## [1.2.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.1.2...ark_novel-v1.2.0) (2026-11-14)
+
+
+### Features
+
+* 书架新增「立体」显示方式 ([0308119](https://github.com/chenshi221/ark_novel/commit/030811907ab280bd769361c83b2d6dee22e294bc))
+* 安卓安装包默认支持 arm64、armeabi-v7a 和 x86_64 三种架构 ([1e1736e](https://github.com/chenshi221/ark_novel/commit/1e1736ef96da478b04427f0521115d00bee9c79b))
+* 设置里的「书籍解锁」改为「妙妙小工具」，入口直接显示 ([26b6e78](https://github.com/chenshi221/ark_novel/commit/26b6e784277a001f02c5fbe5b98b1276662e88f5))
+
+
+### Bug Fixes
+
+* 修复 wenku8.cc 一直显示离线模式，重新连接失败时显示具体原因 ([99c0319](https://github.com/chenshi221/ark_novel/commit/99c0319d28a6b24a71f68e1beeb7b5c4215651d8))
+* 底部导航栏比页面背景深一档，和上面的内容分开 ([07c975f](https://github.com/chenshi221/ark_novel/commit/07c975f0a058b9a683baf5ac302c71c33a8e0c98))
+* 自定义分类标签（如「在追」）里打开卷册页时恢复封面飞过去的动画 ([0707da5](https://github.com/chenshi221/ark_novel/commit/0707da54758b0dc9bcaf0a83d9f8c012b0a3f54b))
+
 ## [1.1.2](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.1.1...ark_novel-v1.1.2) (2026-11-11)
 
 

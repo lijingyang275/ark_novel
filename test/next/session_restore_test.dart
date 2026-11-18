@@ -74,4 +74,52 @@ void main() {
     expect(c.read(sessionProvider), isA<SessionLoggedOut>());
     expect(store.cookie, isNull);
   });
+
+  test('无感重连（silent: true）：保持离线状态不切到 SessionChecking 闪回启动页', () async {
+    final (c, _) = await start(loginPage, swapCookies: true, cachedUser: userPage);
+    await settle(c, (s) => s is SessionLoggedIn && s.offline);
+    final seen = <SessionState>[];
+    c.listen(sessionProvider, (_, next) => seen.add(next));
+    final err = await c.read(sessionProvider.notifier).restore(silent: true);
+    expect(err, isNotNull);
+    expect(seen.any((s) => s is SessionChecking), isFalse);
+    expect(c.read(sessionProvider), isA<SessionLoggedIn>());
+    expect((c.read(sessionProvider) as SessionLoggedIn).offline, isTrue);
+  });
+
+  test('校验登录不带 charset=gbk，且 nginx 403 返回具体 HTTP 错误原因', () async {
+    final store = await SessionStore.open();
+    await store.setCookie('jieqiUserInfo=x');
+    await store.setUserHtml(userPage);
+    final requested = <Uri>[];
+    final client = Wenku8Client(
+      baseUrl: () => 'https://www.wenku8.cc',
+      charset: () => CharsetType.gbk,
+      headers: const {},
+      dio: Dio()
+        ..httpClientAdapter = _FnAdapter((o) {
+          requested.add(o.uri);
+          return ResponseBody.fromBytes(const [], 403, headers: {'server': ['nginx']});
+        }),
+    );
+    final c = ProviderContainer(overrides: [sessionStoreProvider.overrideWithValue(store), wenku8ClientProvider.overrideWithValue(client)]);
+    addTearDown(c.dispose);
+    c.listen(sessionProvider, (_, _) {});
+    await settle(c, (s) => s is SessionLoggedIn && s.offline);
+    expect(requested.first.query, isEmpty);
+    final err = await c.read(sessionProvider.notifier).restore(silent: true);
+    expect(err, '网站返回 HTTP 403');
+  });
+}
+
+class _FnAdapter implements HttpClientAdapter {
+  _FnAdapter(this.fn);
+
+  final ResponseBody Function(RequestOptions) fn;
+
+  @override
+  Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async => fn(options);
+
+  @override
+  void close({bool force = false}) {}
 }

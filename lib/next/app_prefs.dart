@@ -17,9 +17,6 @@ class AppPrefs extends Notifier<int> {
 
   static Future<void> write(String key, Object? value) => _box.putAll({'p.$key': value, ?_syncGroup(key): DateTime.now().millisecondsSinceEpoch});
 
-  /// 「书籍解锁」入口是否已显示：默认隐藏，在「关于」里连点版本号 7 次后出现（和安卓开发者模式一样）。
-  static bool get unlockEntry => read(P.unlockShown, true);
-
   @override
   int build() => 0;
 
@@ -88,10 +85,9 @@ class P {
   // 数据
   static const autoClear = 'data.autoClear'; // bool 每次打开 App 自动清理读过时缓存的章节
 
-  // 书籍解锁（受限书的正文）
-  static const unlockShown = 'unlock.shown'; // bool 入口是否已显示（关于页连点版本 7 次，类似安卓开发者模式）
-  static const unlock = 'unlock.enabled'; // bool 书籍解锁总开关
-  static const unlockApi = 'unlock.api'; // bool 先试文库 App 接口（带插图），不行再用全本 TXT
+  // 妙妙小工具（运行期扩展）
+  static const unlock = 'unlock.enabled'; // bool 总开关
+  static const unlockApi = 'unlock.api'; // bool 先试备用接口（带插图），不行再用整本文本通道
 
   // 安全
   static const lock = 'sec.lock'; // bool 生物识别锁

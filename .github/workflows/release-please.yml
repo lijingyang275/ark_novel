@@ -24,4 +24,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr || '{}').number }}
-        run: gh pr merge "$PR_NUMBER" --auto --merge --repo "$GITHUB_REPOSITORY"
+        # 正文留空：仓库默认把 PR 标题写进合并提交正文，release-please 会把它再算一次
+        run: gh pr merge "$PR_NUMBER" --auto --merge --body "" --repo "$GITHUB_REPOSITORY"

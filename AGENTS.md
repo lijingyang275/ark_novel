@@ -43,11 +43,11 @@ git fetch origin
 git switch -c <工具名>/<主题> origin/main   # 动手改代码前就开好分支
 git commit -m "fix: 修复书架同步失败"
 git push -u origin HEAD
-gh pr create --base main --fill
-gh pr merge --auto --merge --delete-branch
+gh pr create --base main --title "fix: 修复书架同步失败" --body "改了什么、怎么测的"
+gh pr merge --auto --merge --delete-branch --body ""   # 合并提交的正文留空，原因见下面「版本和发版」
 ```
 
-分支前缀用工具名：`claude/`、`codex/`、`antigravity/`。PR 只提到本仓库的 `main`，用合并提交。CI 通过后 GitHub 会自动合并；CI 失败就修好再推，修不好再找用户。
+分支前缀用工具名：`claude/`、`codex/`、`antigravity/`、`kiro/`。PR 只提到本仓库的 `main`，用合并提交。CI 通过后 GitHub 会自动合并；CI 失败就修好再推，修不好再找用户。
 
 只有用户说了才提交、推送、开 PR。用户明确说“编译”“提交推送”“merge”时直接做。
 
@@ -68,6 +68,8 @@ gh pr merge --auto --merge --delete-branch
 - 写 `Release-As` 前先看 `main` 上的 `pubspec.yaml`，用当前版本第 2 位加 1、第 3 位归零的版本号。
 - 构建号（`+` 后面的数字）每次发版自动加 1。
 - 改了 `lib`、`android`、`macos`、`windows` 或 `assets` 却没有 `fix:` 或 `feat:` 提交，CI 会失败。
+- 更新日志里每一条就是一个 `fix:` / `feat:` 提交的第一行，所以一项用户能感觉到的改动单独提交一次，第一行写给用户看；细节写在正文里，不进日志。
+- 合并 PR 时 `--body ""` 不能省：release-please 会把合并提交正文里的每一行 `fix:` / `feat:` 也当成一次提交，仓库默认把 PR 标题写进正文，日志里就会和原提交重复一条（1.0.4～1.1.2 每条都重复就是这个原因）。
 
 ## 边界
 

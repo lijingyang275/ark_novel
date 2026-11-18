@@ -8,11 +8,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
+import '../../models/common/wenku8_node.dart';
 import '../app_prefs.dart';
 import '../bookmarks.dart';
 import '../cache.dart';
 import '../cover_color.dart';
 import '../data.dart';
+import '../env.dart';
 import '../history.dart';
 import '../image_cache.dart';
 import '../library.dart';
@@ -21,6 +23,7 @@ import '../read_state.dart';
 import '../router.dart';
 import '../session.dart';
 import '../settings.dart';
+import '../shelf_3d.dart';
 import '../theme.dart';
 import '../theme_doodle.dart';
 import '../theme_squire.dart';
@@ -57,7 +60,7 @@ class ShelfOptions {
   /// 排序方向反过来（每种排序都有自己默认的方向）
   final bool reverse;
 
-  /// 0 网格 1 紧凑网格 2 列表 3 卷册（一本书画成一摞卷）
+  /// 0 网格 1 紧凑网格 2 列表 3 卷册（一本书画成一摞卷） 4 立体
   final int display;
 
   /// 筛选：有未读 / 已开始读 / 有缓存 / 有书签 / 已完结
@@ -255,6 +258,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
   TabController? _tc;
   List<String> _ids = [];
   String _shown = ''; // 标签栏上次滚到的标签
+  final _activeTab = ValueNotifier<String>(''); // 当前激活的标签 id，用来关掉后台保活标签页的重复 Hero
   final _keys = <String, GlobalKey>{};
   final _stripKey = GlobalKey();
   int _measureRetries = 0;
@@ -266,6 +270,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
   void dispose() {
     shelfSearching.value = false;
     _resumeHidden.dispose();
+    _activeTab.dispose();
     _tc?.dispose();
     _tabScroll.dispose();
     super.dispose();
@@ -288,6 +293,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
       final old = _tc;
       _tc = TabController(length: ids.length, vsync: this, initialIndex: math.max(0, ids.indexOf(cur)));
       _ids = ids;
+      _activeTab.value = _ids[_tc!.index];
       _measureRetries = 0; // 标签变了（比如新建了分类）要重新量下划线的位置
       _tc!.addListener(_scrollToTab);
       if (old != null) WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
@@ -298,8 +304,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
 
   void _scrollToTab() {
     final tc = _tc!;
-    if (tc.indexIsChanging) return;
     final id = _ids[tc.index];
+    _activeTab.value = id;
+    if (tc.indexIsChanging) return;
     if (AppPrefs.read(P.lastTab, '') != id) AppPrefs.write(P.lastTab, id);
     if (id == _shown) return;
     _shown = id;
@@ -419,7 +426,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
     if (books.isEmpty) return;
     final b = books[math.Random().nextInt(books.length)];
     final o = shelfOptionsFor(ref.read(shelfOptionsProvider), _curTab);
-    context.push(o.display == 3 ? Routes.volumes(b.aid) : Routes.novel(b.aid));
+    context.push(o.display == 3 || o.display == 4 ? Routes.volumes(b.aid) : Routes.novel(b.aid));
   }
 
   /// 只检查当前标签里的书的更新
@@ -532,7 +539,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
             Expanded(
               child: NotificationListener<ScrollNotification>(
                 onNotification: _onShelfScroll,
-                child: TabBarView(key: ObjectKey(tc), controller: tc, children: [for (final c in tabs) _Shelf(key: ValueKey(c.id), catId: c.id)]),
+                child: TabBarView(key: ObjectKey(tc), controller: tc, children: [for (final c in tabs) _Shelf(key: ValueKey(c.id), catId: c.id, activeTab: _activeTab)]),
               ),
             ),
           ],
@@ -626,7 +633,7 @@ class _ResumeBar extends ConsumerWidget {
                       height: 64,
                       decoration: BoxDecoration(borderRadius: BorderRadius.circular(6), boxShadow: const [BoxShadow(color: Color(0x55000000), blurRadius: 8, offset: Offset(0, 3))]),
                       clipBehavior: Clip.antiAlias,
-                      child: CoverImage(cover),
+                      child: CoverImage(cover, aid: h.aid),
                     ),
                     const SizedBox(width: 14),
                     Expanded(
@@ -792,9 +799,9 @@ class _OptionsSheetState extends ConsumerState<_OptionsSheet> with SingleTickerP
     return ListView(
       padding: const EdgeInsets.only(bottom: 16),
       children: [
-        XSegments<int>(title: '显示方式', value: o.display, options: const {0: '网格', 1: '紧凑', 2: '列表', 3: '卷册'}, onChanged: (v) => _set(o.copyWith(display: v))),
+        XChips<int>(title: '显示方式', value: o.display, options: const {0: '网格', 1: '紧凑', 2: '列表', 3: '卷册', 4: '立体'}, onChanged: (v) => _set(o.copyWith(display: v))),
         // 就是设置里的书架列数（竖屏、横屏分开记），这里放常用的几种；设置里选了别的也列出来
-        if (o.display != 2)
+        if (o.display != 2 && o.display != 4)
           XSegments<int>(
             title: '每行几本',
             value: cols,
@@ -847,10 +854,11 @@ class _OptionsSheetState extends ConsumerState<_OptionsSheet> with SingleTickerP
 }
 
 class _Shelf extends ConsumerStatefulWidget {
-  const _Shelf({super.key, required this.catId});
+  const _Shelf({super.key, required this.catId, required this.activeTab});
 
   /// 分类 id：空串是"默认"（全部的书），[_ongoingTab] / [_doneTab] 按是否完结分，其余是自己建的分类
   final String catId;
+  final ValueListenable<String> activeTab;
 
   @override
   ConsumerState<_Shelf> createState() => _ShelfState();
@@ -884,15 +892,31 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     super.dispose();
   }
 
-  /// 下拉：和网站书架同步，再检查更新。
+  /// 下拉：离线时先无感重连，再和网站书架同步、检查更新。
   Future<void> _refresh() async {
-    if (ref.read(sessionProvider) is! SessionLoggedIn) {
+    final s = ref.read(sessionProvider);
+    if (s is! SessionLoggedIn) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('登录后才能和网站书架同步，本地书架照常可用')));
       return;
+    }
+    if (s.offline && !s.needsVerify) {
+      final reason = await ref.read(sessionProvider.notifier).restore(silent: true);
+      if (!mounted) return;
+      if (reason != null) {
+        final onNet = ref.read(nodeProvider) == Wenku8Node.wwwWenku8Net;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(onNet ? '$reason：wenku8.net 可能被本地 DNS 拦截，可切到 wenku8.cc' : '重新连接失败：$reason'),
+            action: onNet ? SnackBarAction(label: '切到 wenku8.cc', onPressed: () => ref.read(nodeProvider.notifier).set(Wenku8Node.wwwWenku8Cc)) : null,
+          ),
+        );
+        return;
+      }
     }
     final err = await ref.read(libraryProvider.notifier).sync(force: true);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err == null ? '已和网站书架同步，书架共 ${ref.read(libraryProvider).books.length} 本' : '同步网站书架失败：$err')));
+    if (err == null && !isWebPreview) ref.read(volumeCoverQueueProvider).prefetchAll(ref.read(libraryProvider).books.keys).ignore();
     ref.read(updateProvider.notifier).refresh();
   }
 
@@ -1038,6 +1062,34 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
       body = _reorderable(books);
     } else if (o.display == 2) {
       body = ListView.builder(padding: const EdgeInsets.only(bottom: 24), itemCount: books.length, itemBuilder: (context, i) => _listTile(books[i]));
+    } else if (o.display == 4) {
+      // 正好一屏高；外面套一层能滚的，下拉同步照常可用
+      body = LayoutBuilder(
+        builder: (context, c) => SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: SizedBox(
+            height: c.maxHeight,
+            child: ValueListenableBuilder<String>(
+              valueListenable: widget.activeTab,
+              builder: (context, tab, _) => Shelf3DView(
+                books: books,
+                // 每个标签记住上次停在哪本，只存在本机（不进备份、不同步）
+                initialAid: Hive.box('session').get('shelf3d:${widget.catId}') as String?,
+                onFocusChanged: (aid) => Hive.box('session').put('shelf3d:${widget.catId}', aid),
+                selected: _selected,
+                heroEnabled: tab == widget.catId,
+                coverOf: _cover,
+                badgeOf: _badge,
+                subtitleOf: _shelf3dLine,
+                actionOf: _shelf3dAction,
+                onOpen: (b) => _openAndRefresh(Routes.volumes(b.aid)),
+                onRead: (b, cid) => _openAndRefresh(Routes.reader(b.aid, cid)),
+                onToggleSelect: (b) => _toggle(b.aid),
+              ),
+            ),
+          ),
+        ),
+      );
     } else if (o.display == 3) {
       body = LayoutBuilder(
         builder: (context, c) {
@@ -1127,6 +1179,27 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
 
   void _tap(LibBook b) => _selected.isEmpty ? _openAndRefresh(Routes.novel(b.aid)) : _toggle(b.aid);
 
+  /// 立体模式下面的按钮：读过的接着读，没读过的从第一卷开始读，没有分卷信息就打开卷册页。
+  /// 这是这一屏的主按钮，不受设置里封面角「继续阅读」小按钮开关的影响
+  ({String label, String? cid}) _shelf3dAction(LibBook b) {
+    final p = ReadingProgress.of(b.aid);
+    if (p != null) return (label: '继续读', cid: p.cid);
+    final vols = Volumes.of(b.aid);
+    return vols.isEmpty ? (label: '打开', cid: null) : (label: '开始读', cid: startCid(b.aid, vols.first));
+  }
+
+  /// 立体模式书名下面那一行：连载状态 · 读到第几卷 · 未读几章
+  String _shelf3dLine(LibBook b) {
+    final vols = Volumes.of(b.aid).length;
+    final at = readingVolume(b.aid);
+    final n = _unread(b.aid);
+    return [
+      b.done ? '已完结' : '连载中',
+      if (vols > 0) at >= 0 ? '读到第 ${at + 1} / $vols 卷' : '共 $vols 卷',
+      if (n > 0) '未读 $n 章' else if (ReadingProgress.of(b.aid) == null) '还没读',
+    ].join(' · ');
+  }
+
   /// 封面右下角的"继续阅读"：直接回到上次读的位置（读过才有）。
   Widget? _resume(LibBook b) {
     final p = ReadingProgress.of(b.aid);
@@ -1186,7 +1259,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
       child: Stack(
         fit: StackFit.expand,
         children: [
-          CoverImage(_cover(b)),
+          CoverImage(_cover(b), aid: b.aid),
           DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(10),
@@ -1224,11 +1297,15 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
                 return Stack(
                   clipBehavior: Clip.none, // 后面几卷的边在封面右边、Stack 外面
                   children: [
-                    // 整叠放进 Hero：点开时一起飞过去放大
+                    // 整叠放进 Hero：点开时一起飞过去放大（只有当前标签页开启 Hero，避免保活的相邻标签撞 tag）
                     SizedBox(
                       width: w,
                       height: h,
-                      child: Hero(tag: 'vols:${b.aid}', flightShuttleBuilder: volumeHeroShuttle, child: VolumeStack(cover: _cover(b), behind: behind)),
+                      child: ValueListenableBuilder<String>(
+                        valueListenable: widget.activeTab,
+                        builder: (context, tab, child) => HeroMode(enabled: tab == widget.catId, child: child!),
+                        child: Hero(tag: 'vols:${b.aid}', flightShuttleBuilder: volumeHeroShuttle, child: VolumeStack(cover: _cover(b), behind: behind, aid: b.aid)),
+                      ),
                     ),
                     if (badge != null) Positioned(top: 6, right: 6, child: badge),
                     if (vols.length == 1)
@@ -1264,7 +1341,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     final n = _unread(b.aid);
     return ListTile(
       selected: _selected.contains(b.aid),
-      leading: SizedBox(width: 40, height: 54, child: CoverImage(_cover(b))),
+      leading: SizedBox(width: 40, height: 54, child: CoverImage(_cover(b), aid: b.aid)),
       title: Text(b.shown, maxLines: 2, overflow: TextOverflow.ellipsis),
       subtitle: Text([if (n > 0) '未读 $n 章', if (ChapterCache.count(b.aid) > 0) '已缓存 ${ChapterCache.count(b.aid)} 章', if (b.done) '已完结', if (p == null) '还没读'].join(' · ')),
       trailing: _selected.contains(b.aid) ? Icon(Icons.check_circle, color: Theme.of(context).colorScheme.primary) : _resume(b),
@@ -1285,7 +1362,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     },
     itemBuilder: (context, i) => ListTile(
       key: ValueKey(books[i].aid),
-      leading: SizedBox(width: 40, height: 54, child: CoverImage(_cover(books[i]))),
+      leading: SizedBox(width: 40, height: 54, child: CoverImage(_cover(books[i]), aid: books[i].aid)),
       title: Text(books[i].shown, maxLines: 2, overflow: TextOverflow.ellipsis),
       trailing: ReorderableDragStartListener(index: i, child: const Icon(Icons.drag_handle)),
       onTap: () => context.push(Routes.novel(books[i].aid)),

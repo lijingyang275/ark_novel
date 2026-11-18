@@ -141,7 +141,9 @@ void flowTests() {
     final turns = <(int, int, int)>[];
     final fallback = <int>[];
     await t.pumpWidget(
-      ProviderScope(child: MaterialApp(
+      ProviderScope(
+        overrides: [imageBytesProvider.overrideWith((ref, url) => Future.error('test'))],
+        child: MaterialApp(
         home: PagedBody(
           key: UniqueKey(),
           chapter: c,

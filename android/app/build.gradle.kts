@@ -63,11 +63,34 @@ android {
     }
 }
 
-// release 包只给 arm64 手机：--target-platform 只管 Flutter 自己的 .so，
-// Cronet、sqlite3 等插件还会带 x86_64 / armeabi-v7a 各一份（约 14 MB）。debug 不受影响，模拟器照常能跑。
-androidComponents {
-    onVariants(selector().withBuildType("release")) { variant ->
-        variant.packaging.jniLibs.excludes.addAll(listOf("lib/x86_64/**", "lib/armeabi-v7a/**", "lib/x86/**"))
+// 按 --target-platform 过滤第三方 AAR 自带的原生库（--target-platform 本身只管 Flutter .so）；
+// 不传时默认保留 arm64-v8a / armeabi-v7a / x86_64 全架构通用打包。
+val targets = project.findProperty("target-platform")?.toString()
+val isSplit = project.findProperty("split-per-abi")?.toString()?.toBoolean() == true
+if (!isSplit) {
+    val keepAbis = targets
+        ?.split(",")
+        ?.mapNotNull {
+            when (it.trim()) {
+                "android-arm" -> "armeabi-v7a"
+                "android-arm64" -> "arm64-v8a"
+                "android-x64" -> "x86_64"
+                "android-x86" -> "x86"
+                else -> null
+            }
+        }
+        ?.toSet()
+        ?.takeIf { it.isNotEmpty() }
+        ?: setOf("arm64-v8a", "armeabi-v7a", "x86_64")
+    val excludedAbis = listOf("armeabi-v7a", "arm64-v8a", "x86_64", "x86")
+        .filter { it !in keepAbis }
+        .map { "lib/$it/**" }
+    if (excludedAbis.isNotEmpty()) {
+        androidComponents {
+            onVariants(selector().withBuildType("release")) { variant ->
+                variant.packaging.jniLibs.excludes.addAll(excludedAbis)
+            }
+        }
     }
 }
 

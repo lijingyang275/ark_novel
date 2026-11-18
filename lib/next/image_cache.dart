@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
@@ -10,6 +11,8 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../common/image_url_helper.dart';
+import '../models/custom_exception.dart';
 import 'app_prefs.dart';
 import 'cache.dart';
 import 'files.dart';
@@ -29,6 +32,8 @@ class ImageStore {
   var _memUsed = 0;
   final _inflight = <String, Future<Uint8List>>{};
   final _cancelled = <String>{};
+  final _hostChallenges = <String, Future<Uint8List?>>{}; // 同一个图床域名并发被拦时只拉起一次无头网页过盾
+  final _hostClearedAt = <String, DateTime>{};
 
   // 网络下载排队：同时最多 [_maxNet] 张，按请求顺序（列表从上到下）。不排队时几十张一起抢带宽，挂代理时谁都快不了，最后一起冒出来。
   // 滑出屏幕的会被 [cancel] 从队里拿掉，所以排着的基本都是眼前这一屏的。
@@ -158,6 +163,57 @@ class ImageStore {
     c.completeError(const ImageCancelled());
   }
 
+  static bool _isChallengeError(Object e) {
+    if (e is Cloudflare403Exception || e is CloudflareChallengeException) return true;
+    if (e is StateError) return true;
+    if (e is DioException) {
+      final status = e.response?.statusCode;
+      if (status == 403 || status == 503) {
+        final headers = e.response?.headers;
+        final server = headers?.value('server')?.toLowerCase() ?? '';
+        if (status == 403 && server.contains('nginx') && headers?.value('cf-ray') == null) return false;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<List<int>> _download(String requestUrl) async {
+    // 封面图床的 https 在国内不开代理时常连不上，http 正常；缓存文件名仍按 https 地址算，旧缓存照用
+    final res = await _ref.read(imageDioProvider).get<List<int>>(requestUrl.replaceFirst('https://img.wenku8.com/', 'http://img.wenku8.com/'));
+    final data = res.data;
+    if (data == null || data.isEmpty || (data.length > 5 && data[0] == 0x3C)) throw StateError('invalid image response');
+    return data;
+  }
+
+  Future<List<int>> _downloadViaChallenge(String targetUrl, ImageChallengeFallback challenge, DateTime requestStarted) async {
+    final host = Uri.tryParse(targetUrl)?.host.toLowerCase() ?? '';
+    final clearedAt = _hostClearedAt[host];
+    // 在本次请求发出之后才刚过完盾：cookie jar 已刷新，先直接重试一次，不必再开网页
+    if (clearedAt != null && !clearedAt.isBefore(requestStarted)) {
+      try {
+        return await _download(targetUrl);
+      } catch (e) {
+        if (!_isChallengeError(e)) rethrow;
+      }
+    }
+    final running = _hostChallenges[host];
+    if (running != null) {
+      await running;
+      return _download(targetUrl);
+    }
+    final f = challenge(targetUrl);
+    _hostChallenges[host] = f;
+    try {
+      final bytes = await f;
+      _hostClearedAt[host] = DateTime.now();
+      if (bytes != null && bytes.isNotEmpty) return bytes;
+      return await _download(targetUrl);
+    } finally {
+      if (identical(_hostChallenges[host], f)) _hostChallenges.remove(host);
+    }
+  }
+
   Future<Uint8List> _fetch(String url) async {
     final file = File(p.join((await _cacheDir()).path, _name(url)));
     Uint8List bytes;
@@ -171,10 +227,38 @@ class ImageStore {
       }
       await _slot(url);
       try {
-        // 封面图床的 https 在国内不开代理时常连不上，http 正常；缓存文件名仍按 https 地址算，旧缓存照用
-        final res = await _ref.read(imageDioProvider).get<List<int>>(url.replaceFirst('https://img.wenku8.com/', 'http://img.wenku8.com/'));
-        final data = res.data;
-        if (data == null || data.isEmpty || (data.length > 5 && data[0] == 0x3C)) throw StateError('invalid image response');
+        final started = DateTime.now();
+        List<int> data;
+        try {
+          data = await _download(url);
+        } catch (primaryErr) {
+          final alt = ImageUrlHelper.fallback(url);
+          if (alt.isNotEmpty && alt != url) {
+            final altStarted = DateTime.now();
+            try {
+              data = await _download(alt);
+            } catch (altErr) {
+              final challenge = _ref.read(imageChallengeProvider);
+              if (challenge == null) rethrow;
+              if (_isChallengeError(primaryErr)) {
+                try {
+                  data = await _downloadViaChallenge(url, challenge, started);
+                } catch (_) {
+                  if (!_isChallengeError(altErr)) rethrow;
+                  data = await _downloadViaChallenge(alt, challenge, altStarted);
+                }
+              } else if (_isChallengeError(altErr)) {
+                data = await _downloadViaChallenge(alt, challenge, altStarted);
+              } else {
+                rethrow;
+              }
+            }
+          } else {
+            final challenge = _ref.read(imageChallengeProvider);
+            if (challenge == null || !_isChallengeError(primaryErr)) rethrow;
+            data = await _downloadViaChallenge(url, challenge, started);
+          }
+        }
         bytes = await shrinkImage(Uint8List.fromList(data));
       } finally {
         _release();

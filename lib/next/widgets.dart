@@ -18,6 +18,7 @@ import 'router.dart';
 import 'session.dart';
 import 'theme_doodle.dart';
 import 'text.dart';
+import 'volumes.dart';
 
 /// 宽屏（平板、电脑）上把内容限制在 760 宽并居中。
 Widget contentWidth(Widget child) => Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 760), child: child));
@@ -133,28 +134,30 @@ final imageBytesProvider = FutureProvider.autoDispose.family<Uint8List, String>(
   final store = ref.read(imageStoreProvider);
   ref.onDispose(() => store.cancel(url)); // 没人看了（滑出屏幕），还在排队的就别下了
   return store.load(url);
-});
+}, retry: (_, _) => null);
 
 class NetImage extends ConsumerWidget {
-  const NetImage(this.url, {super.key, this.fit = BoxFit.cover, this.error, this.full = false});
+  const NetImage(this.url, {super.key, this.fit = BoxFit.cover, this.loading, this.error, this.errorBuilder, this.full = false});
 
   final String url;
   final BoxFit fit;
+  final Widget? loading;
   final Widget? error;
+  final Widget Function(VoidCallback retry)? errorBuilder;
 
   /// 按原图大小解码（能放大看的地方用）；默认按格子大小解码，见 [_Fitted]
   final bool full;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final fallback = error ?? const SizedBox.shrink();
-    if (url.isEmpty) return fallback;
+    Widget fallback() => errorBuilder?.call(() => ref.invalidate(imageBytesProvider(url))) ?? error ?? const SizedBox.shrink();
+    if (url.isEmpty) return fallback();
     final crop = splitCrop(url).crop;
-    if (isWebPreview) return _cropped(Image.network(displayImageUrl(splitCrop(url).url), fit: fit, errorBuilder: (_, _, _) => fallback), crop);
+    if (isWebPreview) return _cropped(Image.network(displayImageUrl(splitCrop(url).url), fit: fit, errorBuilder: (_, _, _) => fallback()), crop);
     final store = ref.read(imageStoreProvider);
     ref.watch(srVersionProvider);
     Widget image(Uint8List b, {bool fade = false}) {
-      Widget build(ImageProvider p) => _cropped(Image(image: p, fit: fit, gaplessPlayback: true, frameBuilder: fade ? _fadeIn : null, errorBuilder: (_, _, _) => fallback), crop);
+      Widget build(ImageProvider p) => _cropped(Image(image: p, fit: fit, gaplessPlayback: true, frameBuilder: fade ? _fadeIn : null, errorBuilder: (_, _, _) => fallback()), crop);
       if (full) return build(MemoryImage(b));
       final dpr = MediaQuery.devicePixelRatioOf(context);
       return LayoutBuilder(
@@ -170,7 +173,7 @@ class NetImage extends ConsumerWidget {
     final hit = store.peek(url);
     if (hit != null) return image(hit);
     // 不在内存里的（刚下载的、从磁盘读的）都短短淡入一下，比突然蹦出来顺眼；内存里有的上面已经同步画了
-    return ref.watch(imageBytesProvider(url)).when(data: (b) => image(b, fade: true), loading: () => const SizedBox.shrink(), error: (_, _) => fallback);
+    return ref.watch(imageBytesProvider(url)).when(skipLoadingOnRefresh: false, data: (b) => image(b, fade: true), loading: () => loading ?? const SizedBox.shrink(), error: (_, _) => fallback());
   }
 
   /// 提前下载，并按 [size]（逻辑像素，图片要放进的格子）解码进图片缓存：之后同样大小的 NetImage 直接出图。
@@ -243,20 +246,33 @@ class _Fitted extends ImageProvider<_Fitted> {
 Widget _fadeIn(BuildContext context, Widget child, int? frame, bool sync) =>
     sync ? child : AnimatedOpacity(opacity: frame == null ? 0 : 1, duration: const Duration(milliseconds: 150), child: child);
 
-class CoverImage extends StatelessWidget {
-  const CoverImage(this.url, {super.key});
+class CoverImage extends ConsumerWidget {
+  const CoverImage(this.url, {super.key, this.aid, this.volumeTitle});
 
   final String url;
+  final String? aid;
+  final String? volumeTitle;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
+    final icon = Icon(Icons.menu_book_outlined, color: scheme.onSurfaceVariant);
     return ClipRRect(
       borderRadius: BorderRadius.circular(10),
       child: DecoratedBox(
         decoration: BoxDecoration(color: scheme.surfaceContainer),
         child: SizedBox.expand(
-          child: NetImage(url, error: Icon(Icons.menu_book_outlined, color: scheme.onSurfaceVariant)),
+          child: NetImage(
+            url,
+            error: icon,
+            errorBuilder: aid == null
+                ? null
+                : (_) {
+                    final queue = ref.read(volumeCoverQueueProvider);
+                    Future.microtask(() => queue.reportCoverFailed(aid!, url, volumeTitle: volumeTitle));
+                    return icon;
+                  },
+          ),
         ),
       ),
     );
@@ -287,7 +303,7 @@ class NovelCard extends StatelessWidget {
         children: [
           AspectRatio(
             aspectRatio: 3 / 4,
-            child: Stack(fit: StackFit.expand, children: [CoverImage(imageUrl ?? Wenku8Parser.coverUrl(aid)), if (badge != null) Positioned(top: 6, right: 6, child: badge!), if (action != null) Positioned(right: 2, bottom: 2, child: action!)]),
+            child: Stack(fit: StackFit.expand, children: [CoverImage(imageUrl ?? Wenku8Parser.coverUrl(aid), aid: aid), if (badge != null) Positioned(top: 6, right: 6, child: badge!), if (action != null) Positioned(right: 2, bottom: 2, child: action!)]),
           ),
           const SizedBox(height: 8),
           Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyMedium?.copyWith(height: 1.3)),

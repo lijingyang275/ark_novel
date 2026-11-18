@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide Text;
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -36,7 +37,7 @@ enum SettingsSection {
   shelf('书架', Icons.auto_stories_outlined, '封面角标、列数、分类管理'),
   update('更新', Icons.update_outlined, '检查频率、网络条件、检查范围'),
   data('数据与存储', Icons.inventory_2_outlined, '缓存、备份与恢复、同步'),
-  unlock('书籍解锁', Icons.key_outlined, '受限书照常阅读'),
+  unlock('妙妙小工具', Icons.auto_fix_high_outlined, '遇到无法正常阅读的书？'),
   security('安全与隐私', Icons.lock_outline, '生物识别锁、防截屏、无痕模式'),
   network('网络', Icons.language, '站点节点、代理、系统网络栈'),
   about('关于', Icons.info_outline, '版本信息');
@@ -49,11 +50,10 @@ enum SettingsSection {
 }
 
 /// 设置首页的分组：组和组之间一道细线
-/// 设置首页的分组。「书籍解锁」是隐藏分组：关于页连点版本号 7 次后才会出现。
-List<List<SettingsSection>> _homeGroups(bool unlockEntry) => [
+const _homeGroups = [
   [SettingsSection.appearance, SettingsSection.reading, SettingsSection.shelf],
   [SettingsSection.update, SettingsSection.data],
-  [if (unlockEntry) SettingsSection.unlock, SettingsSection.security, SettingsSection.network, SettingsSection.about],
+  [SettingsSection.unlock, SettingsSection.security, SettingsSection.network, SettingsSection.about],
 ];
 
 /// 能搜到的设置项：(标题, 所在分组, 额外关键词)
@@ -97,8 +97,8 @@ const _items = <(String, SettingsSection, String)>[
   ('章节缓存', SettingsSection.data, '正文 清除 存储 自动清理'),
   ('备份', SettingsSection.data, '导出 导入 恢复'),
   ('同步', SettingsSection.data, '坚果云 webdav 多设备'),
-  ('书籍解锁', SettingsSection.unlock, '受限 下架 版权 解锁 阅读 TXT'),
-  ('App 接口', SettingsSection.unlock, '接口 API 中继 插图'),
+  ('妙妙小工具', SettingsSection.unlock, '无法阅读 书籍解锁 受限 下架 版权 导入 口令'),
+  ('备用接口', SettingsSection.unlock, '接口 API 插图 测试'),
   ('生物识别锁', SettingsSection.security, '指纹 面容 密码 锁定'),
   ('防截屏', SettingsSection.security, '录屏 最近任务 隐私'),
   ('无痕模式', SettingsSection.security, '不记录 历史 进度'),
@@ -120,13 +120,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
-    ref.watch(appPrefsProvider); // 连点版本号显示「书籍解锁」后，首页分组和搜索结果要跟着变
     final scheme = Theme.of(context).colorScheme;
-    final unlockEntry = AppPrefs.unlockEntry;
+    final addon = ref.watch(unlockAddonProvider);
     final q = _q.trim().toLowerCase();
     final hits = q.isEmpty
         ? const <(String, SettingsSection, String)>[]
-        : _items.where((e) => (unlockEntry || e.$2 != SettingsSection.unlock) && '${e.$1} ${e.$3} ${e.$2.title}'.toLowerCase().contains(q)).toList();
+        : _items.where((e) => (addon?.api != null || e.$1 != '备用接口') && '${e.$1} ${e.$3} ${e.$2.title}'.toLowerCase().contains(q)).toList();
     void open(SettingsSection s) => context.push(Routes.settingsSection(s.name));
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
@@ -155,7 +154,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               if (hits.isEmpty) const XNote('没有匹配的设置'),
               for (final (title, section, _) in hits) XEntry(icon: section.icon, title: title, subtitle: '在「${section.title}」里', onTap: () => open(section)),
             ] else
-              for (final (i, group) in _homeGroups(unlockEntry).indexed) ...[
+              for (final (i, group) in _homeGroups.indexed) ...[
                 if (i > 0) const XDivider(),
                 for (final s in group) XEntry(icon: s.icon, title: s.title, subtitle: s.summary, onTap: () => open(s)),
               ],
@@ -179,13 +178,6 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
   @override
   Widget build(BuildContext context) {
     ref.watch(appPrefsProvider);
-    // 隐藏入口：直接输路由也进不来，提示去哪里打开
-    if (widget.section == SettingsSection.unlock && !AppPrefs.unlockEntry) {
-      return Scaffold(
-        appBar: AppBar(title: Text(widget.section.title)),
-        body: contentWidth(ListView(children: const [XNote('书籍解锁入口是隐藏的。在「设置 → 关于」里连点版本号 7 次可以显示；默认关闭。')])),
-      );
-    }
     final children = switch (widget.section) {
       SettingsSection.appearance => _appearance(),
       SettingsSection.reading => _reading(),
@@ -515,44 +507,166 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
     ];
   }
 
-  // ---- 书籍解锁 ----
+  // ---- 妙妙小工具 ----
 
-  /// 用「文学少女」（aid=1）探测文库 App 接口还能不能取到目录。
+  static const _authorEmail = 'chenshi22150@gmail.com';
+
   Future<void> _testAppApi() async {
-    _snack('正在请求文库 App 接口…');
+    _snack('正在测试备用接口…');
+    final msg = await ref.read(unlockServiceProvider).testApi();
+    if (mounted) _snack(msg);
+  }
+
+  Future<void> _importAddonFromFile() async {
     try {
-      final volumes = await ref.read(appApiProvider).catalogue('1').timeout(const Duration(seconds: 25));
-      if (mounted) _snack(volumes.isEmpty ? '接口有响应，但没有解析出目录' : 'App 接口可用：解析到 ${volumes.length} 卷');
+      final picked = await FilePicker.pickFile(type: FileType.any);
+      final path = picked?.path;
+      if (path == null || !mounted) return;
+      final bytes = await File(path).readAsBytes();
+      final cfg = await ref.read(unlockAddonProvider.notifier).importBytes(bytes);
+      if (mounted) _snack('已导入：${cfg.name} v${cfg.version}');
     } catch (e) {
-      if (mounted) _snack('App 接口不可用：$e');
+      if (mounted) _snack('导入失败：$e');
     }
   }
 
+  Future<void> _importAddonFromClipboard() async {
+    final notifier = ref.read(unlockAddonProvider.notifier);
+    final clip = (await Clipboard.getData(Clipboard.kTextPlain))?.text?.trim() ?? '';
+    if (!mounted) return;
+    if (clip.isNotEmpty) {
+      try {
+        final cfg = await notifier.importText(clip);
+        if (mounted) _snack('已导入：${cfg.name} v${cfg.version}');
+        return;
+      } catch (_) {}
+    }
+    if (!mounted) return;
+
+    final ctrl = TextEditingController(text: clip);
+    String? error;
+    final imported = await showDialog<UnlockAddonConfig>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (innerContext, setLocal) => AlertDialog(
+          title: const Text('导入口令或配置'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: ctrl,
+                maxLines: 4,
+                minLines: 2,
+                decoration: InputDecoration(
+                  hintText: '粘贴 arktool:// 口令或 JSON 配置',
+                  errorText: error,
+                  border: const OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('取消')),
+            FilledButton(
+              onPressed: () async {
+                try {
+                  final cfg = await notifier.importText(ctrl.text);
+                  if (dialogContext.mounted) Navigator.pop(dialogContext, cfg);
+                } catch (e) {
+                  if (innerContext.mounted) setLocal(() => error = '$e');
+                }
+              },
+              child: const Text('导入'),
+            ),
+          ],
+        ),
+      ),
+    );
+    ctrl.dispose();
+    if (imported != null && mounted) {
+      _snack('已导入：${imported.name} v${imported.version}');
+    }
+  }
+
+  Future<void> _removeAddon() => _confirm(
+    '移除妙妙小工具？',
+    '移除后将清除本机导入的扩展配置，之后可随时重新导入。',
+    '移除',
+    () => ref.read(unlockAddonProvider.notifier).remove(),
+  );
+
   List<Widget> _unlock() {
+    final addon = ref.watch(unlockAddonProvider);
+    if (addon == null) {
+      return [
+        const XNote('遇到无法正常阅读的书籍？试试导入妙妙小工具扩展包。\n感兴趣的话，可以联系作者获取。'),
+        XTile(
+          title: '作者邮箱',
+          subtitle: _authorEmail,
+          trailing: const Icon(Icons.copy_outlined, size: 18),
+          onTap: () {
+            Clipboard.setData(const ClipboardData(text: _authorEmail));
+            _snack('已复制邮箱：$_authorEmail');
+          },
+        ),
+        const XDivider(),
+        const XGroupTitle('导入扩展包'),
+        XTile(
+          leading: const Icon(Icons.file_open_outlined),
+          title: '从文件导入',
+          subtitle: '选择 .arktool 或 .json 文件',
+          onTap: _importAddonFromFile,
+        ),
+        XTile(
+          leading: const Icon(Icons.content_paste_outlined),
+          title: '从剪贴板导入口令',
+          subtitle: '读取剪贴板中的 arktool:// 口令或 JSON',
+          onTap: _importAddonFromClipboard,
+        ),
+      ];
+    }
     final on = _prefs.get(P.unlock, true);
+    final apiRule = addon.api;
     return [
+      XTile(
+        leading: const Icon(Icons.extension_outlined),
+        title: '${addon.name} · v${addon.version}',
+        subtitle: addon.description.isEmpty ? '已导入本地运行期扩展' : addon.description,
+      ),
       XSwitch(
-        title: '启用书籍解锁',
+        title: '启用妙妙小工具',
         value: on,
         onChanged: (v) => _prefs.set(P.unlock, v),
-        help: '网站不给正文的受限书（「因版权问题，文库不再提供该小说的阅读」），打开章节时自动改从文库 App 接口取；接口不可用就下载这本书的全本 TXT，按网站目录拆好存进离线缓存，之后照常阅读。TXT 不带插图，插图章节会显示一句说明。',
+        help: '遇到网站不给正文的书籍时，打开章节自动改从扩展通道读取，并支持整本缓存后照常阅读。',
       ),
-      if (on) ...[
+      if (on && apiRule != null) ...[
         XSwitch(
-          title: '优先使用文库 App 接口',
+          title: apiRule.label ?? '优先使用备用接口',
           value: _prefs.get(P.unlockApi, true),
           onChanged: (v) => _prefs.set(P.unlockApi, v),
-          help: '接口能用时正文带插图；经社区中继 wenku8-relay.mewx.org，经常失效，失效时自动改用全本 TXT。',
+          help: apiRule.description ?? '接口能用时正文可带插图；失效时自动回退到整本文本通道。',
         ),
-        XTile(title: '测试 App 接口', onTap: _testAppApi),
+        XTile(title: '测试备用接口', onTap: _testAppApi),
       ],
+      const XDivider(),
+      const XGroupTitle('管理'),
       XTile(
-        title: '隐藏这个入口',
-        onTap: () => _confirm('隐藏书籍解锁？', '同时关闭解锁。在「关于」里连点版本号 7 次可以重新显示。', '隐藏', () async {
-          _prefs.set(P.unlock, false);
-          _prefs.set(P.unlockShown, false);
-          if (mounted) Navigator.of(context).maybePop();
-        }),
+        leading: const Icon(Icons.file_open_outlined),
+        title: '从文件更新 / 替换',
+        subtitle: '选择新的 .arktool 或 .json 文件',
+        onTap: _importAddonFromFile,
+      ),
+      XTile(
+        leading: const Icon(Icons.content_paste_outlined),
+        title: '从剪贴板口令更新 / 替换',
+        subtitle: '读取新的 arktool:// 口令或 JSON',
+        onTap: _importAddonFromClipboard,
+      ),
+      XTile(
+        leading: Icon(Icons.delete_outline, color: Theme.of(context).colorScheme.error),
+        title: '移除当前工具',
+        onTap: _removeAddon,
       ),
     ];
   }
@@ -623,33 +737,12 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
 
   // ---- 关于 ----
 
-  int _versionTaps = 0;
-  DateTime _lastVersionTap = DateTime.fromMillisecondsSinceEpoch(0);
-
-  /// 像安卓开发者模式：在「关于」里连点版本号 7 次，显示隐藏的「书籍解锁」入口（功能本身仍然默认关闭）。
-  void _tapVersion() {
-    if (AppPrefs.unlockEntry) return;
-    final now = DateTime.now();
-    if (now.difference(_lastVersionTap) > const Duration(seconds: 2)) _versionTaps = 0;
-    _lastVersionTap = now;
-    _versionTaps++;
-    final left = 7 - _versionTaps;
-    if (left > 0) {
-      if (left <= 3) _snack('再点 $left 次显示「书籍解锁」');
-      return;
-    }
-    _versionTaps = 0;
-    _prefs.set(P.unlockShown, true);
-    _snack('已显示「书籍解锁」入口：设置 → 书籍解锁（默认关闭，需要手动开启）');
-  }
-
   List<Widget> _about() => [
     FutureBuilder(
       future: PackageInfo.fromPlatform(),
       builder: (context, snap) => XTile(
         title: 'Ark Novel',
         subtitle: '轻小说文库第三方客户端 · MIT${snap.hasData ? ' · v${snap.data!.version}+${snap.data!.buildNumber}' : ''}',
-        onTap: AppPrefs.unlockEntry ? null : _tapVersion,
       ),
     ),
     XTile(

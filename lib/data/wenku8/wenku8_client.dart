@@ -48,8 +48,8 @@ class Wenku8Client {
   /// GET 页面被 Cloudflare 验证或 403 拦下时改用它取页面（原生 App 里是不显示的网页），返回解码好的 HTML
   final Future<String> Function(String url, {String? referer})? challengeFallback;
 
-  /// 把登录后拿到的 cookie 字符串（`a=1;b=2`）写入 cookie jar，对 [hosts] 里的每个节点都生效。
-  Future<void> restoreCookie(String cookie, Iterable<String> hosts) async {
+  /// 把 `a=1;b=2` 形式的 cookie 字符串解析成 [Cookie] 列表，转义 `dart:io` 不接受的字符。
+  static List<Cookie> parseCookieString(String cookie) {
     final cookies = <Cookie>[];
     for (final e in cookie.split(';').map((e) => e.trim()).where((e) => e.contains('='))) {
       final kv = e.split('=');
@@ -60,6 +60,12 @@ class Wenku8Client {
         // 名字里有 dart:io 不认的字符：只跳过这一个，别让整批都放不进去
       }
     }
+    return cookies;
+  }
+
+  /// 把登录后拿到的 cookie 字符串（`a=1;b=2`）写入 cookie jar，对 [hosts] 里的每个节点都生效。
+  Future<void> restoreCookie(String cookie, Iterable<String> hosts) async {
+    final cookies = parseCookieString(cookie);
     for (final host in hosts) {
       await _cookieJar.saveFromResponse(Uri.parse(host), cookies);
     }
@@ -159,6 +165,12 @@ class _CloudflareInterceptor extends Interceptor {
       return;
     }
     if (response.statusCode == 403) {
+      final server = response.headers.value('server')?.toLowerCase() ?? '';
+      // nginx 自身的 403 交给外层按 HTTP 403 处理，别拉起无头浏览器白等
+      if (server.contains('nginx') && response.headers.value('cf-ray') == null) {
+        handler.next(response);
+        return;
+      }
       handler.reject(Cloudflare403Exception(requestOptions: response.requestOptions));
       return;
     }

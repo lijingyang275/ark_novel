@@ -161,7 +161,7 @@ class _BodyState extends ConsumerState<_Body> {
                   context: context,
                   builder: (context) => GestureDetector(behavior: HitTestBehavior.opaque, onTap: () => Navigator.pop(context), child: InteractiveViewer(child: NetImage(cover, fit: BoxFit.contain, full: true))),
                 ),
-                child: CoverImage(cover),
+                child: CoverImage(cover, aid: aid),
               ),
             ),
             const SizedBox(width: 16),

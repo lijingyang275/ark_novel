@@ -178,6 +178,8 @@ class TapDetector extends StatefulWidget {
   State<TapDetector> createState() => _TapDetectorState();
 }
 
+bool _retryTap = false;
+
 class _TapDetectorState extends State<TapDetector> {
   Offset? _down;
   DateTime _at = DateTime.now();
@@ -195,6 +197,7 @@ class _TapDetectorState extends State<TapDetector> {
   Widget build(BuildContext context) => Listener(
     behavior: HitTestBehavior.translucent,
     onPointerDown: (e) {
+      _retryTap = false;
       _down = e.position;
       _at = DateTime.now();
       _ignore = widget.hasSelection?.call() ?? false;
@@ -202,10 +205,17 @@ class _TapDetectorState extends State<TapDetector> {
     onPointerMove: (e) {
       if (_down != null && (e.position - _down!).distance > 14) _down = null;
     },
-    onPointerCancel: (_) => _down = null,
+    onPointerCancel: (_) {
+      _retryTap = false;
+      _down = null;
+    },
     onPointerUp: (e) {
       final d = _down;
       _down = null;
+      if (_retryTap) {
+        _retryTap = false;
+        return;
+      }
       if (d == null || _ignore || DateTime.now().difference(_at) > const Duration(milliseconds: 300)) return;
       final box = context.findRenderObject() as RenderBox;
       if (!widget.onTap(box.globalToLocal(e.position), box.size, e.position)) return;
@@ -280,6 +290,41 @@ Mark? markAt(Chapter c, GlobalKey key, int base, Offset global) {
     if (idx >= m.start && idx < m.end) return m.rule.kind == RuleKind.highlight ? m : null;
   }
   return null;
+}
+
+Widget _readerImageWidget(String url, Color? color) {
+  final muted = (color ?? Colors.grey).withValues(alpha: 0.55);
+  return NetImage(
+    url,
+    fit: BoxFit.contain,
+    loading: SizedBox(
+      height: 220,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: muted)),
+            const SizedBox(height: 12),
+            Text('图片加载中…', style: TextStyle(fontSize: 13, color: muted)),
+          ],
+        ),
+      ),
+    ),
+    errorBuilder: (retry) => SizedBox(
+      height: 220,
+      child: Center(
+        child: Listener(
+          onPointerUp: (_) => _retryTap = true,
+          child: TextButton.icon(
+            onPressed: retry,
+            style: TextButton.styleFrom(foregroundColor: muted),
+            icon: const Icon(Icons.broken_image_outlined, size: 22),
+            label: const Text('图片加载失败，点击重试'),
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 /// 上下滚动。进度用字符偏移：保存时取视口顶部对应的字符，恢复时再换算回滚动位置，所以改字号、延迟加载插图都不会跳位置。
@@ -480,7 +525,7 @@ class _ScrollBodyState extends State<ScrollBody> {
               children: [
                 if (head > 0) chapterHeading(widget.title, widget.style, width, accent: widget.headingAccent),
                 Text.rich(widget.spanOf(0, c.text.length), key: _textKey, textScaler: TextScaler.noScaling, strutStyle: readerStrut(widget.style)),
-                for (final url in c.images) Padding(padding: const EdgeInsets.only(top: 16), child: NetImage(url, fit: BoxFit.contain)),
+                for (final url in c.images) Padding(padding: const EdgeInsets.only(top: 16), child: _readerImageWidget(url, widget.style.color)),
                 if (widget.onNext != null) Padding(padding: const EdgeInsets.only(top: 32), child: OutlinedButton(onPressed: widget.onNext, child: Text(widget.nextLabel))),
               ],
             ),
@@ -963,18 +1008,20 @@ class _PagedBodyState extends State<PagedBody> {
     return i >= f.covers && i - f.covers < f.textPages;
   }
 
+  Widget _readerImage(String url) => _readerImageWidget(url, widget.style.color);
+
   /// 排在第 [slot] 个位置的页：前面、后面排不下的是相邻章节的页，还没加载好就空着。
   Widget _slot(BuildContext context, int slot, bool live, EdgeInsets pad, {_Chrome chrome = _Chrome.full}) {
     final at = _at(slot);
     if (at == null) return const SizedBox.shrink();
     final (f, i, mine) = at;
-    if (i < f.covers) return Center(child: NetImage(f.cover!, fit: BoxFit.contain));
+    if (i < f.covers) return Center(child: _readerImage(f.cover!));
     return _single(context, f, i - f.covers, live && mine, pad, chrome);
   }
 
   Widget _single(BuildContext context, FlowPages f, int i, bool live, EdgeInsets pad, _Chrome chrome) {
     final c = f.chapter;
-    if (i >= f.textPages) return Center(child: NetImage(c.images[i - f.textPages], fit: BoxFit.contain));
+    if (i >= f.textPages) return Center(child: _readerImage(c.images[i - f.textPages]));
     final end = i + 1 < f.starts.length ? f.starts[i + 1] : c.text.length;
     final faint = TextStyle(fontSize: 11, color: widget.color.withValues(alpha: 0.5));
     final view = MediaQuery.viewPaddingOf(context);
