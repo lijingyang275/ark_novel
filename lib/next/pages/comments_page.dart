@@ -81,7 +81,7 @@ class _ThreadListState<T> extends ConsumerState<_ThreadList<T>> {
       _input.clear(); // 发送成功才清空，失败时保留输入
       await _load(reset: true);
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(friendlyError(e))));
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -89,33 +89,67 @@ class _ThreadListState<T> extends ConsumerState<_ThreadList<T>> {
 
   @override
   Widget build(BuildContext context) {
+    final loggedIn = ref.watch(sessionProvider) is SessionLoggedIn;
+    final theme = Theme.of(context);
+    final hintStyle = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    Widget footer() {
+      if (_error != null) return Center(child: TextButton(onPressed: _load, child: const Text('加载失败，点击重试')));
+      if (_loading) return const Padding(padding: EdgeInsets.symmetric(vertical: 12), child: Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))));
+      if (_end) return Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Center(child: Text('没有更多了', style: hintStyle)));
+      return const SizedBox.shrink();
+    }
+
     return Column(
       children: [
         Expanded(
           child: _items.isEmpty
-              ? (_loading ? const Center(child: CircularProgressIndicator()) : RefreshIndicator(onRefresh: () => _load(reset: true), child: StatePanel(title: _error != null ? '加载失败' : '还没有内容', detail: _error?.toString(), error: _error, onRetry: _error != null ? () => _load(reset: true) : null)))
+              ? (_loading
+                    ? const Center(child: CircularProgressIndicator())
+                    : RefreshIndicator(
+                        onRefresh: () => _load(reset: true),
+                        child: StatePanel(title: _error != null ? '加载失败' : '还没有内容', detail: _error?.toString(), error: _error, onRetry: _error != null ? () => _load(reset: true) : null),
+                      ))
               : RefreshIndicator(
                   onRefresh: () => _load(reset: true),
                   child: NotificationListener<ScrollNotification>(
                     onNotification: (n) {
-                      if (n.metrics.extentAfter < 400) _load();
+                      if (_error == null && !_end && n.metrics.extentAfter < 400) _load();
                       return false;
                     },
-                    child: ListView.builder(padding: const EdgeInsets.all(16), itemCount: _items.length, itemBuilder: (c, i) => widget.itemBuilder(c, _items[i])),
+                    child: contentWidth(
+                      ListView.builder(
+                        padding: const EdgeInsets.all(16),
+                        itemCount: _items.length + 1,
+                        itemBuilder: (c, i) => i < _items.length ? widget.itemBuilder(c, _items[i]) : footer(),
+                      ),
+                    ),
                   ),
                 ),
         ),
         SafeArea(
           top: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(controller: _input, minLines: 1, maxLines: 4, decoration: InputDecoration(hint: Text(widget.hint, maxLines: 1, overflow: TextOverflow.ellipsis))),
-                ),
-                IconButton(onPressed: _sending ? null : _send, icon: const Icon(Icons.send_outlined)),
-              ],
+          child: contentWidth(
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+              child: loggedIn
+                  ? Row(
+                      children: [
+                        Expanded(
+                          child: TextField(controller: _input, minLines: 1, maxLines: 4, decoration: InputDecoration(hint: Text(widget.hint, maxLines: 1, overflow: TextOverflow.ellipsis))),
+                        ),
+                        IconButton(
+                          tooltip: hz(context, '发送'),
+                          onPressed: _sending ? null : _send,
+                          icon: _sending ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.send_outlined),
+                        ),
+                      ],
+                    )
+                  : Row(
+                      children: [
+                        Expanded(child: Text('登录后可发表评论与回复', style: hintStyle)),
+                        TextButton(onPressed: () => context.push(Routes.login), child: const Text('去登录')),
+                      ],
+                    ),
             ),
           ),
         ),

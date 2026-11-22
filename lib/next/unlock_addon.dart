@@ -393,7 +393,13 @@ class UnlockAddonCodec {
       } catch (_) {
         throw const FormatException('口令格式损坏（解压失败）');
       }
+      if (plainBytes.length > maxBytes * 4) {
+        throw const FormatException('口令解压后体积超出限制');
+      }
       return _parseJsonText(utf8.decode(plainBytes));
+    }
+    if (trimmed.length > maxBytes * 4) {
+      throw const FormatException('配置内容超出长度限制');
     }
     return _parseJsonText(trimmed);
   }
@@ -411,6 +417,9 @@ class UnlockAddonCodec {
         plainBytes = GZipDecoder().decodeBytes(bytes);
       } catch (_) {
         throw const FormatException('文件解压失败');
+      }
+      if (plainBytes.length > maxBytes * 4) {
+        throw const FormatException('文件解压后体积超出限制');
       }
       return decodeText(utf8.decode(plainBytes));
     }

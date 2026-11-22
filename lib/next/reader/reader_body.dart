@@ -1,14 +1,19 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
 
+import '../env.dart';
+import '../image_cache.dart';
 import '../rules.dart';
 import '../settings.dart';
+import '../text.dart';
 import '../widgets.dart';
 import 'page_curl.dart';
 import 'page_physics.dart';
@@ -234,6 +239,7 @@ enum TapAction { prev, next, menu }
 /// [invert] 0 不反转 1 水平 2 垂直 3 两者（反转 = 把点的位置镜像一下）。
 /// 默认方案：翻页模式点左右两边翻页，滚动模式（[paged] 为 false）点哪里都呼出菜单，和以前一样。
 TapAction tapActionAt(int zone, int invert, Offset local, Size size, {required bool paged}) {
+  if (!paged) return TapAction.menu;
   var x = (local.dx / size.width).clamp(0.0, 1.0);
   var y = (local.dy / size.height).clamp(0.0, 1.0);
   if (invert == 1 || invert == 3) x = 1 - x;
@@ -253,8 +259,73 @@ TapAction tapActionAt(int zone, int invert, Offset local, Size size, {required b
     case 4:
       return TapAction.menu;
     default:
-      if (!paged) return TapAction.menu;
       return x < 0.3 ? TapAction.prev : (x > 0.7 ? TapAction.next : TapAction.menu);
+  }
+}
+
+/// 3×3 点击区域示意图，直观展示上一页 / 菜单 / 下一页的分布。
+class TapZoneDiagram extends StatelessWidget {
+  const TapZoneDiagram({super.key, required this.zone, required this.invert});
+
+  final int zone;
+  final int invert;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    const box = Size(90, 120);
+    (String, Color, Color) styleOf(TapAction a) => switch (a) {
+      TapAction.prev => ('上一页', scheme.secondary.withValues(alpha: 0.16), scheme.onSurface),
+      TapAction.menu => ('菜单', scheme.onSurface.withValues(alpha: 0.07), scheme.onSurfaceVariant),
+      TapAction.next => ('下一页', scheme.primary.withValues(alpha: 0.18), scheme.primary),
+    };
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+      child: Row(
+        children: [
+          Container(
+            width: 114,
+            height: 84,
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: scheme.outline),
+            ),
+            child: Column(
+              children: [
+                for (var r = 0; r < 3; r++)
+                  Expanded(
+                    child: Row(
+                      children: [
+                        for (var c = 0; c < 3; c++)
+                          () {
+                            final act = tapActionAt(zone, invert, Offset((c + 0.5) / 3 * box.width, (r + 0.5) / 3 * box.height), box, paged: true);
+                            final (label, bg, fg) = styleOf(act);
+                            return Expanded(
+                              child: Container(
+                                margin: const EdgeInsets.all(1.5),
+                                decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(4)),
+                                alignment: Alignment.center,
+                                child: Text(label, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: fg)),
+                              ),
+                            );
+                          }(),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Text(
+              zone == 4 ? '点击屏幕任意位置只呼出菜单，用滑动、滚轮或按键翻页。' : '点击对应区域即可翻页或呼出菜单；在页面顶部下拉可添加书签。',
+              style: TextStyle(fontSize: 12.5, height: 1.45, color: scheme.onSurfaceVariant),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -292,39 +363,129 @@ Mark? markAt(Chapter c, GlobalKey key, int base, Offset global) {
   return null;
 }
 
-Widget _readerImageWidget(String url, Color? color) {
-  final muted = (color ?? Colors.grey).withValues(alpha: 0.55);
-  return NetImage(
-    url,
-    fit: BoxFit.contain,
-    loading: SizedBox(
-      height: 220,
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+Widget _readerImageWidget(String url, Color? color) => _ReaderIllustration(url: url, color: color);
+
+class _ReaderIllustration extends ConsumerWidget {
+  const _ReaderIllustration({required this.url, this.color});
+
+  final String url;
+  final Color? color;
+
+  void _openViewer(BuildContext context, WidgetRef ref) {
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black87,
+      builder: (ctx) => Dialog.fullscreen(
+        backgroundColor: Colors.black,
+        child: Stack(
+          fit: StackFit.expand,
           children: [
-            SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: muted)),
-            const SizedBox(height: 12),
-            Text('图片加载中…', style: TextStyle(fontSize: 13, color: muted)),
+            InteractiveViewer(
+              minScale: 0.8,
+              maxScale: 5.0,
+              child: Center(child: NetImage(url, fit: BoxFit.contain, full: true)),
+            ),
+            Positioned(
+              top: MediaQuery.paddingOf(ctx).top + 8,
+              right: 12,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!isWebPreview)
+                    IconButton.filledTonal(
+                      tooltip: hz(ctx, '保存或分享图片'),
+                      style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
+                      icon: const Icon(Icons.ios_share, size: 20),
+                      onPressed: () async {
+                        try {
+                          final filePath = await ref.read(imageStoreProvider).path(url);
+                          await SharePlus.instance.share(ShareParams(files: [XFile(filePath)]));
+                        } catch (e) {
+                          if (ctx.mounted) ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('导出图片失败：$e')));
+                        }
+                      },
+                    ),
+                  const SizedBox(width: 8),
+                  IconButton.filledTonal(
+                    tooltip: hz(ctx, '关闭'),
+                    style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
+                    icon: const Icon(Icons.close, size: 20),
+                    onPressed: () => Navigator.pop(ctx),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
-    ),
-    errorBuilder: (retry) => SizedBox(
-      height: 220,
-      child: Center(
-        child: Listener(
-          onPointerUp: (_) => _retryTap = true,
-          child: TextButton.icon(
-            onPressed: retry,
-            style: TextButton.styleFrom(foregroundColor: muted),
-            icon: const Icon(Icons.broken_image_outlined, size: 22),
-            label: const Text('图片加载失败，点击重试'),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final muted = (color ?? Colors.grey).withValues(alpha: 0.55);
+    final loaded = isWebPreview || (!isWebPreview && (ref.read(imageStoreProvider).peek(url) != null || ref.watch(imageBytesProvider(url)).hasValue));
+    final img = NetImage(
+      url,
+      fit: BoxFit.contain,
+      loading: SizedBox(
+        height: 220,
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: muted)),
+              const SizedBox(height: 12),
+              Text('图片加载中…', style: TextStyle(fontSize: 13, color: muted)),
+            ],
           ),
         ),
       ),
-    ),
-  );
+      errorBuilder: (retry) => SizedBox(
+        height: 220,
+        child: Center(
+          child: Listener(
+            onPointerUp: (_) => _retryTap = true,
+            child: TextButton.icon(
+              onPressed: retry,
+              style: TextButton.styleFrom(foregroundColor: muted),
+              icon: const Icon(Icons.broken_image_outlined, size: 22),
+              label: const Text('图片加载失败，点击重试'),
+            ),
+          ),
+        ),
+      ),
+    );
+    if (!loaded) return img;
+    return GestureDetector(
+      onLongPress: () => _openViewer(context, ref),
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          img,
+          Positioned(
+            right: 8,
+            bottom: 8,
+            child: Listener(
+              onPointerUp: (_) => _retryTap = true,
+              child: Material(
+                color: Colors.black45,
+                borderRadius: BorderRadius.circular(16),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(16),
+                  onTap: () => _openViewer(context, ref),
+                  child: const Padding(
+                    padding: EdgeInsets.all(6),
+                    child: Icon(Icons.zoom_out_map_rounded, size: 16, color: Colors.white70),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// 上下滚动。进度用字符偏移：保存时取视口顶部对应的字符，恢复时再换算回滚动位置，所以改字号、延迟加载插图都不会跳位置。
@@ -459,7 +620,10 @@ class _ScrollBodyState extends State<ScrollBody> {
       widget.onOffset(_charAtTop());
       return;
     }
-    if (off > 0 && ro is RenderParagraph) {
+    if (off > 0 && widget.chapter.text.trim().isEmpty && widget.chapter.images.isNotEmpty && max > 0) {
+      final idx = (off - 1).clamp(0, widget.chapter.images.length - 1);
+      _controller.jumpTo((idx / widget.chapter.images.length * max).clamp(0.0, max));
+    } else if (off > 0 && ro is RenderParagraph) {
       final caret = ro.getOffsetForCaret(TextPosition(offset: math.min(off, widget.chapter.text.length)), Rect.zero);
       _controller.jumpTo((_padTop + caret.dy).clamp(0.0, max));
     }
@@ -467,6 +631,13 @@ class _ScrollBodyState extends State<ScrollBody> {
   }
 
   int _charAtTop() {
+    if (widget.chapter.text.trim().isEmpty) {
+      if (!_controller.hasClients || widget.chapter.images.isEmpty) return 0;
+      final max = _controller.position.maxScrollExtent;
+      if (max <= 0) return 0;
+      final ratio = (_controller.position.pixels / max).clamp(0.0, 0.9999);
+      return 1 + (ratio * widget.chapter.images.length).floor();
+    }
     final ro = _textKey.currentContext?.findRenderObject();
     if (ro is! RenderParagraph) return 0;
     final top = (context.findRenderObject() as RenderBox).localToGlobal(Offset.zero).dy;
@@ -611,7 +782,7 @@ class _PullBookmarkState extends State<PullBookmark> with SingleTickerProviderSt
     Widget child = Transform.translate(offset: Offset(0, shown), child: widget.child);
     child = widget.drag
         ? GestureDetector(
-            supportedDevices: const {PointerDeviceKind.touch, PointerDeviceKind.trackpad, PointerDeviceKind.stylus, PointerDeviceKind.invertedStylus}, // 鼠标拖动留给选字，和翻页一样
+            supportedDevices: const {PointerDeviceKind.touch, PointerDeviceKind.stylus, PointerDeviceKind.invertedStylus}, // 鼠标拖动留给选字，触控板双指留给翻页
             onVerticalDragUpdate: (d) => _update(_pull + d.delta.dy),
             onVerticalDragEnd: (_) => _release(),
             onVerticalDragCancel: _release,
@@ -835,7 +1006,7 @@ class _PagedBodyState extends State<PagedBody> {
   FlowPages? _meCache;
   FlowPages get _me => _meCache ??= FlowPages(chapter: _c, title: widget.title, spanOf: widget.spanOf, starts: _starts, head: _head, cover: _cols == 2 ? widget.volumeCover : null, volumeProgress: widget.volumeProgress);
 
-  int get _lead => _cols == 2 ? widget.lead : 0;
+  int get _lead => _cols == 2 && widget.prevChapter != null ? widget.lead : 0;
 
   int get _textPages => _me.textPages;
 

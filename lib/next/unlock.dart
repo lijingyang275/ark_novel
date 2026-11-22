@@ -179,7 +179,9 @@ class UnlockService {
     final seen = _box.get('unlock:txt:$aid') as Map?;
     final had = (seen?['m'] as List?)?.contains(cid) ?? false;
     final known = (seen?['a'] as List?)?.contains(cid) ?? false;
-    if (had || !known) {
+    final lastTs = (seen?['ts'] as int?) ?? 0;
+    final stale = DateTime.now().millisecondsSinceEpoch - lastTs > const Duration(minutes: 30).inMilliseconds;
+    if (had || !known || stale) {
       await (_importing[aid] ??= _importFullText(fullText, aid, catalogue).whenComplete(() {
         _importing.remove(aid);
       }));
@@ -208,35 +210,39 @@ class UnlockService {
   }) async {
     final dio = _createApiDio();
     final failures = <String>[];
-    for (final endpoint in rule.endpoints) {
-      try {
-        final targetUrl = query == null || query.isEmpty ? endpoint : (endpoint.contains('?') ? '$endpoint&$query' : '$endpoint?$query');
-        final options = Options(
-          responseType: ResponseType.bytes,
-          contentType: rule.contentType,
-          headers: {'Accept': '*/*', ...rule.headers},
-        );
-        final Response<dynamic> response;
-        if (rule.method == 'GET') {
-          response = await dio.get<dynamic>(targetUrl, options: options);
-        } else {
-          response = await dio.post<dynamic>(targetUrl, data: body.isEmpty ? null : body, options: options);
+    try {
+      for (final endpoint in rule.endpoints) {
+        try {
+          final targetUrl = query == null || query.isEmpty ? endpoint : (endpoint.contains('?') ? '$endpoint&$query' : '$endpoint?$query');
+          final options = Options(
+            responseType: ResponseType.bytes,
+            contentType: rule.contentType,
+            headers: {'Accept': '*/*', ...rule.headers},
+          );
+          final Response<dynamic> response;
+          if (rule.method == 'GET') {
+            response = await dio.get<dynamic>(targetUrl, options: options);
+          } else {
+            response = await dio.post<dynamic>(targetUrl, data: body.isEmpty ? null : body, options: options);
+          }
+          final text = _decodeResponseText(response.data, rule.responseCharset);
+          if (rule.isFailureResponse(text)) {
+            failures.add('$endpoint: 返回了错误页');
+            continue;
+          }
+          if (accept != null && !accept(text)) {
+            failures.add('$endpoint: 返回内容格式不对');
+            continue;
+          }
+          return text;
+        } on DioException catch (e) {
+          failures.add('$endpoint: ${_describeDioException(e)}');
+        } catch (e) {
+          failures.add('$endpoint: $e');
         }
-        final text = _decodeResponseText(response.data, rule.responseCharset);
-        if (rule.isFailureResponse(text)) {
-          failures.add('$endpoint: 返回了错误页');
-          continue;
-        }
-        if (accept != null && !accept(text)) {
-          failures.add('$endpoint: 返回内容格式不对');
-          continue;
-        }
-        return text;
-      } on DioException catch (e) {
-        failures.add('$endpoint: ${_describeDioException(e)}');
-      } catch (e) {
-        failures.add('$endpoint: $e');
       }
+    } finally {
+      dio.close();
     }
     throw ChapterLockedException('备用接口不可用（${failures.length} 个端点都失败了）：${failures.join('；')}');
   }
@@ -254,37 +260,41 @@ class UnlockService {
     final dio = _createApiDio();
     final results = <String>[];
     var ok = false;
-    for (final endpoint in api.endpoints) {
-      final host = Uri.tryParse(endpoint)?.host ?? endpoint;
-      try {
-        final targetUrl = query == null || query.isEmpty ? endpoint : (endpoint.contains('?') ? '$endpoint&$query' : '$endpoint?$query');
-        final options = Options(
-          responseType: ResponseType.bytes,
-          contentType: api.contentType,
-          headers: {'Accept': '*/*', ...api.headers},
-        );
-        final response = api.method == 'GET'
-            ? await dio.get<dynamic>(targetUrl, options: options)
-            : await dio.post<dynamic>(targetUrl, data: body.isEmpty ? null : body, options: options);
-        final text = _decodeResponseText(response.data, api.responseCharset);
-        if (api.isFailureResponse(text)) {
-          results.add('$host：返回了错误页');
-          continue;
-        }
-        if (accepts.isNotEmpty) {
-          final lower = text.toLowerCase();
-          if (!accepts.any((item) => lower.contains(item.toLowerCase()))) {
-            results.add('$host：返回内容格式不对');
+    try {
+      for (final endpoint in api.endpoints) {
+        final host = Uri.tryParse(endpoint)?.host ?? endpoint;
+        try {
+          final targetUrl = query == null || query.isEmpty ? endpoint : (endpoint.contains('?') ? '$endpoint&$query' : '$endpoint?$query');
+          final options = Options(
+            responseType: ResponseType.bytes,
+            contentType: api.contentType,
+            headers: {'Accept': '*/*', ...api.headers},
+          );
+          final response = api.method == 'GET'
+              ? await dio.get<dynamic>(targetUrl, options: options)
+              : await dio.post<dynamic>(targetUrl, data: body.isEmpty ? null : body, options: options);
+          final text = _decodeResponseText(response.data, api.responseCharset);
+          if (api.isFailureResponse(text)) {
+            results.add('$host：返回了错误页');
             continue;
           }
+          if (accepts.isNotEmpty) {
+            final lower = text.toLowerCase();
+            if (!accepts.any((item) => lower.contains(item.toLowerCase()))) {
+              results.add('$host：返回内容格式不对');
+              continue;
+            }
+          }
+          ok = true;
+          results.add('$host：可用');
+        } on DioException catch (e) {
+          results.add('$host：${_describeDioException(e)}');
+        } catch (e) {
+          results.add('$host：$e');
         }
-        ok = true;
-        results.add('$host：可用');
-      } on DioException catch (e) {
-        results.add('$host：${_describeDioException(e)}');
-      } catch (e) {
-        results.add('$host：$e');
       }
+    } finally {
+      dio.close();
     }
     return '${ok ? '接口测试成功' : '接口测试失败'}（${results.join('；')}）';
   }
@@ -317,43 +327,48 @@ class UnlockService {
         await ChapterCache.put(aid, cid, Content(text: text, images: const []), ticket: ticket);
       }
     }
-    if (!Incognito.on && !ChapterCache.offline(aid) && all.isNotEmpty) {
+    // 仅当用户已经手动开启过该书的离线缓存（meta 已存在）时才刷新 meta；单章在线试读不把整本书塞进「离线缓存」列表，也不阻止自动清理
+    if (!Incognito.on && ChapterCache.offline(aid) && all.isNotEmpty) {
       final book = LibraryStore.get(aid);
       final seen = ReadingHistory.all().where((e) => e.aid == aid).firstOrNull;
       final name = (book?['title'] as String?) ?? seen?.title ?? title ?? aid;
       final img = [book?['img'] as String?, seen?.img].whereType<String>().where((e) => e.isNotEmpty).firstOrNull ?? Wenku8Parser.coverUrl(aid);
       await ChapterCache.setMeta(aid, name, all.length, img, all.first.cid);
     }
-    await _box.put('unlock:txt:$aid', {'m': texts.keys.toList(), 'a': [for (final c in all) c.cid]});
+    await _box.put('unlock:txt:$aid', {'m': texts.keys.toList(), 'a': [for (final c in all) c.cid], 'ts': DateTime.now().millisecondsSinceEpoch});
   }
 
   Future<Uint8List> _fetchFullTextBytes(UnlockFullTextRule rule, String aid) async {
     final dio = _createTxtDio();
     Object? lastError;
-    for (var i = 0; i < rule.urlTemplates.length; i++) {
-      final url = renderAddonTemplate(rule.urlTemplates[i], {'aid': aid, 'node': '${i + 1}'});
-      try {
-        final response = await dio.get<List<int>>(
-          url,
-          options: Options(
-            responseType: ResponseType.bytes,
-            headers: rule.headers.isEmpty ? null : rule.headers,
-          ),
-        );
-        final data = response.data;
-        if (data == null || data.isEmpty) {
-          lastError = ChapterLockedException('节点 ${i + 1} 返回空内容');
-          continue;
+    try {
+      for (var i = 0; i < rule.urlTemplates.length; i++) {
+        final url = renderAddonTemplate(rule.urlTemplates[i], {'aid': aid, 'node': '${i + 1}'});
+        try {
+          final response = await dio.get<List<int>>(
+            url,
+            options: Options(
+              responseType: ResponseType.bytes,
+              headers: rule.headers.isEmpty ? null : rule.headers,
+            ),
+          );
+          final data = response.data;
+          if (data == null || data.isEmpty) {
+            lastError = ChapterLockedException('节点 ${i + 1} 返回空内容');
+            continue;
+          }
+          final head = String.fromCharCodes(data.take(128)).trimLeft().toLowerCase();
+          if (rule.errorIfStartsWith.any((p) => p.isNotEmpty && head.startsWith(p.toLowerCase()))) {
+            lastError = ChapterLockedException('节点 ${i + 1} 返回了错误页');
+            continue;
+          }
+          return data is Uint8List ? data : Uint8List.fromList(data);
+        } catch (e) {
+          lastError = e;
         }
-        final head = String.fromCharCodes(data.take(128)).trimLeft().toLowerCase();
-        if (rule.errorIfStartsWith.any((p) => p.isNotEmpty && head.startsWith(p.toLowerCase()))) {
-          lastError = ChapterLockedException('节点 ${i + 1} 返回了错误页');
-          continue;
-        }
-        return data is Uint8List ? data : Uint8List.fromList(data);
-      } catch (e) {
-        lastError = e;
       }
+    } finally {
+      dio.close();
     }
     throw lastError ?? const ChapterLockedException('整本文本下载失败');
   }

@@ -39,6 +39,17 @@ class Bookmarks {
 
   static bool has(String aid, String cid, int offset) => all(aid).any((b) => _near(b, aid, cid, offset));
 
+  /// 有书签的书号集合（书架筛选直接查，不逐本构造对象）。
+  static Set<String> bookmarkedAids() => {
+    for (final e in ((_box.get('bookmarks') as List?) ?? const []).cast<Map>()) '${e['aid']}',
+  };
+
+  /// 指定书中有书签的章节 cid 集合（目录列表渲染图标用）。
+  static Set<String> bookmarkedCids(String aid) => {
+    for (final e in ((_box.get('bookmarks') as List?) ?? const []).cast<Map>())
+      if (e['aid'] == aid) '${e['cid']}',
+  };
+
   /// 已有就删除，没有就添加；返回添加后是否存在。
   static Future<bool> toggle(String aid, String book, String cid, String chapter, int offset, String excerpt) async {
     final list = all();

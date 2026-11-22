@@ -27,12 +27,7 @@ class Wenku8Urls {
 
   String removeFromBookshelf(String bid) => "$base/modules/article/bookcase.php?delid=$bid";
 
-  /// 书架批量操作（移除、移动）提交的地址
-  String bookshelfAction() => "$base/modules/article/bookcase.php";
-
   String bookshelf(int classId) => "$base/modules/article/bookcase.php?classid=$classId";
-
-  String userBookshelf(String uid) => "$base/userpage.php?uid=$uid";
 
   String comments(String aid, int page) => "$base/modules/article/reviews.php?aid=$aid&page=$page";
 

@@ -15,9 +15,9 @@ flutter test
 
 # 编译都要指定入口；Android 还要加 cronetHttpNoPlay
 flutter run -t lib/next/main.dart --dart-define=cronetHttpNoPlay=true
-flutter build apk --release --target-platform android-arm64 --dart-define=cronetHttpNoPlay=true -t lib/next/main.dart
-flutter build macos --release -t lib/next/main.dart
-flutter build windows --release -t lib/next/main.dart
+flutter build apk --release --target-platform android-arm64 --dart-define=cronetHttpNoPlay=true --split-debug-info=build/app/outputs/symbols -t lib/next/main.dart
+flutter build macos --release --split-debug-info=build/app/outputs/symbols -t lib/next/main.dart
+flutter build windows --release --split-debug-info=build/app/outputs/symbols -t lib/next/main.dart
 ```
 
 Flutter 版本是 3.47.4，和 `.github/workflows/check.yml` 保持一致。

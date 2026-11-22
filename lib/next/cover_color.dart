@@ -58,6 +58,12 @@ final coverColorProvider = FutureProvider.autoDispose.family<Color, String>((ref
   codec.dispose();
   final rgba = data!.buffer.asUint8List();
   final color = tintFrom(crop == null ? rgba : cropRgba(rgba, w, h, crop));
-  await box.put('ccolor', {...((box.get('ccolor') as Map?) ?? const {}), url: color.toARGB32()});
+  final prev = Map<String, Object?>.from((box.get('ccolor') as Map?) ?? const {});
+  prev.remove(url);
+  while (prev.length >= 400) {
+    prev.remove(prev.keys.first);
+  }
+  prev[url] = color.toARGB32();
+  await box.put('ccolor', prev);
   return color;
 });

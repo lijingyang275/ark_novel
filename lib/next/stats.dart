@@ -1,7 +1,7 @@
+import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import 'cache.dart';
-import 'history.dart';
 import 'incognito.dart';
 import 'library.dart';
 import 'sync.dart';
@@ -11,6 +11,25 @@ class ReadingStats {
   ReadingStats._();
 
   static Box get _box => Hive.box('session');
+
+  /// 统计数据变化通知（避免页面用定时器轮询）。
+  static final changes = ValueNotifier<int>(0);
+
+  /// 统一的时长格式化：避免 59分01秒~59分59秒 因 ceil 显示成「60 分钟」。
+  /// [compact] 为 true 时用于个人页简短展示（如 `1.5 小时` / `12 分钟`）。
+  static String formatDuration(int seconds, {bool compact = false}) {
+    if (seconds <= 0) return '0 分钟';
+    if (compact && seconds >= 3600) {
+      return '${(seconds / 3600).toStringAsFixed(seconds >= 36000 ? 0 : 1)} 小时';
+    }
+    final totalMinutes = (seconds + 59) ~/ 60;
+    if (totalMinutes >= 60) {
+      final h = totalMinutes ~/ 60;
+      final m = totalMinutes % 60;
+      return compact ? '${(seconds / 3600).toStringAsFixed(seconds >= 36000 ? 0 : 1)} 小时' : '$h 小时 $m 分';
+    }
+    return '$totalMinutes 分钟';
+  }
 
   static String dayKey(DateTime d) => '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
@@ -52,10 +71,16 @@ class ReadingStats {
     final m = meta(aid);
     if (m != null && m.title.isNotEmpty) return (title: LibraryStore.shown(aid, m.title), author: m.author, img: m.img);
     final lib = LibraryStore.get(aid);
-    final hist = ReadingHistory.all().where((e) => e.aid == aid).firstOrNull;
-    final cached = ChapterCache.books()[aid];
-    final title = (lib?['title'] as String?) ?? hist?.title ?? cached?.$1;
-    final img = [m?.img, lib?['img'] as String?, hist?.img, cached?.$3].whereType<String>().where((e) => e.isNotEmpty).firstOrNull ?? '';
+    String? histTitle;
+    String? histImg;
+    if (lib == null) {
+      final rawHist = ((_box.get('history2') as List?) ?? const []).cast<Map>().where((e) => e['aid'] == aid).firstOrNull;
+      histTitle = rawHist?['title'] as String?;
+      histImg = rawHist?['img'] as String?;
+    }
+    final cached = lib == null && histTitle == null ? ChapterCache.books()[aid] : null;
+    final title = (lib?['title'] as String?) ?? histTitle ?? cached?.$1;
+    final img = [m?.img, lib?['img'] as String?, histImg, cached?.$3].whereType<String>().where((e) => e.isNotEmpty).firstOrNull ?? '';
     return (title: LibraryStore.shown(aid, title ?? '书号 $aid'), author: m?.author ?? '', img: img);
   }
 
@@ -99,10 +124,12 @@ class ReadingStats {
       if (chapterSeconds(aid).values.expand((d) => d.entries).where((e) => inDay(e.key)).fold(0, (a, e) => a + e.value) case final s when s > 0) aid: s,
   };
 
-  /// 删掉一本书的阅读记录，同步时其他设备也删。累计章数没有按书记，不变。
+  /// 删掉一本书的阅读记录，同步时其他设备也删。若删完后已无任何书籍记录，同步清零本地残留章数。
   static Future<void> deleteBook(String aid) async {
     await purgeLocal(aid);
     await Sync.forgetBookStats(aid);
+    if (perBook().isEmpty) await _box.delete('stats:chapters');
+    changes.value++;
   }
 
   /// 从一份统计（同步时的格式：day / book / meta / days / ch / last）里去掉一本书在 [before]（毫秒时间戳）之前的记录，
@@ -176,27 +203,42 @@ class ReadingStats {
     } else {
       await _box.put('stats:ch:$aid', ch);
     }
+    changes.value++;
   }
 
   static Future<void> addSeconds(String aid, int seconds, {String? cid}) async {
     if (seconds <= 0 || Incognito.on) return;
-    final today = dayKey(DateTime.now());
-    if (cid != null) {
-      final ch = _localChapterSeconds(aid);
-      final days = ch[cid] ??= {};
-      days[today] = (days[today] ?? 0) + seconds;
-      await _box.put('stats:ch:$aid', ch);
-    }
-    final days = ((_box.get('stats:days:$aid') as List?) ?? const []).cast<String>();
-    if (!days.contains(today)) await _box.put('stats:days:$aid', [...days, today]);
+    final now = DateTime.now();
+    final secToday = now.hour * 3600 + now.minute * 60 + now.second;
+    // 横跨午夜 0 点时（例如 23:59 开始读、00:00 后刷新），将午夜前的秒数归入昨天，避免前一天断签
+    final slices = seconds > secToday && secToday >= 0 && seconds <= 7200
+        ? [(dayKey(now.subtract(const Duration(days: 1))), seconds - secToday), if (secToday > 0) (dayKey(now), secToday)]
+        : [(dayKey(now), seconds)];
+    final ch = cid != null ? _localChapterSeconds(aid) : null;
+    final days = ((_box.get('stats:days:$aid') as List?) ?? const []).cast<String>().toList();
+    var daysAdded = false;
     final day = _map('stats:day'); // 只累加本机自己的，别的设备的统计单独存放
     final book = _map('stats:book');
-    day[today] = (day[today] ?? 0) + seconds;
-    book[aid] = (book[aid] ?? 0) + seconds;
+    for (final (dKey, sec) in slices) {
+      if (sec <= 0) continue;
+      if (ch != null && cid != null) {
+        final cDays = ch[cid] ??= {};
+        cDays[dKey] = (cDays[dKey] ?? 0) + sec;
+      }
+      if (!days.contains(dKey)) {
+        days.add(dKey);
+        daysAdded = true;
+      }
+      day[dKey] = (day[dKey] ?? 0) + sec;
+      book[aid] = (book[aid] ?? 0) + sec;
+    }
+    if (ch != null) await _box.put('stats:ch:$aid', ch);
+    if (daysAdded) await _box.put('stats:days:$aid', days);
     await _box.put('stats:day', day);
     await _box.put('stats:book', book);
     // 最后一次读的时间：别的设备删了这本书的统计时，用来判断删除那天的记录是不是删之后读的
-    await _box.put('stats:last', _map('stats:last')..[aid] = DateTime.now().millisecondsSinceEpoch);
+    await _box.put('stats:last', _map('stats:last')..[aid] = now.millisecondsSinceEpoch);
+    changes.value++;
   }
 
   static Future<void> addChapter(String aid, String cid) async {
@@ -207,5 +249,6 @@ class ReadingStats {
     if (seen.contains(key)) return;
     await _box.put('stats:seen', [...seen.where((e) => e.startsWith(today)), key]);
     await _box.put('stats:chapters', ((_box.get('stats:chapters') as int?) ?? 0) + 1);
+    changes.value++;
   }
 }

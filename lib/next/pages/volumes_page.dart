@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../models/cat_volume.dart';
+import '../bookmarks.dart';
 import '../cache.dart';
 import '../cover_color.dart';
 import '../library.dart';
@@ -768,6 +769,7 @@ class _DetailsState extends State<_Details> {
     final next = startCid(aid, v);
     final label = inVol ? '继续读' : (v.textCids.every(read.contains) ? '重读这一卷' : '开始读');
     final rating = Volumes.rating(aid, v.title);
+    final markedCids = Bookmarks.bookmarkedCids(aid);
     const muted = TextStyle(color: Colors.white60);
 
     final list = ListView(
@@ -788,12 +790,15 @@ class _DetailsState extends State<_Details> {
               ),
             ),
             for (var i = 1; i <= 5; i++)
-              GestureDetector(
-                onTap: () async {
-                  await Volumes.setRating(aid, v.title, rating == i ? 0 : i); // 再点一次当前星数就取消
-                  if (mounted) setState(() {});
-                },
-                child: Icon(i <= rating ? Icons.star_rounded : Icons.star_outline_rounded, color: const Color(0xFFFFC53D), size: 22),
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () async {
+                    await Volumes.setRating(aid, v.title, rating == i ? 0 : i); // 再点一次当前星数就取消
+                    if (mounted) setState(() {});
+                  },
+                  child: Icon(i <= rating ? Icons.star_rounded : Icons.star_outline_rounded, color: const Color(0xFFFFC53D), size: 22),
+                ),
               ),
           ],
         ),
@@ -812,6 +817,19 @@ class _DetailsState extends State<_Details> {
             ),
             const SizedBox(width: 8),
             IconButton.outlined(
+              tooltip: hz(context, '简介与书评'),
+              visualDensity: VisualDensity.compact,
+              style: IconButton.styleFrom(
+                foregroundColor: Colors.white,
+                side: const BorderSide(color: Colors.white38),
+              ),
+              onPressed: () => context.push(Routes.novel(aid)).then((_) {
+                if (mounted) setState(() {});
+              }),
+              icon: const Icon(Icons.info_outline, size: 20),
+            ),
+            const SizedBox(width: 6),
+            IconButton.outlined(
               tooltip: hz(context, '换封面'),
               visualDensity: VisualDensity.compact,
               style: IconButton.styleFrom(
@@ -821,6 +839,7 @@ class _DetailsState extends State<_Details> {
               onPressed: () => pickVolumeCover(context, aid, v),
               icon: const Icon(Icons.image_outlined, size: 20),
             ),
+            const SizedBox(width: 6),
             IconButton.outlined(
               tooltip: hz(context, '阅读报告'),
               visualDensity: VisualDensity.compact,
@@ -860,7 +879,19 @@ class _DetailsState extends State<_Details> {
                   fontWeight: cid == p?.cid ? FontWeight.w700 : null,
                 ),
               ),
-              trailing: cid == p?.cid ? const Text('读到这里', style: TextStyle(color: Colors.white, fontSize: 12)) : null,
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (markedCids.contains(cid)) ...[
+                    const Icon(Icons.bookmark_rounded, size: 15, color: Color(0xFFFFC53D)),
+                    const SizedBox(width: 4),
+                  ],
+                  if (cid == p?.cid)
+                    const Text('读到这里', style: TextStyle(color: Colors.white, fontSize: 12))
+                  else if (ChapterCache.has(aid, cid))
+                    const Icon(Icons.download_for_offline_outlined, size: 15, color: Colors.white38),
+                ],
+              ),
               onTap: _picked.isNotEmpty
                   ? () => _pick(cid)
                   : () => context.push(Routes.reader(aid, cid)).then((_) {
@@ -899,6 +930,15 @@ class _DetailsState extends State<_Details> {
                         ),
                         TextButton(onPressed: () => _mark(true), child: const Text('已读')),
                         TextButton(onPressed: () => _mark(false), child: const Text('未读')),
+                        TextButton(
+                          onPressed: () {
+                            for (final cid in _picked) {
+                              widget.onCache(cid);
+                            }
+                            setState(_picked.clear);
+                          },
+                          child: const Text('缓存'),
+                        ),
                         // 按钮全摆出来窄屏放不下，不常用的收进"更多"
                         PopupMenuButton<void Function()>(
                           tooltip: hz(context, '更多'),

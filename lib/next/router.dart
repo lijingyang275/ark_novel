@@ -47,7 +47,8 @@ class Routes {
   static const profile = '/profile';
   static const search = '/search';
   static const settings = '/settings';
-  static String settingsSection(String name) => '/settings/$name';
+  static String settingsSection(String name, {String? highlight}) =>
+      highlight == null || highlight.isEmpty ? '/settings/$name' : '/settings/$name?q=${Uri.encodeQueryComponent(highlight)}';
   static const history = '/history';
   static const cache = '/cache';
   static const storage = '/storage';
@@ -58,7 +59,7 @@ class Routes {
   static String volumes(String aid) => '/volumes/$aid';
   static String comments(String aid) => '/novel/$aid/comments';
   static String replies(String aid, String rid) => '/novel/$aid/comments/$rid';
-  static String reader(String aid, String cid) => '/reader/$aid/$cid';
+  static String reader(String aid, String cid, {int? offset}) => offset == null ? '/reader/$aid/$cid' : '/reader/$aid/$cid?offset=$offset';
 }
 
 /// 检查登录状态时停在启动页，检查完一律进主界面；登录页由用户按需 push 打开。
@@ -67,6 +68,7 @@ final routerProvider = Provider<GoRouter>((ref) {
   ref.listen(sessionProvider, (_, next) => refresh.value = next);
   ref.onDispose(refresh.dispose);
 
+  String? pendingTarget;
   return GoRouter(
     // 登录状态本地就能定下来时直接进书架，连一帧启动页都不画
     initialLocation: ref.read(sessionProvider) is SessionChecking ? Routes.splash : Routes.bookshelf,
@@ -74,8 +76,16 @@ final routerProvider = Provider<GoRouter>((ref) {
     redirect: (context, state) {
       final checking = ref.read(sessionProvider) is SessionChecking;
       final onSplash = state.matchedLocation == Routes.splash;
-      if (checking) return onSplash ? null : Routes.splash;
-      return onSplash ? Routes.bookshelf : null;
+      if (checking) {
+        if (!onSplash) pendingTarget = state.uri.toString();
+        return onSplash ? null : Routes.splash;
+      }
+      if (onSplash) {
+        final target = pendingTarget ?? Routes.bookshelf;
+        pendingTarget = null;
+        return target;
+      }
+      return null;
     },
     routes: [
       GoRoute(path: Routes.splash, builder: (_, _) => const SplashPage()),
@@ -105,11 +115,24 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: Routes.cache, builder: (_, _) => const CachePage()),
       GoRoute(path: Routes.storage, builder: (_, _) => const StoragePage()),
       GoRoute(path: Routes.settings, builder: (_, _) => const SettingsPage()),
-      GoRoute(path: '/settings/:section', builder: (_, state) => SettingsSectionPage(section: SettingsSection.values.firstWhere((s) => s.name == state.pathParameters['section'], orElse: () => SettingsSection.appearance))),
+      GoRoute(
+        path: '/settings/:section',
+        builder: (_, state) => SettingsSectionPage(
+          section: SettingsSection.values.firstWhere((s) => s.name == state.pathParameters['section'], orElse: () => SettingsSection.appearance),
+          highlight: state.uri.queryParameters['q'],
+        ),
+      ),
       GoRoute(path: '/novel/:aid', builder: (_, state) => NovelPageView(aid: state.pathParameters['aid']!)),
       GoRoute(path: '/novel/:aid/comments', builder: (_, state) => CommentsPage(aid: state.pathParameters['aid']!)),
       GoRoute(path: '/novel/:aid/comments/:rid', builder: (_, state) => RepliesPage(aid: state.pathParameters['aid']!, rid: state.pathParameters['rid']!)),
-      GoRoute(path: '/reader/:aid/:cid', builder: (_, state) => ReaderPage(aid: state.pathParameters['aid']!, cid: state.pathParameters['cid']!, offset: state.extra is int ? state.extra as int : null)),
+      GoRoute(
+        path: '/reader/:aid/:cid',
+        builder: (_, state) => ReaderPage(
+          aid: state.pathParameters['aid']!,
+          cid: state.pathParameters['cid']!,
+          offset: int.tryParse(state.uri.queryParameters['offset'] ?? '') ?? (state.extra is int ? state.extra as int : null),
+        ),
+      ),
       StatefulShellRoute.indexedStack(
         builder: (_, _, shell) => HomeShell(shell: shell),
         branches: [

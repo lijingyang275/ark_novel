@@ -79,10 +79,10 @@ class Api {
 
   void _checkAction(String html) {
     final doc = parse(html);
-    if (doc.querySelector('input[name="username"]') != null && doc.querySelector('input[name="password"]') != null) {
-      throw const Wenku8UnexpectedPageException('登录已失效，请重新登录后再提交');
+    if (Wenku8Parser.needsLoginDoc(doc)) {
+      throw const Wenku8LoginRequiredException('登录已失效，请重新登录后再试');
     }
-    if (Wenku8Parser.isErrorPage(html)) {
+    if (Wenku8Parser.isErrorPageDoc(doc)) {
       final why = doc.getElementsByClassName('blockcontent').firstOrNull?.text.trim();
       throw Wenku8ActionRejectedException(why == null || why.isEmpty ? '提交失败，请稍后再试' : why);
     }
@@ -90,7 +90,17 @@ class Api {
 
   static String _enc(String value) => Wenku8Charset.percentEncode(value, CharsetType.gbk);
 
-  PageResult _list(String html) => PageResult(Wenku8Parser.novelList(html, baseUrl: _base), Wenku8Parser.maxPage(html));
+  PageResult _list(String html) {
+    final doc = parse(html);
+    if (Wenku8Parser.needsLoginDoc(doc)) {
+      throw const Wenku8LoginRequiredException('排行榜、题材与完结列表需要登录轻小说文库账号后查看');
+    }
+    if (Wenku8Parser.isErrorPageDoc(doc)) {
+      final why = doc.getElementsByClassName('blockcontent').firstOrNull?.text.trim();
+      throw Wenku8UnexpectedPageException(why == null || why.isEmpty ? '暂时无法获取列表' : why);
+    }
+    return PageResult(Wenku8Parser.novelListDoc(doc, baseUrl: _base), Wenku8Parser.maxPageDoc(doc));
+  }
 
   Future<PageResult> ranking(String sort, int page) async => _list(await _client.getPage(_urls.ranking(sort, page), charsetParam: false));
 
@@ -99,40 +109,57 @@ class Api {
   Future<PageResult> completed(int page) async => _list(await _client.getPage(_urls.completedNovels(page), charsetParam: false));
 
   DateTime _lastSearch = DateTime(0);
+  Future<void> _searchLock = Future<void>.value();
 
-  /// 网站限制搜索间隔 5 秒：连续搜索先等够；因为太频繁、超时、网络抖动失败的，等一下自动重试一次。
-  /// "没搜到结果"（[lastFailedHtml] 有值）不重试。
+  /// 当前是否处于文库 5 秒搜索冷却窗口内。
+  bool get isSearchCoolingDown => DateTime.now().difference(_lastSearch) < const Duration(seconds: 5);
+
+  /// 网站限制搜索间隔 5 秒：连续搜索串行排队等待；因为太频繁、超时、网络抖动失败的，等一下自动重试一次。
+  /// "没搜到结果"或页面结构异常（[lastFailedHtml] 有值）不重试。
   Future<PageResult> search(String keyword, {required bool byAuthor, required int page}) async {
-    for (var attempt = 0;; attempt++) {
-      final wait = const Duration(seconds: 5, milliseconds: 200) - DateTime.now().difference(_lastSearch);
-      if (wait > Duration.zero) await Future<void>.delayed(wait);
-      _lastSearch = DateTime.now();
-      lastFailedHtml = null;
-      try {
-        return await _search(keyword, byAuthor: byAuthor, page: page);
-      } catch (_) {
-        if (attempt > 0 || lastFailedHtml != null) rethrow;
+    Future<PageResult> run() async {
+      for (var attempt = 0;; attempt++) {
+        final wait = const Duration(seconds: 5, milliseconds: 200) - DateTime.now().difference(_lastSearch);
+        if (wait > Duration.zero) await Future<void>.delayed(wait);
+        _lastSearch = DateTime.now();
+        lastFailedHtml = null;
+        try {
+          return await _search(keyword, byAuthor: byAuthor, page: page);
+        } on Wenku8LoginRequiredException {
+          rethrow;
+        } catch (_) {
+          if (attempt > 0 || lastFailedHtml != null) rethrow;
+        }
       }
     }
+
+    final prev = _searchLock;
+    final future = prev.then((_) => run());
+    _searchLock = future.then((_) {}, onError: (_) {});
+    return future;
   }
 
   Future<PageResult> _search(String keyword, {required bool byAuthor, required int page}) async {
     final html = await _client.getPage(byAuthor ? _urls.searchByAuthor(keyword, page) : _urls.searchByTitle(keyword, page), charsetParam: false);
     final doc = parse(html);
     lastFailedHtml = null;
-    if (Wenku8Parser.isErrorPage(html)) {
+    if (Wenku8Parser.needsLoginDoc(doc)) {
+      throw const Wenku8LoginRequiredException('搜索功能需要登录轻小说文库账号');
+    }
+    if (Wenku8Parser.isErrorPageDoc(doc)) {
       final why = doc.getElementsByClassName('blockcontent').firstOrNull?.text.trim();
       throw Wenku8UnexpectedPageException(why == null || why.isEmpty ? '搜索太频繁，请 5 秒后再试' : why);
     }
-    final only = Wenku8Parser.singleSearchResult(html);
+    final only = Wenku8Parser.singleSearchResultDoc(doc);
     if (only != null) return PageResult([only], 1);
-    final result = _list(html);
+    final result = PageResult(Wenku8Parser.novelListDoc(doc, baseUrl: _base), Wenku8Parser.maxPageDoc(doc));
     if (result.items.isEmpty && page == 1) {
-      // 没解析出书：把页面标题和正文开头带出来，方便判断是没有结果、要登录还是被拦截
+      // 正常的搜索结果页有 #content，只是没有匹配的书：返回空结果让界面显示友好的空状态
+      if (doc.getElementById('content') != null) return const PageResult([], 0);
       final title = doc.querySelector('title')?.text.trim() ?? '';
-      final text = (doc.getElementById('content') ?? doc.body)?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+      final text = doc.body?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
       lastFailedHtml = html;
-      throw Wenku8UnexpectedPageException('没有搜到结果。页面：$title ${text.length > 120 ? text.substring(0, 120) : text}');
+      throw Wenku8UnexpectedPageException('搜索页面返回异常：$title ${text.length > 100 ? text.substring(0, 100) : text}');
     }
     return result;
   }
@@ -175,13 +202,12 @@ class Api {
 
   Future<void> removeFromBookshelf(String bid) async => _checkAction(await _client.getPage(_urls.removeFromBookshelf(bid), charsetParam: false));
 
-  Future<void> removeBooks(List<String> bids, int classId) =>
-      _submit(_urls.bookshelfAction(), {'checkid[]': bids, 'classlist': classId, 'checkall': 'checkall', 'newclassid': -1, 'classid': classId});
-
-  Future<void> moveBooks(List<String> bids, int classId, int newClassId) =>
-      _submit(_urls.bookshelfAction(), {'checkid[]': bids, 'classlist': classId, 'checkall': 'checkall', 'newclassid': newClassId, 'classid': classId});
-
-  Future<String> vote(String aid) async => Wenku8Parser.voteResult(await _client.getPage(_urls.vote(aid), charsetParam: false));
+  Future<String> vote(String aid) async {
+    final html = await _client.getPage(_urls.vote(aid), charsetParam: false);
+    final doc = parse(html);
+    if (Wenku8Parser.needsLoginDoc(doc)) throw const Wenku8LoginRequiredException('登录后才能推荐投票');
+    return Wenku8Parser.voteResult(html);
+  }
 
   Future<List<CommentItem>> comments(String aid, int page) async => Wenku8Parser.comments(await _client.getPage(_urls.comments(aid, page), charsetParam: false));
 

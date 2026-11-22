@@ -149,6 +149,9 @@ class LibraryStore {
   /// 同步时被移出书架（别的设备删了、网站书架上没了），但本机在那之后还读过的书。主界面看到就提示一下，可以一键加回（[LibraryController.restore]）。
   static final removedElsewhere = ValueNotifier<List<LibBook>>(const []);
 
+  /// 加入网站书架被拒绝（如网站藏书上限已满）时的温和提示，避免用户误以为已同步到网站。
+  static final syncNotice = ValueNotifier<String?>(null);
+
   static void noteRemovedElsewhere(Iterable<LibBook> books) {
     final list = [...removedElsewhere.value];
     for (final b in books) {
@@ -382,6 +385,7 @@ class LibraryController extends Notifier<LibraryState> {
         } on Wenku8ActionRejectedException catch (e) {
           if (op['op'] == 'add') {
             done[aid] = op['op'];
+            LibraryStore.syncNotice.value = '网站书架已满或拒绝添加（${e.message}），新加的书已保存在本机书架';
           } else {
             error = e.toString();
             break;
@@ -460,19 +464,40 @@ class LibraryController extends Notifier<LibraryState> {
   }
 
   /// 书架里还没存过详情的书，后台一本本取下来存好（离线也能看简介）；目录由检查更新顺带存。
-  /// 网络出问题就停，下次接着取（已有的会跳过）。
+  /// 网络出问题就停，下次接着取（已有的会跳过）。批量落盘减少大书架反复全表序列化。
   Future<void> prefetchDetails() async {
     if (!_online || _prefetching) return;
     _prefetching = true;
+    final pending = <String, ({String title, String img, String status})>{};
+    Future<void> flushPending() async {
+      if (pending.isEmpty || !ref.mounted) return;
+      _refresh();
+      final next = {...state.books};
+      var changed = false;
+      for (final MapEntry(key: aid, value: d) in pending.entries) {
+        final b = next[aid];
+        if (b == null) continue;
+        final u = b.copyWith(title: d.title, img: d.img.isEmpty ? null : d.img, done: d.status.contains('完'));
+        if (u.title != b.title || u.img != b.img || u.done != b.done) {
+          next[aid] = u;
+          changed = true;
+        }
+      }
+      pending.clear();
+      if (changed) await _save(next);
+    }
+
     try {
       final api = ref.read(apiProvider);
       for (final b in state.books.values.toList()) {
         if (api.hasDetail(b.aid)) continue;
         final d = await runInBackground(() => api.detail(b.aid));
-        await noteDetail(b.aid, title: d.title, img: d.imgUrl, status: d.status);
+        pending[b.aid] = (title: d.title, img: d.imgUrl, status: d.status);
+        if (pending.length >= 8) await flushPending();
       }
     } catch (_) {
     } finally {
+      await flushPending();
       _prefetching = false;
     }
   }

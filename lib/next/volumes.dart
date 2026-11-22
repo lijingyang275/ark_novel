@@ -202,7 +202,10 @@ class Volumes {
   static int rating(String aid, String title) => ((_box.get('vrate:$aid') as Map?)?[title] as int?) ?? 0;
 
   static Future<void> setRating(String aid, String title, int stars) async {
-    await _box.put('vrate:$aid', {...((_box.get('vrate:$aid') as Map?) ?? const {}), title: stars});
+    await _box.putAll({
+      'vrate:$aid': {...((_box.get('vrate:$aid') as Map?) ?? const {}), title: stars},
+      'vrateTs:$aid': {...((_box.get('vrateTs:$aid') as Map?) ?? const {}), title: DateTime.now().millisecondsSinceEpoch},
+    });
     changes.value++;
   }
 

@@ -36,13 +36,30 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
     }
     final muted = theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
 
+    Future<void> deleteMark(Bookmark b) async {
+      await Bookmarks.remove(b);
+      if (!mounted) return;
+      setState(() {});
+      ScaffoldMessenger.of(this.context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: const Text('已删除书签'),
+            action: SnackBarAction(
+              label: hz(this.context, '撤销'),
+              onPressed: () async {
+                await Bookmarks.toggle(b.aid, b.book, b.cid, b.chapter, b.offset, b.excerpt);
+                if (mounted) setState(() {});
+              },
+            ),
+          ),
+        );
+    }
+
     Widget mark(Bookmark b) => Dismissible(
       key: ValueKey('${b.aid}${b.cid}${b.offset}'),
       direction: DismissDirection.endToStart,
-      onDismissed: (_) async {
-        await Bookmarks.remove(b);
-        setState(() {});
-      },
+      onDismissed: (_) => deleteMark(b),
       background: Container(
         color: scheme.error,
         alignment: Alignment.centerRight,
@@ -50,10 +67,10 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
         child: const Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.delete_outline, color: Colors.white), SizedBox(width: 6), Text('删除', style: TextStyle(color: Colors.white))]),
       ),
       child: InkWell(
-        // 位置随路由传过去，不覆盖真正的阅读进度
-        onTap: () => context.push(Routes.reader(b.aid, b.cid), extra: b.offset),
+        // 位置随路由参数传过去，不覆盖真正的阅读进度
+        onTap: () => context.push(Routes.reader(b.aid, b.cid, offset: b.offset), extra: b.offset),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -72,6 +89,12 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
                       };
                       return Text(text, style: theme.textTheme.labelMedium?.copyWith(color: scheme.primary));
                     },
+                  ),
+                  IconButton(
+                    tooltip: hz(context, '删除书签'),
+                    visualDensity: VisualDensity.compact,
+                    icon: Icon(Icons.delete_outline, size: 18, color: scheme.onSurfaceVariant),
+                    onPressed: () => deleteMark(b),
                   ),
                 ],
               ),
@@ -96,7 +119,7 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
       appBar: AppBar(title: const Text('书签')),
       body: all.isEmpty
           ? const StatePanel(title: '还没有书签', detail: '阅读时在页面上往下拉、点底部栏的书签，或选中文字后点"加书签"。')
-          : ListView(
+          : contentWidth(ListView(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
               children: [
                 for (final e in books.entries) ...[
@@ -141,9 +164,9 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
                   ),
                   const SizedBox(height: 12),
                 ],
-                Text('左滑删除书签', textAlign: TextAlign.center, style: muted),
+                Text('左滑或点删除图标可移除书签', textAlign: TextAlign.center, style: muted),
               ],
-            ),
+            )),
     );
   }
 }

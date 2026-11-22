@@ -31,6 +31,7 @@ class _SyncPageState extends ConsumerState<SyncPage> {
   bool _busy = false;
   bool _showPass = false;
   bool _passLoaded = false; // 安全存储里的密码读出来之前不能保存，否则会用空密码把它覆盖掉
+  bool _dirty = false;
 
   @override
   void initState() {
@@ -44,6 +45,9 @@ class _SyncPageState extends ConsumerState<SyncPage> {
 
   @override
   void dispose() {
+    if (_dirty && _passLoaded) {
+      Sync.save(url: _url.text, user: _user.text, pass: _pass.text, folder: _folder.text);
+    }
     _url.dispose();
     _user.dispose();
     _pass.dispose();
@@ -51,7 +55,10 @@ class _SyncPageState extends ConsumerState<SyncPage> {
     super.dispose();
   }
 
-  Future<void> _save() => Sync.save(url: _url.text, user: _user.text, pass: _pass.text, folder: _folder.text);
+  Future<void> _save() {
+    _dirty = false;
+    return Sync.save(url: _url.text, user: _user.text, pass: _pass.text, folder: _folder.text);
+  }
 
   Future<void> _test() async {
     setState(() {
@@ -68,9 +75,9 @@ class _SyncPageState extends ConsumerState<SyncPage> {
     if (mounted) setState(() => _busy = false);
   }
 
-  /// 导出：把本机数据存成一个 JSON 交给系统分享（发给自己、存到文件都行）。
+  /// 导出：把本机同步快照存成一个 JSON 交给系统分享（发给自己、存到文件都行）。
   Future<void> _export() async {
-    final file = File('${(await getTemporaryDirectory()).path}/ark_novel_backup.json');
+    final file = File('${(await getTemporaryDirectory()).path}/ark_novel_sync_snapshot.json');
     await file.writeAsString(jsonEncode(Sync.snapshot()));
     await SharePlus.instance.share(ShareParams(files: [XFile(file.path)]));
   }
@@ -130,6 +137,7 @@ class _SyncPageState extends ConsumerState<SyncPage> {
         enableInteractiveSelection: true,
         autocorrect: false,
         keyboardType: type,
+        onChanged: (_) => _dirty = true,
         decoration: InputDecoration(
           label: Text(label),
           helper: helper == null ? null : Text(helper),
@@ -148,6 +156,7 @@ class _SyncPageState extends ConsumerState<SyncPage> {
                         if (t != null && t.isNotEmpty) {
                           c.text = t;
                           c.selection = TextSelection.collapsed(offset: t.length);
+                          _dirty = true;
                         }
                       },
                     ),
@@ -194,6 +203,7 @@ class _SyncPageState extends ConsumerState<SyncPage> {
               ],
             ),
           ),
+          const XNote('配置后会在启动、切到后台及退出阅读时自动同步（间隔至少 10 分钟）。多台设备的数据按最新进度合并、阅读时长按设备累加，不会互相覆盖。'),
           const XDivider(),
           const XGroupTitle('可选同步项'),
           XSwitch(
@@ -217,9 +227,9 @@ class _SyncPageState extends ConsumerState<SyncPage> {
             onChanged: (v) => prefs.set(P.syncAppearance, v),
           ),
           const XDivider(),
-          const XGroupTitle('手动备份'),
-          XTile(leading: const XLeading(icon: Icons.upload_outlined), title: '导出同步数据', onTap: _export),
-          XTile(leading: const XLeading(icon: Icons.download_outlined), title: '导入同步数据', subtitle: '合并到本机，不覆盖', onTap: _import),
+          const XGroupTitle('手动同步快照'),
+          XTile(leading: const XLeading(icon: Icons.upload_outlined), title: '导出同步快照（JSON）', subtitle: '不含离线正文与扩展包；完整备份请到「设置 → 数据与存储」', onTap: _export),
+          XTile(leading: const XLeading(icon: Icons.download_outlined), title: '导入同步快照', subtitle: '合并到本机，不覆盖现有进度和统计', onTap: _import),
         ],
       )),
     );

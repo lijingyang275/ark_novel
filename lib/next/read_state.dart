@@ -55,7 +55,7 @@ class ReadState {
   static int rating(String aid) => (_box.get('rating:$aid') as int?) ?? 0;
 
   static Future<void> setRating(String aid, int stars) async {
-    await _box.put('rating:$aid', stars);
+    await _box.putAll({'rating:$aid': stars, 'ratingTs:$aid': DateTime.now().millisecondsSinceEpoch});
     Volumes.changes.value++;
   }
 }

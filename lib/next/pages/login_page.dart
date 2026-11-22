@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../models/common/wenku8_node.dart';
 import '../env.dart';
@@ -58,7 +59,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     try {
       await action();
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = e is String ? e : friendlyError(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -68,7 +69,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     final store = ref.read(sessionStoreProvider);
     final username = _username.text.trim();
     if (username.isEmpty || _password.text.isEmpty) throw '请输入用户名和密码';
-    await ref.read(proxyProvider.notifier).set(_proxy.text);
+    final cleanProxy = _proxy.text.replaceFirst(RegExp(r'^https?://', caseSensitive: false), '').trim();
+    if (cleanProxy != _proxy.text) _proxy.text = cleanProxy;
+    await ref.read(proxyProvider.notifier).set(cleanProxy);
     await store.setKeepSeconds(_keepSeconds);
     if (isWebPreview) {
       await ref.read(sessionProvider.notifier).loginWithPassword(username, _password.text, _keepSeconds);
@@ -83,8 +86,14 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       await ref.read(sessionProvider.notifier).loginWithCookie(result.cookies, userAgent: result.userAgent);
     }
     await store.saveLogin(_remember ? username : null, _remember ? _password.text : null);
-    // 登录成功后回到主界面
-    if (mounted) context.go(Routes.bookshelf);
+    // 从详情、搜索等子页面点进来登录时返回原页面；否则回书架
+    if (mounted) {
+      if (context.canPop()) {
+        context.pop();
+      } else {
+        context.go(Routes.bookshelf);
+      }
+    }
   });
 
   @override
@@ -179,10 +188,36 @@ class _LoginPageState extends ConsumerState<LoginPage> {
           decoration: const InputDecoration(label: Text('HTTP 代理（可选）'), hint: Text('127.0.0.1:7890', maxLines: 1, overflow: TextOverflow.ellipsis)),
         ),
         const SizedBox(height: 4),
-        Text('连不上时填写。App 不会读取系统代理，需要在这里填。', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+        Text('连不上时填写（无需加 http://）。App 不会自动读取系统代理。', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+        const SizedBox(height: 8),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('系统网络栈'),
+          subtitle: Text('更容易通过 Cloudflare 验证，重启后生效（设了代理时不启用）', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          value: ref.watch(sessionStoreProvider).nativeNet,
+          onChanged: _busy
+              ? null
+              : (v) async {
+                  await ref.read(sessionStoreProvider).setNativeNet(v);
+                  if (mounted) setState(() {});
+                },
+        ),
       ],
       const SizedBox(height: 24),
       FilledButton(onPressed: _busy ? null : _submit, child: _busy ? const _ButtonSpinner() : const Text('登录')),
+      const SizedBox(height: 8),
+      Center(
+        child: TextButton.icon(
+          onPressed: () => launchUrl(Uri.parse('${siteBase(ref.read(nodeProvider))}/register.php'), mode: LaunchMode.externalApplication),
+          icon: const Icon(Icons.open_in_new, size: 16),
+          label: const Text('没有账号？前往轻小说文库注册'),
+        ),
+      ),
+      Text(
+        '提示：文库新注册账号通常需等待一段时间后才能使用搜索等功能；不登录也可直接浏览推荐与阅读已缓存章节。',
+        textAlign: TextAlign.center,
+        style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+      ),
       if (isWebPreview) ...[
         const SizedBox(height: 8),
         Text('预览版：账号密码由你的服务器转交给轻小说文库，不会经过其他地方。', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),

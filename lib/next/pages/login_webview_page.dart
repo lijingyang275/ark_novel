@@ -53,6 +53,7 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
   // 站点可能在 wenku8.net 和 www.wenku8.net 之间跳转，按主域名判断
   late final String _root = _host.split('.').reversed.take(2).toList().reversed.join('.');
   String _status = '';
+  String _hint = '';
   bool _ready = false;
   bool _done = false;
   bool _submitted = false;
@@ -68,15 +69,25 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
   @override
   void initState() {
     super.initState();
+    _hint = widget.isLogin ? '正在打开登录页，如遇人机验证请点击通过…' : '请在页面中完成人机验证，通过后将自动返回…';
     _prepare();
   }
 
   Future<void> _prepare() async {
     await applyWebViewProxy(ref.read(sessionStoreProvider).proxy);
+    final webUri = WebUri(widget.url);
     if (widget.isLogin) {
       // 只清掉旧的登录 cookie，保留 Cloudflare 的放行 cookie，免得又要验证一遍
-      for (final c in await _cookieManager.getCookies(url: WebUri(widget.url))) {
-        if (c.name.startsWith('jieqi')) await _cookieManager.deleteCookie(url: WebUri(widget.url), name: c.name);
+      for (final c in await _cookieManager.getCookies(url: webUri)) {
+        if (c.name.startsWith('jieqi')) await _cookieManager.deleteCookie(url: webUri, name: c.name);
+      }
+    } else {
+      // 验证模式：清掉已失效的旧 cf_clearance，避免刚打开就误判已经通过验证
+      for (final u in [webUri, WebUri('https://$_root/')]) {
+        try {
+          await _cookieManager.deleteCookie(url: u, name: 'cf_clearance');
+          await _cookieManager.deleteCookie(url: u, name: 'cf_clearance', domain: '.$_root');
+        } catch (_) {}
       }
     }
     if (mounted) setState(() => _ready = true);
@@ -136,16 +147,39 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
     }
   }
 
+  Future<bool> _isChallengePage(InAppWebViewController c) async {
+    try {
+      final title = await c.getTitle() ?? '';
+      if (title.contains('Just a moment') || title.contains('请稍候') || title.contains('Checking your browser') || title.contains('Attention Required') || title.startsWith('Access denied')) {
+        return true;
+      }
+      final dom = await c.evaluateJavascript(source: "!!document.querySelector('#challenge-form, #challenge-running, .cf-turnstile, #cf-challenge-running')");
+      return dom == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _check(InAppWebViewController c, WebUri? uri) async {
     if (_done || uri == null) return;
     _log('加载完成 ${uri.host}${uri.path}');
     if (!isSameSite(uri.host, _root)) {
-      if (mounted) setState(() => _status = '当前在其他域名 ${uri.host}，不会自动填表（登录页是 $_host）');
+      if (mounted) {
+        setState(() {
+          _status = '当前在其他域名 ${uri.host}，不会自动填表（登录页是 $_host）';
+          _hint = '当前跳转到 ${uri.host}，为保护账号安全未自动填写密码';
+        });
+      }
       return;
     }
     _ua ??= (await c.evaluateJavascript(source: 'navigator.userAgent')) as String?;
+    final inChallenge = await _isChallengePage(c);
     final names = (await _cookiesOf(uri)).map((e) => e.name).toSet();
-    if (mounted) setState(() => _status = '${uri.host}${uri.path}  登录cookie：${names.any((n) => n.startsWith('jieqiUserInfo')) ? '有' : '无'}  已填表：${_submitted ? '是' : '否'}');
+    _status = '${uri.host}${uri.path}  登录cookie：${names.any((n) => n.startsWith('jieqiUserInfo')) ? '有' : '无'}  已填表：${_submitted ? '是' : '否'}';
+    if (inChallenge) {
+      if (mounted) setState(() => _hint = '请点击完成页面中的 Cloudflare 人机验证，通过后将自动继续…');
+      return;
+    }
     if (widget.isLogin) {
       if (names.any((n) => n.startsWith('jieqiUserInfo'))) return _finish(c, uri);
       String? why;
@@ -153,10 +187,25 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
         why = await _fillAndSubmit(c);
         _submitted = why == null;
         if (why != null) _log('没填表：$why');
+        if (mounted) setState(() => _hint = _submitted ? '已自动提交登录信息，正在等待站点响应…' : '请在页面中完成验证或直接手动登录');
+      } else {
+        // 已自动提交过一次但未拿到登录 cookie：读取网页上的错误提示（密码错误、验证码等），允许用户在网页内直接重填
+        String? pageErr;
+        try {
+          final raw = await c.evaluateJavascript(source: "(document.querySelector('.blockcontent')?.innerText || '').trim()");
+          if (raw is String && raw.isNotEmpty) {
+            pageErr = raw.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty && !l.startsWith('您可以') && !l.contains('返回上一页')).firstOrNull;
+          }
+        } catch (_) {}
+        if (mounted) {
+          setState(() => _hint = pageErr != null ? '登录未通过：$pageErr（可直接在下方页面重试，成功后自动返回）' : '未检测到登录状态，可直接在下方页面手动登录后点右上角「完成」');
+        }
       }
-      if (mounted) setState(() => _status = '${uri.host}${uri.path}  登录cookie：无  已填表：${_submitted ? '是' : '否${why == null ? '' : '（$why）'}'}');
+      _status = '${uri.host}${uri.path}  登录cookie：无  已填表：${_submitted ? '是' : '否${why == null ? '' : '（$why）'}'}';
     } else if (names.contains('cf_clearance')) {
       await _finish(c, uri);
+    } else if (mounted) {
+      setState(() => _hint = '页面已加载，若已正常显示网站内容可点右上角「完成」返回');
     }
   }
 
@@ -195,7 +244,24 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
               )
             : null,
       ),
-      bottomNavigationBar: _status.isEmpty ? null : Padding(padding: const EdgeInsets.all(8), child: Text(_status, style: Theme.of(context).textTheme.bodySmall)),
+      bottomNavigationBar: _hint.isEmpty
+          ? null
+          : Material(
+              color: Theme.of(context).colorScheme.surfaceContainer,
+              child: SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  child: Row(
+                    children: [
+                      Icon(Icons.info_outline, size: 16, color: Theme.of(context).colorScheme.primary),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(_hint, style: Theme.of(context).textTheme.bodySmall)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
       body: !_ready
           ? const SizedBox.shrink()
           : InAppWebView(

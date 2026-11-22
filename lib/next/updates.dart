@@ -1,5 +1,4 @@
 import 'package:battery_plus/battery_plus.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -8,8 +7,10 @@ import '../data/wenku8/wenku8_client.dart';
 import 'app_prefs.dart';
 import 'data.dart';
 import 'library.dart';
+import 'net_state.dart';
 import 'progress.dart';
 import 'read_state.dart';
+import 'session.dart' show friendlyError;
 import 'volumes.dart';
 
 class UpdateEntry {
@@ -63,6 +64,13 @@ class UpdateStore {
 
   /// 上次检查时这本书的总章数（书架每本书都要查，不复制整张表）
   static int known(String aid) => (_known[aid] as int?) ?? 0;
+
+  /// 打开详情页或分卷页拿到最新目录时顺手刷新这本书的已知总章数，避免读完最新章回到书架仍挂着旧未读角标。
+  static Future<void> noteKnownCount(String aid, int count) async {
+    if (!LibraryStore.contains(aid) || count <= 0 || known(aid) == count) return;
+    final next = knownCounts()..[aid] = count;
+    await _box.put('updates:known', next);
+  }
 }
 
 class UpdateProgress {
@@ -85,10 +93,7 @@ class UpdateController extends Notifier<UpdateProgress> {
     if (UpdateStore.lastCheck != 0 && DateTime.now().millisecondsSinceEpoch - UpdateStore.lastCheck < hours * 3600 * 1000) return false;
     if (kIsWeb) return true;
     try {
-      if (AppPrefs.read(P.updWifi, false)) {
-        final c = await Connectivity().checkConnectivity();
-        if (!c.contains(ConnectivityResult.wifi) && !c.contains(ConnectivityResult.ethernet)) return false;
-      }
+      if (AppPrefs.read(P.updWifi, false) && !await onWifi()) return false;
       if (AppPrefs.read(P.updCharging, false)) {
         final b = await Battery().batteryState;
         if (b != BatteryState.charging && b != BatteryState.full) return false;
@@ -138,6 +143,8 @@ class UpdateController extends Notifier<UpdateProgress> {
       final at = <String, int>{};
       final fresh = <Map>[];
       var done = 0;
+      var succeeded = 0;
+      Object? lastErr;
       state = UpdateProgress(running: true, total: books.length);
       // 请求的节奏由 Wenku8Client 统一管，这里每 4 本存一次进度；单本失败不影响其他
       final entries = books.entries.toList();
@@ -148,13 +155,15 @@ class UpdateController extends Notifier<UpdateProgress> {
             final cat = await runInBackground(() => api.catalogue(e.key));
             await Volumes.saveCatalogue(e.key, cat);
             return cat.expand((v) => v.chapters).toList();
-          } catch (_) {
+          } catch (err) {
+            lastErr = err;
             return null;
           }
         }));
         for (final (j, e) in batch.indexed) {
           final chapters = results[j];
           if (chapters == null) continue;
+          succeeded++;
           final before = known[e.key];
           if (before != null && chapters.length > before) {
             final now = DateTime.now().millisecondsSinceEpoch;
@@ -165,16 +174,20 @@ class UpdateController extends Notifier<UpdateProgress> {
           }
           known[e.key] = chapters.length;
         }
-        if (firstRun) await UpdateStore.saveBaseline(known);
+        if (firstRun && succeeded > 0) await UpdateStore.saveBaseline(known);
         done += batch.length;
         state = UpdateProgress(running: true, done: done, total: books.length);
+      }
+      if (books.isNotEmpty && succeeded == 0 && lastErr != null) {
+        state = UpdateProgress(done: done, total: books.length, error: '检查更新失败：${friendlyError(lastErr!)}');
+        return;
       }
       final inLibrary = all.map((b) => b.aid).toSet();
       known.removeWhere((aid, _) => !inLibrary.contains(aid)); // 被跳过的书留着基准，只去掉已不在书架的
       await UpdateStore.save(known, [...fresh.reversed, ...feed], at: at);
       state = UpdateProgress(done: done, total: books.length);
     } catch (e) {
-      state = UpdateProgress(error: e.toString());
+      state = UpdateProgress(error: friendlyError(e));
     }
   }
 }

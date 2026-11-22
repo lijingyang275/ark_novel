@@ -28,10 +28,11 @@ class _CacheBookPageState extends ConsumerState<CacheBookPage> {
     final task = ref.watch(downloadProvider)[widget.aid];
     return Scaffold(
       appBar: AppBar(title: const Text('缓存管理')),
-      body: novel.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => StatePanel(title: '加载失败', detail: e.toString(), error: e, onRetry: () => ref.invalidate(novelProvider(widget.aid))),
-        data: (data) {
+      body: contentWidth(
+        novel.when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => StatePanel(title: '加载失败', detail: e.toString(), error: e, onRetry: () => ref.invalidate(novelProvider(widget.aid))),
+          data: (data) {
           final all = data.catalogue.expand((v) => v.chapters).toList();
           final cached = ChapterCache.count(widget.aid);
           final running = task?.running ?? false;
@@ -98,7 +99,6 @@ class _CacheBookPageState extends ConsumerState<CacheBookPage> {
                         onPressed: _picked.isEmpty
                             ? null
                             : () async {
-                                if (running) ref.read(downloadProvider.notifier).cancel(widget.aid);
                                 await ChapterCache.removeChapters(widget.aid, _picked);
                                 setState(_picked.clear);
                               },
@@ -119,6 +119,7 @@ class _CacheBookPageState extends ConsumerState<CacheBookPage> {
             ],
           );
         },
+        ),
       ),
     );
   }

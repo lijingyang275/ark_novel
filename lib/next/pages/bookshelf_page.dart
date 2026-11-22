@@ -3,7 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show ValueListenable, listEquals;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
-import 'package:flutter/services.dart' show HapticFeedback;
+import 'package:flutter/services.dart' show HapticFeedback, LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -168,17 +168,24 @@ int booksInTab(LibraryState lib, String tabId) => _booksIn(lib, tabId).length;
 
 bool _started(String aid) => ReadingProgress.of(aid) != null || ReadState.readCount(aid) > 0;
 
-/// 未读章数：上次检查更新时记下的总章数减去读过的章数。
+/// 未读章数：上次检查更新时记下的总章数减去读过的章数；若某卷正文已全读完而仅跳过了插图章，不把插图章算进残留未读。
 int _unread(String aid) {
   final total = UpdateStore.known(aid);
-  return total == 0 ? 0 : (total - ReadState.readCount(aid)).clamp(0, total);
+  if (total == 0) return 0;
+  final read = ReadState.read(aid);
+  final vols = Volumes.of(aid);
+  final skippedIllus = vols.isEmpty
+      ? 0
+      : vols.where((v) => v.illus != null && v.textCids.isNotEmpty && v.textCids.every(read.contains) && !read.contains(v.illus)).length;
+  return (total - read.length - skippedIllus).clamp(0, total);
 }
 
 List<LibBook> _arrange(Iterable<LibBook> list, ShelfOptions o, String query, String catId) {
   final q = query.toLowerCase();
+  final markedAids = o.bookmarked == 0 ? const <String>{} : Bookmarks.bookmarkedAids();
   final out = list
       .where((b) => q.isEmpty || b.shown.toLowerCase().contains(q) || b.title.toLowerCase().contains(q))
-      .where((b) => _tri(o.unread, () => _unread(b.aid) > 0) && _tri(o.started, () => _started(b.aid)) && _tri(o.cached, () => ChapterCache.count(b.aid) > 0) && _tri(o.bookmarked, () => Bookmarks.all(b.aid).isNotEmpty) && _tri(o.completed, () => b.done))
+      .where((b) => _tri(o.unread, () => _unread(b.aid) > 0) && _tri(o.started, () => _started(b.aid)) && _tri(o.cached, () => ChapterCache.count(b.aid) > 0) && _tri(o.bookmarked, () => markedAids.contains(b.aid)) && _tri(o.completed, () => b.done))
       .toList();
   switch (o.sort) {
     case ShelfSort.added:
@@ -186,24 +193,24 @@ List<LibBook> _arrange(Iterable<LibBook> list, ShelfOptions o, String query, Str
     case ShelfSort.name:
       out.sort((a, b) => a.shown.compareTo(b.shown));
     case ShelfSort.lastRead:
-      out.sort((a, b) => ReadingProgress.lastRead(b.aid).compareTo(ReadingProgress.lastRead(a.aid)));
+      final last = {for (final b in out) b.aid: ReadingProgress.lastRead(b.aid)};
+      out.sort((a, b) => last[b.aid]!.compareTo(last[a.aid]!));
     case ShelfSort.updated:
-      out.sort((a, b) => UpdateStore.updatedAt(b.aid).compareTo(UpdateStore.updatedAt(a.aid)));
+      final upd = {for (final b in out) b.aid: UpdateStore.updatedAt(b.aid)};
+      out.sort((a, b) => upd[b.aid]!.compareTo(upd[a.aid]!));
     case ShelfSort.unread:
-      out.sort((a, b) => _unread(b.aid).compareTo(_unread(a.aid)));
+      final unr = {for (final b in out) b.aid: _unread(b.aid)};
+      out.sort((a, b) => unr[b.aid]!.compareTo(unr[a.aid]!));
     case ShelfSort.total:
-      out.sort((a, b) => UpdateStore.known(b.aid).compareTo(UpdateStore.known(a.aid)));
+      final tot = {for (final b in out) b.aid: UpdateStore.known(b.aid)};
+      out.sort((a, b) => tot[b.aid]!.compareTo(tot[a.aid]!));
     case ShelfSort.random:
       final seed = AppPrefs.read('shelf.seed', 1);
       out.sort((a, b) => Object.hash(a.aid, seed).compareTo(Object.hash(b.aid, seed)));
     case ShelfSort.custom:
       final order = ((Hive.box('session').get('shelfOrder:lib:$catId') as List?) ?? const []).cast<String>();
-      int rank(LibBook b) {
-        final i = order.indexOf(b.aid);
-        return i < 0 ? order.length : i;
-      }
-
-      out.sort((a, b) => rank(a).compareTo(rank(b)));
+      final ranks = {for (final (i, id) in order.indexed) id: i};
+      out.sort((a, b) => (ranks[a.aid] ?? order.length).compareTo(ranks[b.aid] ?? order.length));
   }
   return o.reverse ? out.reversed.toList() : out;
 }
@@ -364,7 +371,10 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
                     // 隐藏的标签留在原位，可见的按新顺序填回它们占的位置
                     final all = [for (final c in allShelfTabs(lib.cats)) c.id];
                     var k = 0;
-                    _box.put('shelfTabOrder', [for (final id in all) ids.contains(id) ? ids[k++] : id]);
+                    final ordered = [for (final id in all) ids.contains(id) ? ids[k++] : id];
+                    _box.put('shelfTabOrder', ordered);
+                    final catMap = {for (final c in lib.cats) c.id: c};
+                    ref.read(libraryProvider.notifier).reorderCategories([for (final id in ordered) if (catMap[id] != null) catMap[id]!]);
                     setState(() {});
                   },
                   itemBuilder: (context, i) {
@@ -503,11 +513,19 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
         IconButton(tooltip: hz(context, '筛选、排序、显示'), icon: Icon(Icons.filter_list, color: o.filtering ? Theme.of(context).colorScheme.primary : null), onPressed: _showOptions),
         PopupMenuButton<String>(
           tooltip: hz(context, '更多'),
-          onSelected: (v) {
+          onSelected: (v) async {
             if (v == 'random') {
               _openRandom();
             } else if (v == 'check') {
               _checkTab();
+            } else if (v == 'sync_shelf') {
+              final err = await ref.read(libraryProvider.notifier).sync(force: true);
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(err == null ? '已和网站书架同步，书架共 ${ref.read(libraryProvider).books.length} 本' : '同步网站书架失败：$err')),
+              );
+              if (err == null && !isWebPreview) ref.read(volumeCoverQueueProvider).prefetchAll(ref.read(libraryProvider).books.keys).ignore();
+              ref.read(updateProvider.notifier).refresh();
             } else {
               context.push(v);
             }
@@ -515,15 +533,24 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
           itemBuilder: (_) => [
             const PopupMenuItem(value: 'random', child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.casino_outlined), title: Text('随机打开一本'))),
             PopupMenuItem(value: 'check', child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: const Icon(Icons.refresh), title: Text('检查「$_curTabName」的更新'))),
+            if (ref.read(sessionProvider) is SessionLoggedIn)
+              const PopupMenuItem(value: 'sync_shelf', child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.cloud_sync_outlined), title: Text('同步网站书架'))),
             const PopupMenuDivider(),
-            const PopupMenuItem(value: Routes.wall, child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.collections_bookmark_outlined), title: Text('书籍墙'))),
-            const PopupMenuItem(value: Routes.categories, child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.label_outline), title: Text('管理分类'))),
+            const PopupMenuItem(value: Routes.categories, child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.label_outline), title: Text('分类管理'))),
           ],
         ),
       ],
       bottom: scene ? PreferredSize(preferredSize: const Size.fromHeight(44 + 64), child: Column(children: [const SizedBox(height: 64), _tabStrip(tabs, tc, lib)])) : _tabStrip(tabs, tc, lib),
     );
-    return PopScope(
+    return CallbackShortcuts(
+      bindings: {
+        if (_searching)
+          const SingleActivator(LogicalKeyboardKey.escape): () {
+            setState(() => _setSearching(false));
+            ref.read(shelfQueryProvider.notifier).set('');
+          },
+      },
+      child: PopScope(
       canPop: !_searching,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
@@ -544,6 +571,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -892,11 +920,20 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     super.dispose();
   }
 
-  /// 下拉：离线时先无感重连，再和网站书架同步、检查更新。
+  /// 下拉：游客检查本地书架章节更新；已登录时先无感重连（若离线），再和网站书架同步并检查更新。
   Future<void> _refresh() async {
     final s = ref.read(sessionProvider);
     if (s is! SessionLoggedIn) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('登录后才能和网站书架同步，本地书架照常可用')));
+      if (ref.read(libraryProvider).books.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('登录后可同步网站上的云端书架')));
+        return;
+      }
+      await ref.read(updateProvider.notifier).refresh(force: true);
+      if (!mounted) return;
+      final err = ref.read(updateProvider).error;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(err ?? '已检查本地书架章节更新（登录账号可与网站书架同步）')),
+      );
       return;
     }
     if (s.offline && !s.needsVerify) {
@@ -913,9 +950,20 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
         return;
       }
     }
+    LibraryStore.syncNotice.value = null;
     final err = await ref.read(libraryProvider.notifier).sync(force: true);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err == null ? '已和网站书架同步，书架共 ${ref.read(libraryProvider).books.length} 本' : '同步网站书架失败：$err')));
+    final notice = LibraryStore.syncNotice.value;
+    LibraryStore.syncNotice.value = null;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          err != null
+              ? '同步网站书架失败：$err'
+              : (notice ?? '已和网站书架同步，书架共 ${ref.read(libraryProvider).books.length} 本'),
+        ),
+      ),
+    );
     if (err == null && !isWebPreview) ref.read(volumeCoverQueueProvider).prefetchAll(ref.read(libraryProvider).books.keys).ignore();
     ref.read(updateProvider.notifier).refresh();
   }
@@ -1047,15 +1095,58 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     ref.watch(appPrefsProvider); // 书架设置（角标、列数、每个标签单独设置）变了就重建
     final o = shelfOptionsFor(ref.watch(shelfOptionsProvider), widget.catId);
     final query = ref.watch(shelfQueryProvider);
-    ref.watch(updateProvider); // 检查完更新后刷新未读数
+    ref.watch(updateProvider.select((p) => p.running)); // 检查完更新后刷新未读数（不在中间进度跳动时反复重排全表）
     ref.watch(volumeChangesProvider); // 取到卷封面后换上
     final theme = Theme.of(context);
     final inCat = _booksIn(lib, widget.catId); // 搜索也只在这个标签里找，别的标签找到几本标在标签上
     final books = _arrange(inCat, o, query, widget.catId);
+    final loggedIn = ref.watch(sessionProvider) is SessionLoggedIn;
 
     final Widget body;
     if (lib.books.isEmpty) {
-      body = const StatePanel(title: '书架还是空的', detail: '在书籍详情页点"加入书架"。登录后下拉可以把网站上的书架同步过来。');
+      body = ListView(
+        padding: const EdgeInsets.all(32),
+        children: [
+          const SizedBox(height: 64),
+          Icon(Icons.auto_stories_outlined, size: 48, color: theme.colorScheme.primary.withValues(alpha: 0.75)),
+          const SizedBox(height: 16),
+          Text('书架还是空的', textAlign: TextAlign.center, style: theme.textTheme.titleLarge),
+          const SizedBox(height: 8),
+          Text(
+            loggedIn ? '可以下拉同步网站书架，或去「发现」与「搜索」找书加入书架。' : '登录轻小说文库账号可同步云端书架；不登录也可在「发现」页把喜欢的书加入本地书架。',
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: 24),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 12,
+            runSpacing: 10,
+            children: [
+              if (!loggedIn)
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+                  onPressed: () => context.push(Routes.login),
+                  icon: const Icon(Icons.login, size: 18),
+                  label: const Text('登录文库账号'),
+                )
+              else
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+                  onPressed: _refresh,
+                  icon: const Icon(Icons.cloud_download_outlined, size: 18),
+                  label: const Text('同步网站书架'),
+                ),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
+                onPressed: () => context.go(Routes.discover),
+                icon: const Icon(Icons.explore_outlined, size: 18),
+                label: const Text('去发现页逛逛'),
+              ),
+            ],
+          ),
+        ],
+      );
     } else if (books.isEmpty) {
       body = StatePanel(title: inCat.isEmpty ? '这个分类还没有书' : (query.isEmpty ? '没有符合条件的书' : '这个分类里没有「$query」'), detail: inCat.isEmpty && !widget.catId.startsWith('auto:') ? '在书架长按书本，选"分类"放进来。' : null);
     } else if (o.sort == ShelfSort.custom && query.isEmpty && !o.filtering) {
@@ -1122,12 +1213,16 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _syncSelecting();
     });
-    return PopScope(
-      canPop: _selected.isEmpty,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) setState(_selected.clear); // 返回键先退出多选
+    return CallbackShortcuts(
+      bindings: {
+        if (_selected.isNotEmpty) const SingleActivator(LogicalKeyboardKey.escape): () => setState(_selected.clear),
       },
-      child: Column(
+      child: PopScope(
+        canPop: _selected.isEmpty,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) setState(_selected.clear); // 返回键先退出多选
+        },
+        child: Column(
         children: [
           Expanded(child: RefreshIndicator(onRefresh: _refresh, child: body)),
           if (_selected.isNotEmpty)
@@ -1159,6 +1254,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
               ),
             ),
         ],
+        ),
       ),
     );
   }
@@ -1249,27 +1345,32 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     if (!compact) {
       return GestureDetector(
         onLongPress: () => _toggle(b.aid),
+        onSecondaryTap: () => _toggle(b.aid),
         child: NovelCard(title: b.shown, aid: b.aid, imageUrl: _cover(b), onTap: () => _tap(b), badge: badge, action: resume),
       );
     }
     // 紧凑：书名压在封面底部的渐变上
-    return GestureDetector(
-      onLongPress: () => _toggle(b.aid),
-      onTap: () => _tap(b),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          CoverImage(_cover(b), aid: b.aid),
-          DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              gradient: const LinearGradient(begin: Alignment.center, end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black87]),
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onLongPress: () => _toggle(b.aid),
+        onSecondaryTap: () => _toggle(b.aid),
+        onTap: () => _tap(b),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            CoverImage(_cover(b), aid: b.aid),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                gradient: const LinearGradient(begin: Alignment.center, end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black87]),
+              ),
             ),
-          ),
-          Positioned(left: 6, right: resume == null ? 6 : 40, bottom: 6, child: Text(b.shown, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 12, height: 1.25))),
-          if (badge != null) Positioned(top: 6, right: 6, child: badge),
-          if (resume != null) Positioned(right: 0, bottom: 0, child: resume),
-        ],
+            Positioned(left: 6, right: resume == null ? 6 : 40, bottom: 6, child: Text(b.shown, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 12, height: 1.25))),
+            if (badge != null) Positioned(top: 6, right: 6, child: badge),
+            if (resume != null) Positioned(right: 0, bottom: 0, child: resume),
+          ],
+        ),
       ),
     );
   }
@@ -1283,10 +1384,13 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     final queue = ref.read(volumeCoverQueueProvider);
     final behind = [for (final v in vols.skip(1).take(stackEdges(vols.length))) queue.volCover(b.aid, v, b.img)];
     final theme = Theme.of(context);
-    return GestureDetector(
-      onTap: () => _selected.isEmpty ? _openAndRefresh(Routes.volumes(b.aid)) : _toggle(b.aid),
-      onLongPress: () => _toggle(b.aid),
-      child: Column(
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: () => _selected.isEmpty ? _openAndRefresh(Routes.volumes(b.aid)) : _toggle(b.aid),
+        onLongPress: () => _toggle(b.aid),
+        onSecondaryTap: () => _toggle(b.aid),
+        child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Expanded(
@@ -1332,6 +1436,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
             style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
         ],
+        ),
       ),
     );
   }

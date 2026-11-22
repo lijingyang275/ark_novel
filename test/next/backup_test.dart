@@ -176,4 +176,35 @@ void main() {
     expect(b.get('cookie'), 'mine');
     expect(b.get('palette'), 3);
   });
+
+  test('恢复到曾与原设备同步过的目标设备：目标设备原本的云端统计还原为本机统计', () async {
+    final box = await Hive.openBox('session');
+    await box.putAll({
+      'sync:device': 'dA',
+      'stats:day': {'2026-10-21': 120},
+      'stats:book': {'1': 120},
+      'stats:chapters': 2,
+      'sync:stats:dB': jsonEncode({
+        'day': {'2026-10-20': 300},
+        'book': {'2': 300},
+        'chapters': 5,
+        'days': {'2': ['2026-10-20']},
+      }),
+    });
+    await Backup.pack(zip, Backup.make(), support);
+    await box.clear();
+    await box.put('sync:device', 'dB');
+    await box.close();
+
+    await Backup.unpack(zip, support);
+    await Backup.apply(support);
+
+    final b = await Hive.openBox('session');
+    expect(b.get('sync:device'), 'dB');
+    expect(b.containsKey('sync:stats:dB'), isFalse);
+    expect(b.get('stats:day'), {'2026-10-20': 300});
+    expect(b.get('stats:book'), {'2': 300});
+    expect(b.get('stats:chapters'), 5);
+    expect((jsonDecode(b.get('sync:stats:dA') as String) as Map)['chapters'], 2);
+  });
 }

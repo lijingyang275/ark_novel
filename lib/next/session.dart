@@ -284,6 +284,7 @@ final imageDioProvider = Provider<Dio>((ref) {
     );
     dio.interceptors.add(CookieManager(jar));
   }
+  ref.onDispose(dio.close);
   return dio;
 });
 
@@ -321,6 +322,35 @@ class SessionLoggedIn extends SessionState {
 }
 
 bool isCloudflare(Object e) => e is Cloudflare403Exception || e is CloudflareChallengeException;
+
+/// 把各种底层网络 / 解析 / Dart 异常转成适合直接展示给普通用户的中文说明。
+String friendlyError(Object e) {
+  if (e is Wenku8HttpException) return e.status == 429 ? e.message : '网站返回 HTTP ${e.status}';
+  if (e is Wenku8Exception) return e.message;
+  if (isCloudflare(e)) return e.toString();
+  if (e is TimeoutException) return '连接超时，请检查网络或代理设置';
+  if (e is _OddUserPage) return e.toString();
+  if (e is FormatException) return e.message;
+  if (e is StateError) return e.message;
+  if (e is DioException) {
+    if (e.type == DioExceptionType.connectionTimeout || e.type == DioExceptionType.sendTimeout || e.type == DioExceptionType.receiveTimeout) {
+      return '连接超时，请检查网络或切换线路';
+    }
+    final err = e.error;
+    if (err != null && isCloudflare(err)) return err.toString();
+    final detail = err?.toString() ?? e.message ?? e.type.name;
+    if (detail.contains('127.0.0.1') || detail.contains('Connection refused')) {
+      return '连接被拒绝（本地 DNS 可能拦截了域名，建议切到 wenku8.cc 或开启代理）';
+    }
+    if (err is SocketException) return '网络不可达：${err.osError?.message ?? err.message}';
+    if (err is HandshakeException) return '安全连接（TLS）握手失败，可能被网络拦截，建议切换线路或开启系统网络栈';
+    return '连接失败：$detail';
+  }
+  final raw = e.toString();
+  if (raw.startsWith('Bad state: ')) return raw.substring(11);
+  if (raw.startsWith('FormatException: ')) return raw.substring(17);
+  return raw;
+}
 
 /// 登录状态。没登录也能进主界面（游客），需要账号的页面再提示登录。
 class SessionController extends Notifier<SessionState> {
@@ -431,24 +461,8 @@ class SessionController extends Notifier<SessionState> {
   }
 
   static String _describeError(Object e) {
-    if (isCloudflare(e)) return '被网站验证拦截，需要完成一次验证';
     if (e is TimeoutException) return '连接超时（15 秒）';
-    if (e is Wenku8HttpException) return '网站返回 HTTP ${e.status}';
-    if (e is _OddUserPage) return e.toString();
-    if (e is DioException) {
-      if (e.type == DioExceptionType.connectionTimeout || e.type == DioExceptionType.sendTimeout || e.type == DioExceptionType.receiveTimeout) {
-        return '连接超时';
-      }
-      final err = e.error;
-      final detail = err?.toString() ?? e.message ?? e.type.name;
-      if (detail.contains('127.0.0.1') || detail.contains('Connection refused')) {
-        return '连接被拒绝（本地 DNS 可能把域名指向了 127.0.0.1）';
-      }
-      if (err is SocketException) return '网络不可达：${err.osError?.message ?? err.message}';
-      if (err is HandshakeException) return 'TLS 握手失败：${err.message}';
-      return '连接失败：$detail';
-    }
-    return '连接失败：$e';
+    return friendlyError(e);
   }
 
   /// 过完 Cloudflare 验证（或登录）后，WebView 里的 cookie 分流：登录 cookie 全站点通用，其余只属于验证过的站点。
@@ -477,10 +491,10 @@ class SessionController extends Notifier<SessionState> {
     await _confirm(_store.cookie ?? cookies);
   }
 
-  /// 验证完成后重新确认一次登录状态。
+  /// 验证完成后静默确认一次登录状态（不切到 SessionChecking，保留二级页面的导航栈）。
   Future<void> afterVerify(String cookies, {String? userAgent}) async {
     await acceptWebCookies(cookies, userAgent: userAgent);
-    await restore();
+    await restore(silent: true);
   }
 
   /// 网页预览：账号密码登录，由转发程序提交并保存 cookie。
@@ -498,7 +512,7 @@ class SessionController extends Notifier<SessionState> {
       state = SessionLoggedIn(user);
     } on Wenku8UnexpectedPageException {
       await _clear();
-      throw const Wenku8UnexpectedPageException('登录失败：账号或密码不对，或者选择了"临时登录"');
+      throw const Wenku8UnexpectedPageException('登录失败：用户名或密码不正确，或页面验证未通过');
     }
   }
 

@@ -14,17 +14,28 @@ import 'updates_page.dart';
 import '../text.dart';
 
 /// 阅读历史：按日期分组，显示读到哪一章和时间，点一下接着读。
-class HistoryPage extends StatefulWidget {
+class HistoryPage extends ConsumerStatefulWidget {
   const HistoryPage({super.key});
 
   @override
-  State<HistoryPage> createState() => _HistoryPageState();
+  ConsumerState<HistoryPage> createState() => _HistoryPageState();
 }
 
-class _HistoryPageState extends State<HistoryPage> {
+class _HistoryPageState extends ConsumerState<HistoryPage> {
+  Future<void> _deleteOne(HistoryEntry e) async {
+    await ReadingHistory.remove(e.aid);
+    if (!mounted) return;
+    setState(() {});
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text('已删除《${LibraryStore.shown(e.aid, e.title)}》的历史记录')));
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    ref.watch(volumeChangesProvider);
+    final covers = ref.read(volumeCoverQueueProvider);
     final items = ReadingHistory.all();
     final rows = <Widget>[];
     String? day;
@@ -39,15 +50,18 @@ class _HistoryPageState extends State<HistoryPage> {
           key: ValueKey(e.aid),
           direction: DismissDirection.endToStart,
           background: Container(alignment: Alignment.centerRight, padding: const EdgeInsets.only(right: 20), child: const Icon(Icons.delete_outline)),
-          onDismissed: (_) async {
-            await ReadingHistory.remove(e.aid);
-            setState(() {});
-          },
+          onDismissed: (_) => _deleteOne(e),
           child: ListTile(
-            leading: SizedBox(width: 40, height: 54, child: CoverImage(e.img)),
+            leading: SizedBox(width: 40, height: 54, child: CoverImage(covers.bookCover(e.aid, e.img), aid: e.aid)),
             title: Text(LibraryStore.shown(e.aid, e.title), maxLines: 1, overflow: TextOverflow.ellipsis),
             subtitle: Text('${e.chapter} · ${hhmm(e.time)}', maxLines: 1, overflow: TextOverflow.ellipsis),
-            trailing: IconButton(icon: const Icon(Icons.info_outline), tooltip: hz(context, '详情'), onPressed: () => context.push(Routes.novel(e.aid))),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(icon: const Icon(Icons.info_outline, size: 20), tooltip: hz(context, '详情'), onPressed: () => context.push(Routes.novel(e.aid))),
+                IconButton(icon: const Icon(Icons.close, size: 18), tooltip: hz(context, '删除记录'), onPressed: () => _deleteOne(e)),
+              ],
+            ),
             onTap: () => context.push(Routes.reader(e.aid, e.cid)),
           ),
         ),
@@ -60,14 +74,27 @@ class _HistoryPageState extends State<HistoryPage> {
           if (items.isNotEmpty)
             TextButton(
               onPressed: () async {
-                await ReadingHistory.clear();
-                setState(() {});
+                final ok = await showDialog<bool>(
+                  context: context,
+                  builder: (context) => AlertDialog(
+                    title: const Text('清空阅读历史？'),
+                    content: const Text('仅清除最近阅读历史列表，不影响阅读进度、书架和阅读时长统计。'),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+                      FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('清空')),
+                    ],
+                  ),
+                );
+                if (ok == true) {
+                  await ReadingHistory.clear();
+                  if (mounted) setState(() {});
+                }
               },
               child: const Text('清空'),
             ),
         ],
       ),
-      body: items.isEmpty ? const StatePanel(title: '还没有阅读记录') : ListView(children: rows),
+      body: contentWidth(items.isEmpty ? const StatePanel(title: '还没有阅读记录') : ListView(children: rows)),
     );
   }
 }
@@ -82,56 +109,91 @@ class CachePage extends ConsumerWidget {
     ref.watch(chapterCacheChangesProvider);
     ref.watch(volumeChangesProvider); // 卷封面取到了就换上
     final books = ChapterCache.books().entries.toList();
+    final offlineBytes = books.fold<int>(0, (sum, e) => sum + ChapterCache.bytesOf(e.key));
+    final autoCachedBooks = ChapterCache.cachedBooks().where((aid) => !ChapterCache.offline(aid)).length;
     return Scaffold(
-      appBar: AppBar(title: Text('离线缓存 · 共 ${ChapterCache.totalLabel()}')),
-      body: books.isEmpty
-          ? const StatePanel(title: '还没有缓存', detail: '在书籍详情页点"缓存"，可以整本或只缓存选中的章节。读过的章节也会自动存下来（占用见上方）。')
-          : ListView(
-              children: [
-                for (final b in books)
-                  Builder(
-                    builder: (context) {
-                      final t = tasks[b.key];
-                      final done = t?.done ?? ChapterCache.count(b.key);
-                      final total = b.value.$2;
-                      return ListTile(
-                        // 和书架一样的封面（第一卷的高清封面）；以前导入时没记下封面地址的按书号拼
-                        leading: SizedBox(width: 44, height: 59, child: CoverImage(ref.read(volumeCoverQueueProvider).bookCover(b.key, b.value.$3.isNotEmpty ? b.value.$3 : Wenku8Parser.coverUrl(b.key)))),
-                        title: Text(LibraryStore.shown(b.key, b.value.$1)),
-                        subtitle: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const SizedBox(height: 4),
-                            LinearProgressIndicator(value: total == 0 ? 0 : done / total, minHeight: 4, borderRadius: BorderRadius.circular(2)),
-                            const SizedBox(height: 4),
-                            Text('$done/$total 章 · ${ChapterCache.sizeLabel(b.key)}${t?.running ?? false ? ' · 下载中' : ''}'),
-                          ],
-                        ),
-                        onTap: () {
-                          // 点进去直接阅读：有进度从进度处接着读，否则从第一章
-                          final cid = ReadingProgress.of(b.key)?.cid ?? b.value.$4;
-                          context.push(cid.isEmpty ? Routes.cacheBook(b.key) : Routes.reader(b.key, cid));
-                        },
-                        onLongPress: () => context.push(Routes.cacheBook(b.key)),
-                        trailing: (t?.running ?? false)
-                            ? IconButton(icon: const Icon(Icons.pause_circle_outline), onPressed: () => ref.read(downloadProvider.notifier).cancel(b.key))
-                            : PopupMenuButton<String>(
-                                onSelected: (v) async {
-                                  if (v == 'manage') {
-                                    context.push(Routes.cacheBook(b.key));
-                                  } else {
-                                    // 先停掉这本书的下载，再删；不重建整个下载管理器，别的书的下载不受影响
-                                    ref.read(downloadProvider.notifier).forget(b.key);
-                                    await ChapterCache.remove(b.key);
-                                  }
-                                },
-                                itemBuilder: (_) => const [PopupMenuItem(value: 'manage', child: Text('管理章节')), PopupMenuItem(value: 'delete', child: Text('删除缓存'))],
-                              ),
-                      );
-                    },
+      appBar: AppBar(
+        title: Text(books.isEmpty ? '离线缓存' : '离线缓存 · ${sizeText(offlineBytes)}'),
+        actions: [
+          TextButton(onPressed: () => context.push(Routes.storage), child: const Text('存储空间')),
+        ],
+      ),
+      body: contentWidth(
+        books.isEmpty
+            ? ListView(
+                padding: const EdgeInsets.all(32),
+                children: [
+                  const SizedBox(height: 64),
+                  Text('还没有缓存', textAlign: TextAlign.center, style: Theme.of(context).textTheme.titleLarge),
+                  const SizedBox(height: 8),
+                  Text(
+                    autoCachedBooks > 0
+                        ? '在书籍详情页点「缓存全本」后书籍会列在这里。\n当前另有 $autoCachedBooks 本阅读时自动缓存的章节（共 ${ChapterCache.totalLabel()}），可在「存储空间」按书清理。'
+                        : '在书籍详情页点「缓存全本」或勾选章节下载后，断网也能完整阅读正文和插图。',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
                   ),
-              ],
-            ),
+                  if (autoCachedBooks > 0) ...[
+                    const SizedBox(height: 20),
+                    Center(child: OutlinedButton(onPressed: () => context.push(Routes.storage), child: const Text('管理阅读自动缓存'))),
+                  ],
+                ],
+              )
+            : ListView(
+                children: [
+                  if (autoCachedBooks > 0)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                      child: Text(
+                        '另有 $autoCachedBooks 本阅读自动缓存章节，点右上角「存储空间」可一并查看清理',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                      ),
+                    ),
+                  for (final b in books)
+                    Builder(
+                      builder: (context) {
+                        final t = tasks[b.key];
+                        final done = t?.done ?? ChapterCache.count(b.key);
+                        final total = b.value.$2;
+                        return ListTile(
+                          // 和书架一样的封面（第一卷的高清封面）；以前导入时没记下封面地址的按书号拼
+                          leading: SizedBox(width: 44, height: 59, child: CoverImage(ref.read(volumeCoverQueueProvider).bookCover(b.key, b.value.$3.isNotEmpty ? b.value.$3 : Wenku8Parser.coverUrl(b.key)), aid: b.key)),
+                          title: Text(LibraryStore.shown(b.key, b.value.$1)),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const SizedBox(height: 4),
+                              LinearProgressIndicator(value: total == 0 ? 0 : done / total, minHeight: 4, borderRadius: BorderRadius.circular(2)),
+                              const SizedBox(height: 4),
+                              Text('$done/$total 章 · ${ChapterCache.sizeLabel(b.key)}${t?.running ?? false ? ' · 下载中' : ''}'),
+                            ],
+                          ),
+                          onTap: () {
+                            // 点进去直接阅读：有进度从进度处接着读，否则从第一章
+                            final cid = ReadingProgress.of(b.key)?.cid ?? b.value.$4;
+                            context.push(cid.isEmpty ? Routes.cacheBook(b.key) : Routes.reader(b.key, cid));
+                          },
+                          onLongPress: () => context.push(Routes.cacheBook(b.key)),
+                          trailing: (t?.running ?? false)
+                              ? IconButton(icon: const Icon(Icons.pause_circle_outline), tooltip: hz(context, '暂停下载'), onPressed: () => ref.read(downloadProvider.notifier).cancel(b.key))
+                              : PopupMenuButton<String>(
+                                  onSelected: (v) async {
+                                    if (v == 'manage') {
+                                      context.push(Routes.cacheBook(b.key));
+                                    } else {
+                                      // 先停掉这本书的下载，再删；不重建整个下载管理器，别的书的下载不受影响
+                                      ref.read(downloadProvider.notifier).forget(b.key);
+                                      await ChapterCache.remove(b.key);
+                                    }
+                                  },
+                                  itemBuilder: (_) => const [PopupMenuItem(value: 'manage', child: Text('管理章节')), PopupMenuItem(value: 'delete', child: Text('删除缓存'))],
+                                ),
+                        );
+                      },
+                    ),
+                ],
+              ),
+      ),
     );
   }
 }

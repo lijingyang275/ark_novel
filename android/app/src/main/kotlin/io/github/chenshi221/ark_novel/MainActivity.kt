@@ -1,11 +1,15 @@
 package io.github.chenshi221.ark_novel
 
+import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.annotation.NonNull
+import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.ryanheise.audioservice.AudioServiceFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -44,11 +48,20 @@ class MainActivity : AudioServiceFragmentActivity() {
 
         // 停止朗读时删掉朗读通知（audio_service 的通知 id 固定是 1124；服务被 App 绑着，它自己删不掉）
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ark/tts").setMethodCallHandler { call, result ->
-            if (call.method == "cancelNotice") {
-                NotificationManagerCompat.from(this).cancel(1124)
-                result.success(null)
-            } else {
-                result.notImplemented()
+            when (call.method) {
+                "cancelNotice" -> {
+                    NotificationManagerCompat.from(this).cancel(1124)
+                    result.success(null)
+                }
+                "requestNotificationPermission" -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1125)
+                    }
+                    result.success(null)
+                }
+                else -> result.notImplemented()
             }
         }
 

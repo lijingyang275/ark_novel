@@ -110,6 +110,16 @@ class ReplaceRules {
     await _box.put('rules', out);
   }
 
+  static final _backref = RegExp(r'\$(\d)');
+  static final _compiled = <String, RegExp>{};
+
+  static RegExp _regex(String pattern) {
+    final hit = _compiled[pattern];
+    if (hit != null) return hit;
+    if (_compiled.length >= 256) _compiled.remove(_compiled.keys.first);
+    return _compiled[pattern] = RegExp(pattern, multiLine: true);
+  }
+
   /// 依次套用启用的替换规则；替换串里可用 `$1` 引用分组。无效的规则直接跳过。
   static String apply(String text, [List<ReplaceRule>? rules]) {
     var out = text;
@@ -117,8 +127,8 @@ class ReplaceRules {
       if (!r.enabled || r.kind != RuleKind.replace || r.pattern.isEmpty) continue;
       try {
         out = out.replaceAllMapped(
-          RegExp(r.pattern, multiLine: true),
-          (m) => r.replacement.replaceAllMapped(RegExp(r'\$(\d)'), (g) {
+          _regex(r.pattern),
+          (m) => r.replacement.replaceAllMapped(_backref, (g) {
             final idx = int.parse(g[1]!);
             if (idx == 0) return m[0] ?? '';
             if (idx <= m.groupCount) return m.group(idx) ?? '';
@@ -132,16 +142,17 @@ class ReplaceRules {
 
   /// 在 [text] 里找出所有高亮：先写的规则优先，重叠的后者让位；结果按位置排序、互不重叠。
   static List<Mark> marks(String text, [List<ReplaceRule>? rules, String aid = '']) {
+    final list = rules ?? all();
     final found = <Mark>[];
-    for (final r in rules ?? all()) {
+    for (final r in list) {
       if (!r.enabled || r.kind == RuleKind.replace || r.pattern.isEmpty || (r.aid.isNotEmpty && r.aid != aid)) continue;
       try {
-        for (final m in RegExp(r.pattern, multiLine: true).allMatches(text)) {
+        for (final m in _regex(r.pattern).allMatches(text)) {
           if (m.end > m.start) found.add(Mark(m.start, m.end, r));
         }
       } catch (_) {}
     }
-    final order = {for (final (i, r) in (rules ?? all()).indexed) r.id: i};
+    final order = {for (final (i, r) in list.indexed) r.id: i};
     found.sort((a, b) {
       final c = a.start.compareTo(b.start);
       return c != 0 ? c : (order[a.rule.id] ?? 0).compareTo(order[b.rule.id] ?? 0);

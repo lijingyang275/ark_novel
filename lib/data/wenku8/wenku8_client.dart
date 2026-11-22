@@ -195,13 +195,16 @@ class _ThrottleInterceptor extends Interceptor {
   final _foreground = Queue<Completer<void>>();
   final _background = Queue<Completer<void>>();
   bool _busy = false;
+  Completer<void>? _wake;
   DateTime _last = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _pausedUntil = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   Future<void> onRequest(RequestOptions options, RequestInterceptorHandler handler) async {
     final turn = Completer<void>();
-    (Zone.current[_backgroundKey] == true ? _background : _foreground).add(turn);
+    final isBg = Zone.current[_backgroundKey] == true;
+    (isBg ? _background : _foreground).add(turn);
+    if (!isBg && _wake != null && !_wake!.isCompleted) _wake!.complete();
     unawaited(_dispatch());
     await turn.future;
     options.extra['throttled'] = true;
@@ -221,7 +224,9 @@ class _ThrottleInterceptor extends Interceptor {
       final next = _last.add(_foreground.isNotEmpty ? _foregroundGap : _backgroundGap);
       final wait = (next.isAfter(_pausedUntil) ? next : _pausedUntil).difference(DateTime.now());
       if (wait <= Duration.zero) break;
-      await Future<void>.delayed(wait);
+      final wake = _wake = Completer<void>();
+      await Future.any([Future<void>.delayed(wait), wake.future]);
+      _wake = null;
     }
     _last = DateTime.now();
     (_foreground.isNotEmpty ? _foreground : _background).removeFirst().complete();

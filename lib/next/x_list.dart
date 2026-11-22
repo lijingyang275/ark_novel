@@ -220,6 +220,7 @@ Future<T?> pickOption<T>(BuildContext context, String title, T current, Map<T, S
   context: context,
   showDragHandle: true,
   isScrollControlled: true,
+  constraints: const BoxConstraints(maxWidth: 560),
   builder: (context) {
     final scheme = Theme.of(context).colorScheme;
     return SafeArea(

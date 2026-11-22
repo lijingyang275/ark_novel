@@ -165,7 +165,6 @@ class ImageStore {
 
   static bool _isChallengeError(Object e) {
     if (e is Cloudflare403Exception || e is CloudflareChallengeException) return true;
-    if (e is StateError) return true;
     if (e is DioException) {
       final status = e.response?.statusCode;
       if (status == 403 || status == 503) {
@@ -182,7 +181,17 @@ class ImageStore {
     // 封面图床的 https 在国内不开代理时常连不上，http 正常；缓存文件名仍按 https 地址算，旧缓存照用
     final res = await _ref.read(imageDioProvider).get<List<int>>(requestUrl.replaceFirst('https://img.wenku8.com/', 'http://img.wenku8.com/'));
     final data = res.data;
-    if (data == null || data.isEmpty || (data.length > 5 && data[0] == 0x3C)) throw StateError('invalid image response');
+    if (data == null || data.isEmpty) throw StateError('empty image response');
+    if (data.length > 5 && data[0] == 0x3C) {
+      final head = latin1.decode(data.take(1024).toList(), allowInvalid: true).toLowerCase();
+      final cf = res.headers.value('cf-mitigated') == 'challenge' ||
+          head.contains('cloudflare') ||
+          head.contains('just a moment') ||
+          head.contains('cf-turnstile') ||
+          head.contains('challenge-platform');
+      if (cf) throw CloudflareChallengeException(requestOptions: res.requestOptions);
+      throw StateError('invalid image response');
+    }
     return data;
   }
 
@@ -424,7 +433,8 @@ class ImageStore {
     final dir = await _cacheDir();
     if (await dir.exists()) await dir.delete(recursive: true);
     if (srSupported) {
-      await (await _srDir()).delete(recursive: true);
+      final sd = await _srDir();
+      if (await sd.exists()) await sd.delete(recursive: true);
       _srDirCache = null;
       _srDone = null;
     }

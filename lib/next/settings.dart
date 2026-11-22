@@ -63,7 +63,7 @@ void applyOrientation(int v) => SystemChrome.setPreferredOrientations(switch (v)
 
 /// 阅读器的外观和翻页方式。
 class ReaderPrefs {
-  const ReaderPrefs({this.fontSize = 18, this.lineHeight = 1.8, this.theme = 5, this.mode = 3, this.ttsRate = 1.0, this.margin = 22, this.font = 1, this.ttsPitch = 1.0, this.ttsVoice = '', this.ttsHighlight = true, this.ttsAutoNext = true, this.dual = true, this.dim = 0, this.volumeKeys = true, this.tapZone = 2, this.tapInvert = 0, this.keepScreenOn = true, this.fullscreen = true, this.showStatus = true, this.skipRead = false, this.chapterToast = false, this.warm = 0, this.grayscale = false, this.invert = false, this.customBrightness = false, this.brightness = 0.5, this.volumeInvert = false, this.pageAnim = true, this.prefetch = 2, this.prefetchWifi = false, this.prefetchBook = false, this.hant = false});
+  const ReaderPrefs({this.fontSize = 18, this.lineHeight = 1.8, this.theme = 5, this.mode = 3, this.ttsRate = 0.5, this.margin = 22, this.font = 1, this.ttsPitch = 1.0, this.ttsVoice = '', this.ttsHighlight = true, this.ttsAutoNext = true, this.dual = true, this.dim = 0, this.volumeKeys = true, this.tapZone = 0, this.tapInvert = 0, this.keepScreenOn = true, this.fullscreen = true, this.showStatus = true, this.skipRead = false, this.chapterToast = false, this.warm = 0, this.grayscale = false, this.invert = false, this.customBrightness = false, this.brightness = 0.5, this.volumeInvert = false, this.pageAnim = true, this.prefetch = 2, this.prefetchWifi = false, this.prefetchBook = false, this.hant = false});
 
   final double fontSize;
   final double lineHeight;
@@ -184,6 +184,50 @@ class ReaderPrefs {
     prefetchBook: prefetchBook ?? this.prefetchBook,
     hant: hant ?? this.hant,
   );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ReaderPrefs &&
+          fontSize == other.fontSize &&
+          lineHeight == other.lineHeight &&
+          theme == other.theme &&
+          mode == other.mode &&
+          ttsRate == other.ttsRate &&
+          margin == other.margin &&
+          font == other.font &&
+          ttsPitch == other.ttsPitch &&
+          ttsVoice == other.ttsVoice &&
+          ttsHighlight == other.ttsHighlight &&
+          ttsAutoNext == other.ttsAutoNext &&
+          dual == other.dual &&
+          dim == other.dim &&
+          volumeKeys == other.volumeKeys &&
+          tapZone == other.tapZone &&
+          tapInvert == other.tapInvert &&
+          keepScreenOn == other.keepScreenOn &&
+          fullscreen == other.fullscreen &&
+          showStatus == other.showStatus &&
+          skipRead == other.skipRead &&
+          chapterToast == other.chapterToast &&
+          warm == other.warm &&
+          grayscale == other.grayscale &&
+          invert == other.invert &&
+          customBrightness == other.customBrightness &&
+          brightness == other.brightness &&
+          volumeInvert == other.volumeInvert &&
+          pageAnim == other.pageAnim &&
+          prefetch == other.prefetch &&
+          prefetchWifi == other.prefetchWifi &&
+          prefetchBook == other.prefetchBook &&
+          hant == other.hant;
+
+  @override
+  int get hashCode => Object.hashAll([
+    fontSize, lineHeight, theme, mode, ttsRate, margin, font, ttsPitch, ttsVoice, ttsHighlight, ttsAutoNext,
+    dual, dim, volumeKeys, tapZone, tapInvert, keepScreenOn, fullscreen, showStatus, skipRead, chapterToast,
+    warm, grayscale, invert, customBrightness, brightness, volumeInvert, pageAnim, prefetch, prefetchWifi, prefetchBook, hant,
+  ]);
 }
 
 class ReaderPrefsController extends Notifier<ReaderPrefs> {
@@ -193,7 +237,7 @@ class ReaderPrefsController extends Notifier<ReaderPrefs> {
     lineHeight: (_box.get('r.lineHeight') as num?)?.toDouble() ?? 1.8,
     theme: (_box.get('r.theme') as int?) ?? 5,
     mode: (_box.get('r.mode') as int?) ?? 3,
-    ttsRate: (_box.get('r.ttsRate') as num?)?.toDouble() ?? 1.0,
+    ttsRate: (_box.get('r.ttsRate') as num?)?.toDouble() ?? 0.5,
     margin: (_box.get('r.margin') as num?)?.toDouble() ?? 22,
     font: (_box.get('r.font') as int?) ?? 1,
     ttsPitch: (_box.get('r.ttsPitch') as num?)?.toDouble() ?? 1.0,
@@ -203,7 +247,7 @@ class ReaderPrefsController extends Notifier<ReaderPrefs> {
     dual: (_box.get('r.dual') as bool?) ?? true,
     dim: (_box.get('r.dim') as num?)?.toDouble() ?? 0,
     volumeKeys: (_box.get('r.volumeKeys') as bool?) ?? true,
-    tapZone: (_box.get('r.tapZone') as int?) ?? 2,
+    tapZone: (_box.get('r.tapZone') as int?) ?? 0,
     tapInvert: (_box.get('r.tapInvert') as int?) ?? 0,
     keepScreenOn: (_box.get('r.keepScreenOn') as bool?) ?? true,
     fullscreen: (_box.get('r.fullscreen') as bool?) ?? true,

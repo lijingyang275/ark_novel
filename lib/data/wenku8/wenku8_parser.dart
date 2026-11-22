@@ -56,10 +56,12 @@ class Wenku8Parser {
   const Wenku8Parser._();
 
   /// 排行、分类、搜索等列表页。[baseUrl] 用于补全详情页和缺省封面地址。
-  static List<NovelCover> novelList(String html, {required String baseUrl}) {
-    final host = baseUrl.replaceAll("https://", "");
+  static List<NovelCover> novelList(String html, {required String baseUrl}) => novelListDoc(parse(html), baseUrl: baseUrl);
+
+  static List<NovelCover> novelListDoc(Document doc, {required String baseUrl}) {
+    final origin = baseUrl.startsWith('http://') || baseUrl.startsWith('https://') ? baseUrl : 'https://$baseUrl';
     final List<NovelCover> result = [];
-    final Element? contentElement = parse(html).getElementById("content");
+    final Element? contentElement = doc.getElementById("content");
     if (contentElement == null) return result;
 
     const String targetStyle = "width:373px;height:136px;float:left;margin:5px 0px 5px 5px;";
@@ -68,10 +70,10 @@ class Wenku8Parser {
       final String title = novelItem.querySelector("a")?.attributes['title'] ?? "";
       final String href = novelItem.querySelector("div")?.querySelector("a")?.attributes['href'] ?? '';
       if (href.isEmpty) continue;
-      final String detailUrl = "https://$host$href";
+      final String detailUrl = href.startsWith('http') ? href : "$origin$href";
 
       final String img = (rawImg == "/images/noimg.jpg" || rawImg.isEmpty)
-          ? "https://$host/modules/article/images/nocover.jpg"
+          ? "$origin/modules/article/images/nocover.jpg"
           : ImageUrlHelper.normalize(rawImg);
 
       String aid = "";
@@ -89,11 +91,11 @@ class Wenku8Parser {
 
       if (title.isNotEmpty) result.add(NovelCover(title, img, aid));
     }
-    return result.isNotEmpty ? result : _novelListFallback(contentElement, host);
+    return result.isNotEmpty ? result : _novelListFallback(contentElement);
   }
 
   /// 结构和预期不一致时的兜底：收集页面里所有指向书籍详情的链接（`/book/123.htm` 或 `articleinfo.php?id=123`），按书号去重。
-  static List<NovelCover> _novelListFallback(Element content, String host) {
+  static List<NovelCover> _novelListFallback(Element content) {
     final seen = <String>{};
     final out = <NovelCover>[];
     for (final a in content.querySelectorAll('a')) {
@@ -107,34 +109,27 @@ class Wenku8Parser {
     return out;
   }
 
-  /// 其他用户公开的书架（userpage.php）。
-  static List<NovelCover> userBookshelf(String html) {
-    final List<NovelCover> list = [];
-    final Element? content = parse(html).getElementById('centerm');
-    if (content == null) return list;
-    final List<Element> trElements = content.getElementsByTagName('tr');
-    for (int index = 1; index < trElements.length; index++) {
-      final List<Element> anchors = trElements[index].getElementsByTagName('a');
-      if (anchors.length >= 2) {
-        final String title = anchors[0].text.trim();
-        final String href = anchors[1].attributes['href'] ?? '';
-        list.add(NovelCover(title, null, Uri.parse(href).queryParameters['bid'] ?? ''));
-      }
+  static Never _throwUnexpected(Document doc, String fallback) {
+    if (needsLoginDoc(doc)) throw const Wenku8LoginRequiredException();
+    if (isErrorPageDoc(doc)) {
+      final why = doc.getElementsByClassName('blockcontent').firstOrNull?.text.trim();
+      throw Wenku8UnexpectedPageException(why == null || why.isEmpty ? fallback : why);
     }
-    return list;
+    throw Wenku8UnexpectedPageException(fallback);
   }
 
   static Wenku8NovelDetail novelDetail(String html) {
-    final Element? t1 = parse(html).getElementById('content');
-    if (t1 == null) throw const Wenku8UnexpectedPageException("novel detail: #content not found");
+    final doc = parse(html);
+    final Element? t1 = doc.getElementById('content');
+    if (t1 == null) _throwUnexpected(doc, '未获取到书籍详情（可能书籍不存在或页面结构变化）');
     final tables = t1.getElementsByTagName('table');
     // 结构不对就不是详情页：报错，不能当成功，否则会用空数据覆盖缓存里的好页面
-    if (tables.length < 3) throw const Wenku8UnexpectedPageException("novel detail: tables not found");
+    if (tables.length < 3) _throwUnexpected(doc, '书籍详情页面结构不完整');
     final Element t2 = tables[0];
     final String title = t2.querySelector('span > b')?.text.trim() ?? '';
     final trs = t2.getElementsByTagName('tr');
     final tds = trs.length > 2 ? trs[2].getElementsByTagName('td') : <Element>[];
-    if (tds.length < 3) throw const Wenku8UnexpectedPageException("novel detail: info row not found");
+    if (tds.length < 3) _throwUnexpected(doc, '书籍作者与状态信息缺失');
     final authorText = tds[1].text.trim();
     final String author = authorText.length >= 5 ? authorText.substring(5) : authorText;
     final statusText = tds[2].text.trim();
@@ -146,11 +141,11 @@ class Wenku8Parser {
     }
 
     final imgs = t1.getElementsByTagName('img');
-    if (imgs.isEmpty) throw const Wenku8UnexpectedPageException("novel detail: cover not found");
+    if (imgs.isEmpty) _throwUnexpected(doc, '书籍封面信息缺失');
     final String imgUrl = ImageUrlHelper.normalize(imgs[0].attributes['src'] ?? '');
     final table2Tds = tables[2].getElementsByTagName('td');
     final spans = table2Tds.length > 1 ? table2Tds[1].getElementsByTagName('span') : <Element>[];
-    if (spans.length < 2) throw const Wenku8UnexpectedPageException("novel detail: tags not found");
+    if (spans.length < 2) _throwUnexpected(doc, '书籍标签信息缺失');
     String introduce = spans.length > 5 ? spans[5].innerHtml.replaceAll("<br>", "\n") : "";
     final String tag = spans[0].text;
     final String tempHeat = spans[1].text;
@@ -184,9 +179,11 @@ class Wenku8Parser {
   }
 
   /// 列表页的总页数，找不到时返回 0。
-  static int maxPage(String html) {
+  static int maxPage(String html) => maxPageDoc(parse(html));
+
+  static int maxPageDoc(Document doc) {
     int pageCount = 0;
-    for (final element in parse(html).getElementsByClassName("last")) {
+    for (final element in doc.getElementsByClassName("last")) {
       final int? parsed = int.tryParse(element.text.trim());
       if (parsed != null) pageCount = parsed;
     }
@@ -231,8 +228,9 @@ class Wenku8Parser {
 
   /// 章节目录。
   static List<CatVolume> catalogue(String html) {
-    final table = parse(html).querySelector('table.css');
-    if (table == null) throw const Wenku8UnexpectedPageException('catalogue: table.css not found');
+    final doc = parse(html);
+    final table = doc.querySelector('table.css');
+    if (table == null) _throwUnexpected(doc, '未找到章节目录（可能作品尚未收录章节或页面异常）');
 
     final List<CatVolume> volumes = [];
     String? currentVolumeTitle;
@@ -268,10 +266,11 @@ class Wenku8Parser {
 
   /// 书评列表。[CommentItem.time] 为网页原始时间字符串。
   static List<CommentItem> comments(String html) {
-    final contentEl = parse(html).getElementById('content');
-    if (contentEl == null) throw const Wenku8UnexpectedPageException('comments: #content not found');
+    final doc = parse(html);
+    final contentEl = doc.getElementById('content');
+    if (contentEl == null) _throwUnexpected(doc, '无法读取书评列表');
     final tables = contentEl.getElementsByTagName('table');
-    if (tables.length < 3) throw const Wenku8UnexpectedPageException('comments: expected at least 3 tables');
+    if (tables.length < 3) _throwUnexpected(doc, '书评页面结构异常');
 
     final comments = <CommentItem>[];
     for (final row in tables[2].getElementsByTagName('tr')) {
@@ -329,8 +328,9 @@ class Wenku8Parser {
 
   /// 自己的书架（bookcase.php）。
   static Bookshelf bookshelf(String html, int classId) {
-    final content = parse(html).getElementById('content');
-    if (content == null) throw const Wenku8UnexpectedPageException('bookshelf: #content not found');
+    final doc = parse(html);
+    final content = doc.getElementById('content');
+    if (content == null) _throwUnexpected(doc, '无法读取网站书架页面');
 
     final List<BookshelfNovelInfo> novels = [];
     for (final row in content.getElementsByTagName('tr')) {
@@ -406,8 +406,9 @@ class Wenku8Parser {
 
   /// 是否是要求登录的页面：跳到了登录页（有密码框），或者"出现错误！"提示页里说要先登录。
   /// 用来区分"登录过期"和维护页、验证页这类偶发的意外页面。
-  static bool needsLogin(String html) {
-    final doc = parse(html);
+  static bool needsLogin(String html) => needsLoginDoc(parse(html));
+
+  static bool needsLoginDoc(Document doc) {
     if (doc.querySelector('input[name=password]') != null) return true;
     final title = doc.getElementsByClassName('blocktitle').firstOrNull?.text;
     if (title != '出现错误！' && title != '出現錯誤！') return false;
@@ -415,16 +416,27 @@ class Wenku8Parser {
     return ['登录', '登錄', '登入'].any(message.contains);
   }
 
+  /// 是否是网站因版权下架返回的单句提示正文（未导入扩展包时也能识别）。
+  static bool isCopyrightLockedText(String text) {
+    final t = text.trim();
+    if (t.length > 120) return false;
+    return (t.contains('因版权问题') || t.contains('因版權問題')) && (t.contains('不再提供') || t.contains('文库') || t.contains('文庫'));
+  }
+
   /// 是否是 wenku8 的"出现错误！"提示页。
-  static bool isErrorPage(String html) {
-    final t = parse(html).getElementsByClassName('blocktitle').firstOrNull?.text;
+  static bool isErrorPage(String html) => isErrorPageDoc(parse(html));
+
+  static bool isErrorPageDoc(Document doc) {
+    final t = doc.getElementsByClassName('blocktitle').firstOrNull?.text;
     return t == '出现错误！' || t == '出現錯誤！';
   }
 
   /// 搜索结果只有一本时 wenku8 会直接显示详情页，这里识别并返回那本书；否则返回 null。
-  static NovelCover? singleSearchResult(String html) {
+  static NovelCover? singleSearchResult(String html) => singleSearchResultDoc(parse(html));
+
+  static NovelCover? singleSearchResultDoc(Document doc) {
     try {
-      final Element? content = parse(html).getElementById('content');
+      final Element? content = doc.getElementById('content');
       if (content == null) return null;
       final List<Element> divs = content.getElementsByTagName('div')[0].querySelectorAll('div[style="margin:0px auto;overflow:hidden;"]');
       if (divs.isEmpty) return null;
@@ -446,8 +458,9 @@ class Wenku8Parser {
 
   /// 章节正文：文本（段落首行缩进）+ 插图地址列表。
   static Content chapterContent(String html) {
-    final Element? contentElement = parse(html).getElementById('content');
-    if (contentElement == null) throw const Wenku8UnexpectedPageException('chapter: #content not found');
+    final doc = parse(html);
+    final Element? contentElement = doc.getElementById('content');
+    if (contentElement == null) _throwUnexpected(doc, '未获取到章节正文（可能登录失效或页面被拦截）');
 
     final List<String> images = [];
     for (final img in contentElement.querySelectorAll('img')) {

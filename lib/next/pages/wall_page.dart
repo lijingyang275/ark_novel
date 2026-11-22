@@ -138,7 +138,7 @@ class _VolumeTile extends ConsumerWidget {
     final (aid, index, v, at) = entry;
     final info = ReadingStats.info(aid);
     final cover = ref.read(volumeCoverQueueProvider).volCover(aid, v, info.img);
-    ref.read(coverColorProvider(cover)); // 顺手把背景色算好存下，点进报告时直接用
+    ref.watch(coverColorProvider(cover)); // 顺手把背景色算好存下，点进报告时直接用
     final stars = Volumes.rating(aid, v.title);
     final d = DateTime.fromMillisecondsSinceEpoch(at);
     return InkWell(

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart' show HapticFeedback;
+import 'package:go_router/go_router.dart';
 
 import '../cover_color.dart';
+import '../router.dart';
 import '../theme_doodle.dart';
 import '../volumes.dart';
 import '../widgets.dart';
@@ -87,6 +89,7 @@ class _VolumeDoneCardState extends State<_VolumeDoneCard> with SingleTickerProvi
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 380),
             child: SingleChildScrollView(
+              clipBehavior: Clip.none,
               padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -169,7 +172,22 @@ class _VolumeDoneCardState extends State<_VolumeDoneCard> with SingleTickerProvi
                     ),
                   ),
                   const SizedBox(height: 12),
-                  _rise(0.6, const Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.auto_stories_rounded, size: 14, color: Colors.white54), SizedBox(width: 4), Text('已放进书籍墙', style: muted)])),
+                  _rise(
+                    0.6,
+                    MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: GestureDetector(
+                        onTap: () {
+                          Navigator.pop(context, VolumeDoneAction.stay);
+                          context.push(Routes.wall);
+                        },
+                        child: const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [Icon(Icons.auto_stories_rounded, size: 14, color: Colors.white70), SizedBox(width: 4), Text('已放进书籍墙 · 点击查看', style: TextStyle(color: Colors.white70, fontSize: 12))],
+                        ),
+                      ),
+                    ),
+                  ),
                   const SizedBox(height: 24),
                   _rise(
                     0.65,

@@ -160,6 +160,7 @@ class ChapterCache {
     _charsOf.remove(aid);
     await _index.deleteAll(keys);
     await _text.deleteAll(keys);
+    if (Hive.isBoxOpen('session')) await Hive.box('session').delete('unlock:txt:$aid');
     if (compact) await _text.compact();
   }
 
@@ -275,6 +276,14 @@ class PageStore {
     final keys = _box.keys.where((k) => k is String && k.startsWith('$scope|')).toList();
     await _box.deleteAll(keys);
     await _stamp.deleteAll([for (final k in keys) 'pt|$k']);
+  }
+
+  /// 清空全部网页离线备份并整理磁盘文件。
+  static Future<void> clear() async {
+    final stamps = _stamp.keys.where((k) => k is String && k.startsWith('pt|')).toList();
+    await _box.clear();
+    await _stamp.deleteAll(stamps);
+    await _box.compact();
   }
 }
 

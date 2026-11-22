@@ -74,13 +74,13 @@ jobs:
         include:
           - platform: android
             os: ubuntu-latest
-            args: apk --release --target-platform android-arm64 --dart-define=cronetHttpNoPlay=true
+            args: apk --release --target-platform android-arm64 --dart-define=cronetHttpNoPlay=true --split-debug-info=build/app/outputs/symbols
           - platform: windows
             os: windows-2022 # windows-latest 的 VS 2026 编不过 flutter_inappwebview_windows（STL1011）
-            args: windows --release
+            args: windows --release --split-debug-info=build/app/outputs/symbols
           - platform: macos
             os: macos-latest
-            args: macos --release
+            args: macos --release --split-debug-info=build/app/outputs/symbols
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     # 保护规则要求这些任务都有结果，所以跳过步骤而不是跳过任务
@@ -95,7 +95,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
+
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        if: matrix.platform == 'android' && contains(needs.check.outputs.platforms, matrix.platform)
+        with:
+          cache-read-only: false
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         if: contains(needs.check.outputs.platforms, matrix.platform)

@@ -173,15 +173,20 @@ class BangumiCovers {
       if (s['relation'] == '单行本' && _img(s).isNotEmpty) {'n': s['name'] as String, 'i': _img(s)},
   ];
 
-  /// 「番外篇」里的小说外传（漫画、游戏、画集不要）：外传系列取它的单行本，单本取它自己的封面
+  /// 「番外篇」里的小说外传（漫画、游戏、画集不要）：外传系列取它的单行本，单本取它自己的封面（小批量并发，避免长篇串行几十次阻塞）
   Future<List<Map>> _extras(List<Map> rel) async {
+    final candidates = rel.where((s) => s['relation'] == '番外篇' && s['type'] == 1).take(30).toList();
     final out = <Map>[];
-    for (final s in rel.where((s) => s['relation'] == '番外篇' && s['type'] == 1).take(30)) {
-      final d = (await _dio.get<Map>('$_api/subjects/${s['id']}')).data ?? const {};
-      if (d['platform'] != '小说') continue;
-      final vols = d['series'] == true ? _vols(await _relations(s['id'] as int)) : const <Map>[];
-      if (vols.isEmpty && _img(d).isEmpty) continue;
-      out.add({'n': d['name'] as String, 'c': (d['name_cn'] as String?) ?? '', 'i': _img(d), 'v': vols});
+    for (var i = 0; i < candidates.length; i += 4) {
+      final batch = candidates.sublist(i, i + 4 > candidates.length ? candidates.length : i + 4);
+      final items = await Future.wait(batch.map((s) async {
+        final d = (await _dio.get<Map>('$_api/subjects/${s['id']}')).data ?? const {};
+        if (d['platform'] != '小说') return null;
+        final vols = d['series'] == true ? _vols(await _relations(s['id'] as int)) : const <Map>[];
+        if (vols.isEmpty && _img(d).isEmpty) return null;
+        return <String, Object>{'n': d['name'] as String, 'c': (d['name_cn'] as String?) ?? '', 'i': _img(d), 'v': vols};
+      }));
+      out.addAll(items.whereType<Map>());
     }
     return out;
   }
@@ -193,5 +198,6 @@ final bangumiProvider = Provider<BangumiCovers>((ref) {
   // Bangumi 要求带上说明是哪个程序的 User-Agent
   final dio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 10), receiveTimeout: const Duration(seconds: 20), headers: {'User-Agent': 'ark_novel (https://github.com/chenshi221/ark_novel)'}))
     ..httpClientAdapter = store.adapter();
+  ref.onDispose(dio.close);
   return BangumiCovers(dio);
 });

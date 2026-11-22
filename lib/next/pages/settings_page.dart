@@ -18,6 +18,7 @@ import '../env.dart';
 import '../image_cache.dart';
 import '../incognito.dart';
 import '../library.dart';
+import '../reader/reader_body.dart' show TapZoneDiagram;
 import '../router.dart';
 import '../security.dart';
 import '../session.dart';
@@ -126,7 +127,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final hits = q.isEmpty
         ? const <(String, SettingsSection, String)>[]
         : _items.where((e) => (addon?.api != null || e.$1 != '备用接口') && '${e.$1} ${e.$3} ${e.$2.title}'.toLowerCase().contains(q)).toList();
-    void open(SettingsSection s) => context.push(Routes.settingsSection(s.name));
+    void open(SettingsSection s, [String? item]) {
+      final direct = switch (item) {
+        '正则规则' => Routes.rules,
+        '分类管理' => Routes.categories,
+        '同步' => Routes.sync,
+        _ => null,
+      };
+      context.push(direct ?? Routes.settingsSection(s.name, highlight: item));
+    }
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
       body: contentWidth(
@@ -152,7 +161,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             ),
             if (q.isNotEmpty) ...[
               if (hits.isEmpty) const XNote('没有匹配的设置'),
-              for (final (title, section, _) in hits) XEntry(icon: section.icon, title: title, subtitle: '在「${section.title}」里', onTap: () => open(section)),
+              for (final (title, section, _) in hits) XEntry(icon: section.icon, title: title, subtitle: '在「${section.title}」里', onTap: () => open(section, title)),
             ] else
               for (final (i, group) in _homeGroups.indexed) ...[
                 if (i > 0) const XDivider(),
@@ -166,9 +175,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 }
 
 class SettingsSectionPage extends ConsumerStatefulWidget {
-  const SettingsSectionPage({super.key, required this.section});
+  const SettingsSectionPage({super.key, required this.section, this.highlight});
 
   final SettingsSection section;
+  final String? highlight;
 
   @override
   ConsumerState<SettingsSectionPage> createState() => _SectionState();
@@ -178,6 +188,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
   @override
   Widget build(BuildContext context) {
     ref.watch(appPrefsProvider);
+    final scheme = Theme.of(context).colorScheme;
     final children = switch (widget.section) {
       SettingsSection.appearance => _appearance(),
       SettingsSection.reading => _reading(),
@@ -189,9 +200,30 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
       SettingsSection.network => _network(),
       SettingsSection.about => _about(),
     };
+    final hl = widget.highlight;
     return Scaffold(
       appBar: AppBar(title: Text(widget.section.title)),
-      body: contentWidth(ListView(padding: const EdgeInsets.only(bottom: 32), children: children)),
+      body: contentWidth(
+        ListView(
+          padding: const EdgeInsets.only(bottom: 32),
+          children: [
+            if (hl != null && hl.isNotEmpty)
+              Container(
+                margin: const EdgeInsets.fromLTRB(16, 4, 16, 6),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(color: scheme.primary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10)),
+                child: Row(
+                  children: [
+                    Icon(Icons.my_location_outlined, size: 16, color: scheme.primary),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text('搜索定位：$hl', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: scheme.primary))),
+                  ],
+                ),
+              ),
+            ...children,
+          ],
+        ),
+      ),
     );
   }
 
@@ -320,6 +352,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
       XSwitch(title: '宽屏双页', subtitle: '宽屏时并排两页', value: prefs.dual, onChanged: (v) => set(prefs.copyWith(dual: v))),
       XChoice<int>(title: '点击区域', value: prefs.tapZone, options: tapZones, onChanged: (v) => set(prefs.copyWith(tapZone: v))),
       if (prefs.tapZone != 4) XChoice<int>(title: '反转点击区域', value: prefs.tapInvert, options: const {0: '不反转', 1: '左右反转', 2: '上下反转', 3: '全部反转'}, onChanged: (v) => set(prefs.copyWith(tapInvert: v))),
+      if (prefs.mode != 0) TapZoneDiagram(zone: prefs.tapZone, invert: prefs.tapInvert),
       if (android) ...[
         XSwitch(title: '音量键翻页', subtitle: prefs.volumeInvert ? '+ 下一页，− 上一页' : '− 下一页，+ 上一页', value: prefs.volumeKeys, onChanged: (v) => set(prefs.copyWith(volumeKeys: v))),
         if (prefs.volumeKeys) XSwitch(title: '反转音量键', value: prefs.volumeInvert, onChanged: (v) => set(prefs.copyWith(volumeInvert: v))),
@@ -349,7 +382,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
       XSlider(
         title: '语速',
         label: prefs.ttsRate.toStringAsFixed(1),
-        slider: Slider(min: 0.1, max: 1.0, divisions: 9, value: prefs.ttsRate, onChanged: (v) => set(prefs.copyWith(ttsRate: v))),
+        slider: Slider(min: 0.1, max: 1.5, divisions: 14, value: prefs.ttsRate.clamp(0.1, 1.5), onChanged: (v) => set(prefs.copyWith(ttsRate: v))),
       ),
       const XDivider(),
       const XGroupTitle('章节列表手势'),
@@ -532,9 +565,11 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
 
   Future<void> _importAddonFromClipboard() async {
     final notifier = ref.read(unlockAddonProvider.notifier);
+    final existing = ref.read(unlockAddonProvider);
     final clip = (await Clipboard.getData(Clipboard.kTextPlain))?.text?.trim() ?? '';
     if (!mounted) return;
-    if (clip.isNotEmpty) {
+    // 尚未安装时剪贴板里直接是合法口令就一键导入；已有扩展时先弹框确认，避免误点把现用扩展覆盖掉
+    if (existing == null && clip.isNotEmpty) {
       try {
         final cfg = await notifier.importText(clip);
         if (mounted) _snack('已导入：${cfg.name} v${cfg.version}');
@@ -718,8 +753,8 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
         padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
         child: TextFormField(
           initialValue: store.proxy,
-          decoration: const InputDecoration(label: Text('HTTP 代理'), hint: Text('127.0.0.1:7890', maxLines: 1, overflow: TextOverflow.ellipsis)),
-          onChanged: ref.read(proxyProvider.notifier).setLater,
+          decoration: const InputDecoration(label: Text('HTTP 代理'), hint: Text('127.0.0.1:7890（无需填写 http://）', maxLines: 1, overflow: TextOverflow.ellipsis)),
+          onChanged: (v) => ref.read(proxyProvider.notifier).setLater(v.replaceFirst(RegExp(r'^https?://', caseSensitive: false), '').trim()),
         ),
       ),
       XSwitch(

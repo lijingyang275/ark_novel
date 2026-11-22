@@ -10,6 +10,7 @@ import '../cache.dart';
 import '../image_cache.dart';
 import '../router.dart';
 import '../stats.dart';
+import '../widgets.dart';
 import '../x_list.dart';
 import '../text.dart';
 
@@ -72,41 +73,55 @@ class _StoragePageState extends ConsumerState<StoragePage> {
     final books = ChapterCache.cachedBooks().toList()..sort((a, b) => ChapterCache.bytesOf(b).compareTo(ChapterCache.bytesOf(a)));
     return Scaffold(
       appBar: AppBar(title: const Text('存储空间'), actions: [TextButton(onPressed: books.isEmpty ? null : _clearRead, child: const Text('清除已读章节'))]),
-      body: ListView(
-        padding: const EdgeInsets.only(bottom: 32),
-        children: [
-          const XGroupTitle('占用'),
-          FutureBuilder<List<(String, int)>>(
-            future: _sizes,
-            builder: (context, snap) => Column(
-              children: [
-                for (final (name, n) in snap.data ?? const <(String, int)>[]) XTile(title: name, trailing: Text(sizeText(n), style: TextStyle(color: scheme.onSurfaceVariant))),
-                if (!snap.hasData) const XTile(title: '正在计算…'),
-              ],
-            ),
-          ),
-          if (books.isNotEmpty) ...[
-            const XDivider(),
-            const XGroupTitle('章节缓存'),
-            for (final aid in books)
-              XTile(
-                title: ReadingStats.info(aid).title,
-                subtitle: '${ChapterCache.count(aid)} 章 · ${ChapterCache.sizeLabel(aid)}',
-                onTap: () => context.push(Routes.cacheBook(aid)).then((_) => mounted ? _refresh() : null),
-                trailing: IconButton(
-                  tooltip: hz(context, '删除缓存'),
-                  icon: Icon(Icons.delete_outline, color: scheme.onSurfaceVariant),
-                  onPressed: () async {
-                    if (!await _ask('删除这本书的缓存？', '再读时重新下载。')) return;
-                    if (!mounted) return;
-                    ref.read(downloadProvider.notifier).forget(aid); // 正在下载的先停掉
-                    await ChapterCache.remove(aid);
-                    if (mounted) _refresh();
-                  },
-                ),
+      body: contentWidth(
+        ListView(
+          padding: const EdgeInsets.only(bottom: 32),
+          children: [
+            const XGroupTitle('占用'),
+            FutureBuilder<List<(String, int)>>(
+              future: _sizes,
+              builder: (context, snap) => Column(
+                children: [
+                  for (final (name, n) in snap.data ?? const <(String, int)>[])
+                    XTile(
+                      title: name,
+                      subtitle: name == '网页备份' && n > 0 ? '离线兜底用的详情与目录页面，点此可清除' : null,
+                      trailing: Text(sizeText(n), style: TextStyle(color: scheme.onSurfaceVariant)),
+                      onTap: name == '网页备份' && n > 0
+                          ? () async {
+                              if (!await _ask('清除网页备份？', '清除后断网时将无法打开未缓存过的书籍详情与目录，联网后会自动重新保存。')) return;
+                              await PageStore.clear();
+                              if (mounted) _refresh();
+                            }
+                          : null,
+                    ),
+                  if (!snap.hasData) const XTile(title: '正在计算…'),
+                ],
               ),
+            ),
+            if (books.isNotEmpty) ...[
+              const XDivider(),
+              const XGroupTitle('章节缓存'),
+              for (final aid in books)
+                XTile(
+                  title: ReadingStats.info(aid).title,
+                  subtitle: '${ChapterCache.count(aid)} 章 · ${ChapterCache.sizeLabel(aid)}',
+                  onTap: () => context.push(Routes.cacheBook(aid)).then((_) => mounted ? _refresh() : null),
+                  trailing: IconButton(
+                    tooltip: hz(context, '删除缓存'),
+                    icon: Icon(Icons.delete_outline, color: scheme.onSurfaceVariant),
+                    onPressed: () async {
+                      if (!await _ask('删除这本书的缓存？', '再读时重新下载。')) return;
+                      if (!mounted) return;
+                      ref.read(downloadProvider.notifier).forget(aid); // 正在下载的先停掉
+                      await ChapterCache.remove(aid);
+                      if (mounted) _refresh();
+                    },
+                  ),
+                ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

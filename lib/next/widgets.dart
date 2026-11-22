@@ -7,7 +7,9 @@ import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../models/common/wenku8_node.dart';
 import '../models/novel_cover.dart';
+import '../data/wenku8/wenku8_exceptions.dart';
 import '../data/wenku8/wenku8_parser.dart';
 import 'package:flutter/services.dart';
 
@@ -67,9 +69,14 @@ class StatePanel extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (error is Wenku8LoginRequiredException) {
+      return LoginPrompt(title: title == '加载失败' ? '此功能需要登录' : title, detail: (error as Wenku8LoginRequiredException).message);
+    }
     final theme = Theme.of(context);
     final guest = ref.watch(sessionProvider) is! SessionLoggedIn;
     final art = CharacterArt.of(context);
+    final shownDetail = error != null ? friendlyError(error!) : detail;
+    final canSwitchNode = error != null && !isCloudflare(error!) && !isWebPreview && ref.watch(nodeProvider) == Wenku8Node.wwwWenku8Net;
     return ListView(
       padding: const EdgeInsets.all(32),
       children: [
@@ -79,10 +86,10 @@ class StatePanel extends ConsumerWidget {
           // 角色主题：出错时抱头慌张，没内容时托腮发呆
           Padding(padding: const EdgeInsets.only(top: 24, bottom: 12), child: Image.asset(error != null || onRetry != null ? art.error : art.empty, height: 140)),
         Text(title, textAlign: TextAlign.center, style: theme.textTheme.titleLarge),
-        if (detail != null) ...[
+        if (shownDetail != null && shownDetail.isNotEmpty) ...[
           const SizedBox(height: 8),
           Text(
-            detail!,
+            shownDetail,
             textAlign: TextAlign.center,
             maxLines: 4,
             overflow: TextOverflow.ellipsis,
@@ -97,6 +104,19 @@ class StatePanel extends ConsumerWidget {
           Padding(
             padding: const EdgeInsets.only(top: 12),
             child: Center(child: FilledButton(style: FilledButton.styleFrom(minimumSize: const Size(160, 44)), onPressed: () => context.push(Routes.verify), child: const Text('去验证'))),
+          ),
+        if (canSwitchNode)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Center(
+              child: TextButton(
+                onPressed: () async {
+                  await ref.read(nodeProvider.notifier).set(Wenku8Node.wwwWenku8Cc);
+                  onRetry?.call();
+                },
+                child: const Text('连不上？切到备用节点 wenku8.cc'),
+              ),
+            ),
           ),
         if (onRetry != null && sourceHtml != null)
           Center(
@@ -320,7 +340,7 @@ SliverGridDelegate novelGridDelegate(double width) =>
 
 /// 分页的书籍网格：下拉刷新，滑到底自动加载下一页。[fetch] 变化（用 [Key] 区分）时整体重新加载。
 class PagedNovelGrid extends ConsumerStatefulWidget {
-  const PagedNovelGrid({super.key, required this.fetch, this.sourceHtml, this.hide});
+  const PagedNovelGrid({super.key, required this.fetch, this.sourceHtml, this.hide, this.emptyTitle = '没有内容', this.emptyDetail});
 
   final Future<PageResult> Function(int page) fetch;
 
@@ -329,6 +349,9 @@ class PagedNovelGrid extends ConsumerStatefulWidget {
 
   /// 出错时取解析失败的页面源码（搜索页用）
   final String? Function()? sourceHtml;
+
+  final String emptyTitle;
+  final String? emptyDetail;
 
   @override
   ConsumerState<PagedNovelGrid> createState() => _PagedNovelGridState();
@@ -341,6 +364,7 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
   bool _loading = false;
   Object? _error;
   int _autoFill = 0; // 连续自动补页的次数
+  int _loadSeq = 0;
 
   @override
   void initState() {
@@ -349,7 +373,8 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
   }
 
   Future<void> _load({bool reset = false}) async {
-    if (_loading || (!reset && _page >= _maxPage)) return;
+    if (!reset && (_loading || _page >= _maxPage)) return;
+    final seq = ++_loadSeq;
     if (reset) _autoFill = 0;
     setState(() {
       _loading = true;
@@ -358,7 +383,7 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
     try {
       final next = reset ? 1 : _page + 1;
       final result = await widget.fetch(next);
-      if (!mounted) return;
+      if (!mounted || seq != _loadSeq) return;
       setState(() {
         if (reset) _items.clear();
         _items.addAll(result.items);
@@ -367,9 +392,9 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
         _error = null;
       });
     } catch (e) {
-      if (mounted) setState(() => _error = e);
+      if (mounted && seq == _loadSeq) setState(() => _error = e);
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && seq == _loadSeq) setState(() => _loading = false);
     }
   }
 
@@ -379,7 +404,9 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
       if (_loading) return LayoutBuilder(builder: (context, c) => _GridSkeleton(width: c.maxWidth));
       return RefreshIndicator(
         onRefresh: () => _load(reset: true),
-        child: _error != null ? StatePanel(title: '加载失败', detail: _error.toString(), error: _error, sourceHtml: widget.sourceHtml?.call(), onRetry: () => _load(reset: true)) : const StatePanel(title: '没有内容'),
+        child: _error != null
+            ? StatePanel(title: '加载失败', detail: _error.toString(), error: _error, sourceHtml: widget.sourceHtml?.call(), onRetry: () => _load(reset: true))
+            : StatePanel(title: widget.emptyTitle, detail: widget.emptyDetail),
       );
     }
     final items = widget.hide == null ? _items : _items.where((e) => !widget.hide!(e.aid)).toList();
@@ -391,6 +418,12 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
         _autoFill++;
         _load();
       });
+    }
+    if (items.isEmpty && !_loading && _error == null && _page >= _maxPage) {
+      return RefreshIndicator(
+        onRefresh: () => _load(reset: true),
+        child: const StatePanel(title: '结果都在书架里了', detail: '可点右上角筛选按钮取消「隐藏书架里的书」。'),
+      );
     }
     final theme = Theme.of(context);
     final hint = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);

@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -6,6 +6,7 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'bookmarks.dart';
 import 'cache.dart';
 import 'read_state.dart';
+import 'text.dart';
 
 /// 章节列表左右滑能做的事（Mihon 的"章节滑动操作"）。
 enum SwipeAct {
@@ -106,7 +107,12 @@ class _ChapterSwipeState extends ConsumerState<ChapterSwipe> with SingleTickerPr
       case SwipeAct.read:
         await ReadState.setRead(_aid, [_cid], !ReadState.isRead(_aid, _cid));
       case SwipeAct.bookmark:
-        await Bookmarks.toggle(_aid, widget.book, _cid, widget.title, 0, '（章首书签）');
+        final added = await Bookmarks.toggle(_aid, widget.book, _cid, widget.title, 0, '（章首书签）');
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(content: Text(added ? '已添加书签：${widget.title}' : '已移除书签'), duration: const Duration(seconds: 2)));
+        }
       case SwipeAct.cache:
         if (!ChapterCache.has(_aid, _cid)) widget.onCache?.call();
       case SwipeAct.off:

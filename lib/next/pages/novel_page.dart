@@ -20,6 +20,7 @@ import '../read_state.dart';
 import '../router.dart';
 import '../swipe.dart';
 import '../session.dart';
+import '../updates.dart';
 import '../widgets.dart';
 import '../text.dart';
 
@@ -29,6 +30,7 @@ final novelProvider = StreamProvider.autoDispose.family<NovelPage, String>((ref,
   final saved = await api.saved(aid);
   if (saved != null) {
     await Volumes.saveCatalogue(aid, saved.catalogue);
+    await UpdateStore.noteKnownCount(aid, saved.catalogue.expand((v) => v.chapters).length);
     yield saved;
   }
   try {
@@ -37,6 +39,7 @@ final novelProvider = StreamProvider.autoDispose.family<NovelPage, String>((ref,
     // 请求期间退出了详情页：这个 provider 已经销毁，不能再用 ref（书架那边的书名、封面等下次再记）
     if (ref.mounted) ref.read(libraryProvider.notifier).noteDetail(aid, title: d.title, img: d.imgUrl, status: d.status);
     await Volumes.saveCatalogue(aid, fresh.catalogue);
+    await UpdateStore.noteKnownCount(aid, fresh.catalogue.expand((v) => v.chapters).length);
     // 读过的书补记书名（离线时读的统计里没有书名，会显示成"书号"）
     if (ReadingStats.perBook().containsKey(aid)) await ReadingStats.setMeta(aid, d.title, d.author, d.imgUrl);
     yield fresh;
@@ -142,7 +145,12 @@ class _BodyState extends ConsumerState<_Body> {
     final progress = ReadingProgress.of(aid);
     final all = data.catalogue.expand((v) => v.chapters).toList();
     final read = ReadState.read(aid);
-    final unread = all.where((c) => !read.contains(c.cid)).length;
+    final markedCids = Bookmarks.bookmarkedCids(aid);
+    final skippedIllus = {
+      for (final v in Volumes.of(aid))
+        if (v.illus != null && v.textCids.isNotEmpty && v.textCids.every(read.contains) && !read.contains(v.illus)) v.illus!,
+    };
+    final unread = all.where((c) => !read.contains(c.cid) && !skippedIllus.contains(c.cid)).length;
     final latest = all.reversed.take(3).toList();
     final startCid = progress?.cid ?? _firstCid();
     final muted = theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant);
@@ -156,12 +164,15 @@ class _BodyState extends ConsumerState<_Body> {
             SizedBox(
               width: 110,
               height: 150,
-              child: GestureDetector(
-                onTap: () => showDialog(
-                  context: context,
-                  builder: (context) => GestureDetector(behavior: HitTestBehavior.opaque, onTap: () => Navigator.pop(context), child: InteractiveViewer(child: NetImage(cover, fit: BoxFit.contain, full: true))),
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () => showDialog(
+                    context: context,
+                    builder: (context) => GestureDetector(behavior: HitTestBehavior.opaque, onTap: () => Navigator.pop(context), child: InteractiveViewer(child: NetImage(cover, fit: BoxFit.contain, full: true))),
+                  ),
+                  child: CoverImage(cover, aid: aid),
                 ),
-                child: CoverImage(cover, aid: aid),
               ),
             ),
             const SizedBox(width: 16),
@@ -238,11 +249,11 @@ class _BodyState extends ConsumerState<_Body> {
                     context.push(Routes.login);
                     return;
                   }
-                  try {
+                   try {
                     final msg = await ref.read(apiProvider).vote(aid);
                     if (context.mounted) _snack(context, msg.isEmpty ? '已投票' : msg);
                   } catch (e) {
-                    if (context.mounted) _snack(context, e.toString());
+                    if (context.mounted) _snack(context, friendlyError(e));
                   }
                 },
                 icon: const Icon(Icons.thumb_up_outlined),
@@ -252,6 +263,10 @@ class _BodyState extends ConsumerState<_Body> {
             Expanded(
               child: TextButton.icon(onPressed: () => _open(Routes.comments(aid)), icon: const Icon(Icons.forum_outlined), label: const Text('书评')),
             ),
+            if (data.catalogue.isNotEmpty)
+              Expanded(
+                child: TextButton.icon(onPressed: () => _open(Routes.volumes(aid)), icon: const Icon(Icons.view_carousel_outlined), label: const Text('分卷')),
+              ),
             Expanded(
               child: TextButton.icon(
                 onPressed: () => launchUrl(Uri.parse('${siteBase(ref.read(nodeProvider))}/book/$aid.htm'), mode: LaunchMode.externalApplication),
@@ -261,6 +276,26 @@ class _BodyState extends ConsumerState<_Body> {
             ),
           ],
         ),
+        if (d.isDelisted)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(color: theme.colorScheme.surfaceContainer, borderRadius: BorderRadius.circular(12)),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline, size: 18, color: theme.colorScheme.onSurfaceVariant),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      all.isEmpty ? '本书在网站已下架且无目录，可查看简介与书评。' : '本书在网站已因版权下架；若已缓存可照常阅读，或前往「设置 → 妙妙小工具」了解扩展支持。',
+                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         _DownloadRow(aid: aid, title: d.title, data: data),
         const SizedBox(height: 8),
         Card(
@@ -329,7 +364,7 @@ class _BodyState extends ConsumerState<_Body> {
             ),
           ],
         ),
-        Text('长按章节可多选：批量标记已读、缓存', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+        Text('左右滑动章节可标已读或加书签 · 长按章节可多选缓存', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
         const SizedBox(height: 4),
         for (final CatVolume v in _chl.reverse ? data.catalogue.reversed : data.catalogue)
           if (!_chl.filtering || _visible(v.chapters).isNotEmpty)
@@ -393,7 +428,19 @@ class _BodyState extends ConsumerState<_Body> {
                         ? TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.w600)
                         : (read.contains(c.cid) ? TextStyle(color: theme.colorScheme.onSurfaceVariant) : null),
                   ),
-                  trailing: c.cid == progress?.cid ? Text('读到这里', style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.primary)) : (ChapterCache.has(aid, c.cid) ? Icon(Icons.download_for_offline_outlined, size: 16, color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)) : null),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (markedCids.contains(c.cid)) ...[
+                        Icon(Icons.bookmark_rounded, size: 16, color: theme.colorScheme.primary),
+                        const SizedBox(width: 4),
+                      ],
+                      if (c.cid == progress?.cid)
+                        Text('读到这里', style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.primary))
+                      else if (ChapterCache.has(aid, c.cid))
+                        Icon(Icons.download_for_offline_outlined, size: 16, color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)),
+                    ],
+                  ),
                   onTap: _picked.isNotEmpty ? () => _pick(c.cid) : () => _open(Routes.reader(aid, c.cid)),
                   onLongPress: () => _pick(c.cid),
                 )),

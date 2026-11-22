@@ -4,6 +4,7 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../app_prefs.dart';
 import '../library.dart';
+import '../widgets.dart';
 import '../x_list.dart';
 import 'bookshelf_page.dart';
 import '../text.dart';
@@ -121,10 +122,12 @@ class CategoriesPage extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(title: const Text('分类管理')),
       floatingActionButton: FloatingActionButton.extended(onPressed: create, icon: const Icon(Icons.add), label: const Text('新建分类')),
-      body: ReorderableListView.builder(
-        padding: const EdgeInsets.only(bottom: 96),
-        buildDefaultDragHandles: false,
-        footer: Column(
+      body: contentWidth(
+        ReorderableListView.builder(
+          padding: const EdgeInsets.only(bottom: 96),
+          buildDefaultDragHandles: false,
+          header: const XNote('分类保存在本机（支持 WebDAV 同步），不会改动网站上的书架分组。拖动右侧图标可调整标签顺序。'),
+          footer: Column(
           children: [
             for (final c in merged)
               XTile(
@@ -168,6 +171,7 @@ class CategoriesPage extends ConsumerWidget {
             ),
           );
         },
+        ),
       ),
     );
   }

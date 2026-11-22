@@ -98,7 +98,7 @@ const _ranges = <String, (num, num)>{
   'r.margin': (8, 48),
   'r.theme': (0, 5),
   'r.mode': (0, 3),
-  'r.font': (0, 2),
+  'r.font': (0, 4),
   'r.ttsRate': (0.1, 1),
   'r.ttsPitch': (0.5, 2),
   'r.dim': (0, 0.7),
@@ -121,6 +121,10 @@ Object? _typed(Object? value, Object? expected) => switch (expected) {
 };
 
 Object? syncPreference(String key, Object? value) {
+  if (key.startsWith('p.shelf.tab.') && key.length > 12 && value is Map) {
+    final opts = syncShelfOptions(value);
+    return opts.isEmpty ? null : opts;
+  }
   final typed = _typed(value, _preferences[key]);
   final range = _ranges[key];
   if (range != null && typed is num && (typed < range.$1 || typed > range.$2)) return null;
@@ -132,6 +136,6 @@ Map<String, Object> syncShelfOptions(Map remote) {
   return {
     for (final e in fields.entries)
       if (_typed(remote[e.key], e.value) case final Object v)
-        if (v is! int || (v >= 0 && (e.key == 'sort' || v <= (e.key == 'display' ? 3 : 2)))) e.key: v,
+        if (v is! int || (v >= 0 && v <= (e.key == 'sort' ? 7 : (e.key == 'display' ? 4 : 2)))) e.key: v,
   };
 }

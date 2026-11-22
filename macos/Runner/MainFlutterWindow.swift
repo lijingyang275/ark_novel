@@ -8,6 +8,7 @@ class MainFlutterWindow: NSWindow {
     self.contentViewController = flutterViewController
     self.titleVisibility = .hidden
     self.titlebarAppearsTransparent = true
+    self.isMovableByWindowBackground = true
     self.styleMask.insert(.fullSizeContentView)
     self.setFrame(windowFrame, display: true)
     self.contentMinSize = NSSize(width: 480, height: 600)

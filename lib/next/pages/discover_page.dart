@@ -7,12 +7,14 @@ import '../../models/recommend_block.dart';
 import '../app_prefs.dart';
 import '../catalog.dart';
 import '../data.dart';
+import '../env.dart';
 import '../library.dart';
 import '../router.dart';
+import '../session.dart';
 import '../widgets.dart';
 import '../text.dart';
 
-/// 发现：推荐 / 排行 / 分类 / 完结。
+/// 发现：推荐 / 排行 / 题材 / 完结。
 class DiscoverPage extends ConsumerWidget {
   const DiscoverPage({super.key});
 
@@ -24,7 +26,7 @@ class DiscoverPage extends ConsumerWidget {
         appBar: AppBar(
           title: const Text('发现'),
           actions: [IconButton(icon: const Icon(Icons.search), tooltip: hz(context, '搜索'), onPressed: () => context.push(Routes.search))],
-          bottom: const TabBar(tabs: [Tab(child: Text('推荐')), Tab(child: Text('排行')), Tab(child: Text('分类')), Tab(child: Text('完结'))]),
+          bottom: const TabBar(tabs: [Tab(child: Text('推荐')), Tab(child: Text('排行')), Tab(child: Text('题材')), Tab(child: Text('完结'))]),
         ),
         body: const TabBarView(children: [_RecommendTab(), _RankingTab(), _CategoryTab(), _CompletedTab()]),
       ),
@@ -245,6 +247,9 @@ class _RankingTabState extends ConsumerState<_RankingTab> with AutomaticKeepAliv
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    if (!isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut) {
+      return const LoginPrompt(title: '排行榜需要登录', detail: '登录轻小说文库账号后可查看点击榜、推荐榜、收藏榜等榜单；「推荐」分区可直接浏览。');
+    }
     final api = ref.watch(apiProvider);
     final param = rankParam(_kind, _period);
     final scheme = Theme.of(context).colorScheme;
@@ -334,6 +339,9 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    if (!isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut) {
+      return const LoginPrompt(title: '题材筛选需要登录', detail: '登录轻小说文库账号后可按奇幻、校园、恋爱等题材标签筛选小说。');
+    }
     final api = ref.watch(apiProvider);
     return Stack(
       children: [
@@ -389,6 +397,9 @@ class _CompletedTabState extends ConsumerState<_CompletedTab> with AutomaticKeep
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    return PagedNovelGrid(fetch: ref.watch(apiProvider).completed);
+    if (!isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut) {
+      return const LoginPrompt(title: '完结列表需要登录', detail: '登录轻小说文库账号后可浏览全部已完结小说。');
+    }
+    return PagedNovelGrid(hide: _hideShelved(ref), fetch: ref.watch(apiProvider).completed);
   }
 }

@@ -141,7 +141,11 @@ class Sync {
     final ts = _box.get('avatar:ts') as int?;
     if (path != null && path.isNotEmpty) {
       final file = File(path);
-      if (file.existsSync()) return {'ts': ts ?? file.lastModifiedSync().millisecondsSinceEpoch, 'ext': p.extension(path), 'file': '$deviceId.avatar'};
+      if (file.existsSync()) {
+        final actualTs = ts ?? file.lastModifiedSync().millisecondsSinceEpoch;
+        final remoteFile = _box.get('sync:avatarUp') == actualTs ? (_box.get('sync:avatarFile') as String?) : null;
+        return {'ts': actualTs, 'ext': p.extension(path), 'file': remoteFile ?? '$deviceId.avatar'};
+      }
     }
     return ts == null ? null : {'ts': ts};
   }
@@ -151,6 +155,7 @@ class Sync {
     if (a == null || a['file'] == null || _box.get('sync:avatarUp') == a['ts']) return;
     final bytes = await File(_box.get('avatar') as String).readAsBytes();
     _ok(await dio.put('${_dir()}${a['file']}', data: Stream.fromIterable([bytes]), options: Options(contentType: 'application/octet-stream', headers: {Headers.contentLengthHeader: bytes.length})), '上传头像');
+    await _box.delete('sync:avatarFile');
     await _box.put('sync:avatarUp', a['ts']);
   }
 
@@ -182,7 +187,9 @@ class Sync {
       'read': byAid('read:'),
       'readchars': byAid('readchars:'),
       'rating': byAid('rating:'),
+      'ratingTs': byAid('ratingTs:'),
       'vrate': byAid('vrate:'),
+      'vrateTs': byAid('vrateTs:'),
       'rules': _box.get('rules') ?? const [],
       'notes': byAid('notes:'),
       'tomb': _tombs(),
@@ -248,6 +255,36 @@ class Sync {
       ..._keys('stats:days:'),
       ..._keys('stats:ch:'),
     ]);
+  }
+
+  /// 跨设备恢复备份回原设备 [own] 时：若备份里带有原设备之前同步出去的 `sync:stats:$own`，还原回本机 `stats:*`。
+  static Future<void> restoreOwnStatsFromSynced(String own) async {
+    final raw = _box.get('sync:stats:$own');
+    if (raw is! String || raw.isEmpty) return;
+    try {
+      final m = jsonDecode(raw);
+      if (m is! Map) return;
+      final puts = <String, Object?>{
+        if (m['day'] is Map) 'stats:day': Map<String, int>.from((m['day'] as Map).map((k, v) => MapEntry('$k', (v as num).toInt()))),
+        if (m['book'] is Map) 'stats:book': Map<String, int>.from((m['book'] as Map).map((k, v) => MapEntry('$k', (v as num).toInt()))),
+        if (m['chapters'] is int) 'stats:chapters': m['chapters'] as int,
+        if (m['meta'] is Map) 'stats:meta': Map<String, dynamic>.from(m['meta'] as Map),
+        if (m['last'] is Map) 'stats:last': Map<String, int>.from((m['last'] as Map).map((k, v) => MapEntry('$k', (v as num).toInt()))),
+      };
+      if (m['days'] is Map) {
+        for (final e in (m['days'] as Map).entries) {
+          if (e.value is List) puts['stats:days:${e.key}'] = (e.value as List).map((d) => '$d').toList();
+        }
+      }
+      if (m['ch'] is Map) {
+        for (final e in (m['ch'] as Map).entries) {
+          if (e.value is Map) puts['stats:ch:${e.key}'] = Map<String, dynamic>.from(e.value as Map);
+        }
+      }
+      await _box.putAll(puts);
+      await _box.delete('sync:stats:$own');
+      _statsCache.remove('sync:stats:$own');
+    } catch (_) {}
   }
 
   // ---- 其他设备的快照 → 并入本机 ----
@@ -316,16 +353,41 @@ class Sync {
     for (final e in ((remote['readchars'] as Map?) ?? const {}).entries) {
       puts['readchars:${e.key}'] = max((_box.get('readchars:${e.key}') as int?) ?? 0, e.value as int);
     }
+    final remoteRatingTs = (remote['ratingTs'] as Map?) ?? const {};
     for (final e in ((remote['rating'] as Map?) ?? const {}).entries) {
-      if (((_box.get('rating:${e.key}') as int?) ?? 0) == 0 && (e.value as int) > 0) puts['rating:${e.key}'] = e.value;
+      if (e.value is! int) continue;
+      final rTs = (remoteRatingTs[e.key] as int?) ?? 0;
+      final lTs = (_box.get('ratingTs:${e.key}') as int?) ?? 0;
+      if (rTs > 0 && rTs > lTs) {
+        puts['rating:${e.key}'] = e.value;
+        puts['ratingTs:${e.key}'] = rTs;
+      } else if (rTs == 0 && ((_box.get('rating:${e.key}') as int?) ?? 0) == 0 && (e.value as int) > 0) {
+        puts['rating:${e.key}'] = e.value;
+      }
     }
+    final remoteVrateTs = (remote['vrateTs'] as Map?) ?? const {};
     for (final e in ((remote['vrate'] as Map?) ?? const {}).entries) {
       if (e.value is! Map) continue;
       final local = Map<String, int>.from(((_box.get('vrate:${e.key}') as Map?) ?? const {}).map((k, v) => MapEntry('$k', v as int)));
+      final localTs = Map<String, int>.from(((_box.get('vrateTs:${e.key}') as Map?) ?? const {}).map((k, v) => MapEntry('$k', v as int)));
+      final rVolTs = (remoteVrateTs[e.key] as Map?) ?? const {};
+      var tsChanged = false;
       for (final vr in (e.value as Map).entries) {
-        if ((local['${vr.key}'] ?? 0) == 0 && (vr.value as int) > 0) local['${vr.key}'] = vr.value as int;
+        if (vr.value is! int) continue;
+        final vol = '${vr.key}';
+        final stars = vr.value as int;
+        final rTs = (rVolTs[vol] as int?) ?? 0;
+        final lTs = localTs[vol] ?? 0;
+        if (rTs > 0 && rTs > lTs) {
+          local[vol] = stars;
+          localTs[vol] = rTs;
+          tsChanged = true;
+        } else if (rTs == 0 && (local[vol] ?? 0) == 0 && stars > 0) {
+          local[vol] = stars;
+        }
       }
       if (local.isNotEmpty) puts['vrate:${e.key}'] = local;
+      if (tsChanged) puts['vrateTs:${e.key}'] = localTs;
     }
 
     // 规则：按编号并集，同一条取修改时间较新的；备注：并集，本机优先
@@ -672,7 +734,18 @@ class Sync {
         } catch (_) {}
       }
 
-      return (puts: <String, Object?>{'avatar': dest.path, 'avatar:ts': rTs}, dels: <String>{}, cleanup: cleanup);
+      return (
+        puts: <String, Object?>{
+          'avatar': dest.path,
+          'avatar:ts': rTs,
+          if (ra['file'] is String) ...{
+            'sync:avatarUp': rTs,
+            'sync:avatarFile': p.basename(ra['file'] as String),
+          },
+        },
+        dels: <String>{},
+        cleanup: cleanup,
+      );
     } catch (_) {
       return none;
     }
@@ -709,17 +782,27 @@ class Sync {
 
   /// 导入备份文件（别的设备或本机导出的快照）：规则同同步；返回 false 表示这是本机自己导出的。
   static Future<bool> importBackup(String json) async {
-    final m = jsonDecode(json) as Map<String, dynamic>;
-    if (m['device'] == deviceId) return false;
-    await merge(m);
+    if (_running) throw '正在同步，请稍候';
+    final decoded = jsonDecode(json);
+    if (decoded is! Map<String, dynamic>) throw const FormatException('同步文件格式无效');
+    if (decoded['device'] == deviceId) return false;
+    await merge(decoded);
     return true;
   }
 
   // ---- WebDAV ----
 
-  static Dio _dio(String pass) => Dio(BaseOptions(connectTimeout: const Duration(seconds: 15), receiveTimeout: const Duration(seconds: 30), headers: {'Authorization': 'Basic ${base64Encode(utf8.encode('$user:$pass'))}'}, validateStatus: (s) => s != null && s < 500));
+  static Dio _dio(String pass) => Dio(BaseOptions(connectTimeout: const Duration(seconds: 15), sendTimeout: const Duration(seconds: 30), receiveTimeout: const Duration(seconds: 30), headers: {'Authorization': 'Basic ${base64Encode(utf8.encode('$user:$pass'))}'}, validateStatus: (s) => s != null && s < 500));
 
-  static String _dir() => '${url.endsWith('/') ? url : '$url/'}${Uri.encodeComponent(folder)}/';
+  static List<String> _folderSegments() {
+    final segs = folder.split('/').map((s) => s.trim()).where((s) => s.isNotEmpty && s != '.').toList();
+    if (segs.any((s) => s == '..')) throw const FormatException('同步文件夹名称不能包含 ..');
+    return segs.isEmpty ? const ['ArkNovel'] : segs;
+  }
+
+  static String _baseUrl() => url.endsWith('/') ? url : '$url/';
+
+  static String _dir() => '${_baseUrl()}${_folderSegments().map(Uri.encodeComponent).join('/')}/';
 
   static String _decodeHref(String s) {
     try {
@@ -737,16 +820,28 @@ class Sync {
 
   static void _ok(Response r, String what) {
     if (r.statusCode == 401) throw '$what：用户名或应用密码不对（坚果云要用"第三方应用密码"，不是登录密码）';
+    if (r.statusCode == 403) throw '$what被拒绝（HTTP 403），请检查账号权限或应用密码权限';
+    if (r.statusCode == 404) throw '$what失败：同步地址不存在（HTTP 404），请检查 WebDAV 根地址是否正确';
+    if (r.statusCode == 409) throw '$what失败：上级目录不存在或路径冲突（HTTP 409）';
     if (r.statusCode! >= 400) throw '$what失败（HTTP ${r.statusCode}）';
   }
 
-  /// 测试连接：目录不存在就建出来。
+  /// 测试连接：目录不存在就逐级建出来。
   static Future<void> test() async {
     final dio = _dio(await password());
     try {
       final r = await dio.request(_dir(), options: Options(method: 'PROPFIND', headers: {'Depth': '0'}));
       if (r.statusCode == 404) {
-        _ok(await dio.request(_dir(), options: Options(method: 'MKCOL')), '创建同步文件夹');
+        var cur = _baseUrl();
+        for (final seg in _folderSegments()) {
+          cur = '$cur${Uri.encodeComponent(seg)}/';
+          final check = await dio.request(cur, options: Options(method: 'PROPFIND', headers: {'Depth': '0'}));
+          if (check.statusCode == 404) {
+            _ok(await dio.request(cur, options: Options(method: 'MKCOL')), '创建同步文件夹');
+          } else {
+            _ok(check, '连接');
+          }
+        }
       } else {
         _ok(r, '连接');
       }
@@ -760,7 +855,7 @@ class Sync {
   /// 上次 [run] 时因为超过 90 天没更新而跳过的设备文件名。
   static List<String> lastSkipped = const [];
 
-  /// 完整同步一次：上传本机快照，读取并合并其他设备的快照。返回合并了几台设备。
+  /// 完整同步一次：先拉取合并其他设备的快照，再上传合并后的本机最新快照（避免网络等待期间冲掉本机新进度，也支持多设备接力同步）。
   static Future<int> run() async {
     if (_running) throw '正在同步，请稍候';
     _running = true;
@@ -782,9 +877,6 @@ class Sync {
           if (at < _tombCutoff) throw const LocalSyncExpiredException();
         }
       }
-      await _pushAvatar(dio);
-      final put = await dio.put('${_dir()}$deviceId.json', data: jsonEncode(snapshot()), options: Options(contentType: 'application/json; charset=utf-8'));
-      _ok(put, '上传');
       final list = await dio.request(_dir(), options: Options(method: 'PROPFIND', headers: {'Depth': '1'}, responseType: ResponseType.plain));
       _ok(list, '读取目录');
       var merged = 0;
@@ -808,6 +900,9 @@ class Sync {
           failed.add(name);
         }
       }
+      await _pushAvatar(dio);
+      final put = await dio.put('${_dir()}$deviceId.json', data: jsonEncode(snapshot()), options: Options(contentType: 'application/json; charset=utf-8'));
+      _ok(put, '上传');
       lastSkipped = stale;
       await _box.put('sync:last', DateTime.now().millisecondsSinceEpoch);
       if (failed.isNotEmpty) throw '已合并 $merged 台设备，这些文件读不了，跳过了：${failed.join('、')}';
@@ -878,7 +973,8 @@ class SyncController extends Notifier<SyncStatus> {
       final done = n == 0 ? '已同步（还没有别的设备的数据）' : '已同步，合并了 $n 台设备的数据';
       state = SyncStatus(message: [done, ?Sync.skippedNote].join('\n'));
     } catch (e) {
-      state = SyncStatus(message: e is DioException ? '网络错误：${e.message ?? e.type.name}' : '$e');
+      final raw = e is FormatException ? e.message : (e is StateError ? e.message : '$e');
+      state = SyncStatus(message: e is DioException ? '网络连接失败，请检查 WebDAV 地址或网络状态' : raw);
     }
   }
 }

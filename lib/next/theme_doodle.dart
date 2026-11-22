@@ -165,7 +165,7 @@ class DoodleBanner extends StatelessWidget {
         width: double.infinity,
         child: Stack(
           children: [
-            Positioned.fill(child: CustomPaint(painter: _BannerPainter(art.motif, Color.alphaBlend(scheme.primary.withValues(alpha: 0.09), scheme.surface), scheme.primary, art.secondary))),
+            Positioned.fill(child: RepaintBoundary(child: CustomPaint(painter: _BannerPainter(art.motif, Color.alphaBlend(scheme.primary.withValues(alpha: 0.09), scheme.surface), scheme.primary, art.secondary)))),
             // 半身像底部贴着横幅下沿，上面稍微出血一点
             Positioned(right: 4, bottom: -height * 0.06, height: height * 1.12, child: Image.asset(art.banner, fit: BoxFit.contain)),
           ],
@@ -211,13 +211,15 @@ class DoodleBadge extends StatelessWidget {
   final Color textColor;
 
   @override
-  Widget build(BuildContext context) => CustomPaint(
-    painter: _BadgePainter(color),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minWidth: 8),
-        child: Text(text, textAlign: TextAlign.center, style: TextStyle(fontSize: 11, height: 1.3, fontWeight: FontWeight.w700, color: textColor)),
+  Widget build(BuildContext context) => RepaintBoundary(
+    child: CustomPaint(
+      painter: _BadgePainter(color),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 8),
+          child: Text(text, textAlign: TextAlign.center, style: TextStyle(fontSize: 11, height: 1.3, fontWeight: FontWeight.w700, color: textColor)),
+        ),
       ),
     ),
   );

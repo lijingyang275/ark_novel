@@ -57,7 +57,14 @@ class Hant {
     }
   }
 
+  final _shortCache = <String, String>{};
+
   String convert(String text) {
+    if (text.isEmpty) return text;
+    if (text.length <= 80) {
+      final hit = _shortCache[text];
+      if (hit != null) return hit;
+    }
     final out = StringBuffer();
     var i = 0;
     while (i < text.length) {
@@ -79,6 +86,10 @@ class Hant {
     }
     var s = out.toString();
     _post.forEach((k, v) => s = s.replaceAll(k, v));
+    if (text.length <= 80) {
+      if (_shortCache.length >= 512) _shortCache.remove(_shortCache.keys.first);
+      _shortCache[text] = s;
+    }
     return s;
   }
 }

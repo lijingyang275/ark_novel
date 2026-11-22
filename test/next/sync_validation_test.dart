@@ -22,4 +22,12 @@ void main() {
     ];
     expect(missing, isEmpty);
   });
+
+  test('新增字体档位、3D 书架显示模式与按分类选项均能通过校验', () {
+    expect(syncPreference('r.font', 3), 3);
+    expect(syncPreference('r.font', 4), 4);
+    expect(syncPreference('r.font', 5), isNull);
+    expect(syncShelfOptions({'display': 4, 'sort': 7}), {'display': 4, 'sort': 7});
+    expect(syncPreference('p.shelf.tab.auto:ongoing', {'display': 4, 'unread': 1}), {'display': 4, 'unread': 1});
+  });
 }

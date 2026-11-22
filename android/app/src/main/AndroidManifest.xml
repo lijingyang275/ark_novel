@@ -3,6 +3,7 @@
     <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
     <!-- 朗读时的通知栏播放卡片（audio_service 前台服务） -->
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
 

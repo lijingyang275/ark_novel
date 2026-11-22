@@ -27,8 +27,12 @@ class Backup {
     'ua',
     'savedUser',
     'savedPass',
+    'savedPassMoved',
     'userHtml',
     'proxy',
+    'nativeNet',
+    'keepSeconds',
+    'orientation',
     'sync:url',
     'sync:user',
     'sync:pass',
@@ -152,6 +156,16 @@ class Backup {
   static Future<void> apply(String supportDir) async {
     final pending = Directory(p.join(supportDir, _pending));
     if (!await pending.exists()) return;
+    final Map m;
+    final Map<String, dynamic> saved;
+    try {
+      m = jsonDecode(await File(p.join(pending.path, 'data.json')).readAsString()) as Map;
+      saved = Map<String, dynamic>.from(m['box'] as Map);
+    } catch (_) {
+      // 待恢复文件已损坏：删掉它，避免每次启动反复进错误页无法自愈
+      await pending.delete(recursive: true);
+      rethrow;
+    }
     for (final d in _dirs) {
       final src = Directory(p.join(pending.path, 'files', d));
       if (!await src.exists()) continue;
@@ -159,8 +173,6 @@ class Backup {
       if (await dest.exists()) await dest.delete(recursive: true);
       await src.rename(dest.path);
     }
-    final m = jsonDecode(await File(p.join(pending.path, 'data.json')).readAsString()) as Map;
-    final saved = Map<String, dynamic>.from(m['box'] as Map);
     // 备份是哪台设备的（旧版备份记在 box 的 sync:device 里）
     final from = m['device'] ?? saved['sync:device'];
     saved.removeWhere((k, _) => _isLocal(k));
@@ -170,8 +182,13 @@ class Backup {
     final box = await Hive.openBox('session');
     await box.deleteAll(box.keys.whereType<String>().where((k) => !_isLocal(k)).toList());
     await box.putAll(saved);
-    // 恢复的是别的设备（或重装前的本机）的备份：统计记到那台设备名下，和它同步来的统计不会重复相加
-    if (from is String && from != box.get('sync:device')) await Sync.adoptLocalStatsAs(from);
+    final own = box.get('sync:device');
+    // 恢复的是别的设备（或重装前的本机）的备份：统计记到那台设备名下，和它同步来的统计不会重复相加；
+    // 若那份备份里原本同步保存了本机（own）的历史统计，还原回本机 stats:*，防止下次同步上传空统计把云端清零。
+    if (from is String && from != own) {
+      await Sync.adoptLocalStatsAs(from);
+      if (own is String) await Sync.restoreOwnStatsFromSynced(own);
+    }
     await box.close(); // 重新打开时读到的才和平时的类型一样
     await pending.delete(recursive: true);
   }
@@ -186,7 +203,9 @@ class Backup {
   /// 导入旧版的 JSON 备份：只合并，不覆盖现有的。同步快照按同步规则并入（本机自己导出的跳过）；书架里没有的书、没有的分类补上；
   /// 其余设置只补本机还没有的；删除过（有墓碑）的书和分类不补回来。返回恢复了多少本书。
   static Future<int> restore(String json) async {
-    final m = jsonDecode(json) as Map<String, dynamic>;
+    final decoded = jsonDecode(json);
+    if (decoded is! Map<String, dynamic>) throw const FormatException('不是有效的备份文件');
+    final m = decoded;
     try {
       await Sync.importBackup(json);
     } on StaleSnapshotException {

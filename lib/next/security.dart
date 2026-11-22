@@ -70,7 +70,8 @@ class _AppGuardState extends ConsumerState<AppGuard> with WidgetsBindingObserver
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // 系统的验证界面会让 App 暂停又恢复：验证期间的这些事件不算离开，不然刚解锁又锁上、反复弹验证
     if (!lockSupported || !AppPrefs.read(P.lock, false) || _asking) return;
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
+    final desktop = defaultTargetPlatform == TargetPlatform.macOS || defaultTargetPlatform == TargetPlatform.windows;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden || (desktop && state == AppLifecycleState.inactive)) {
       _pausedAt ??= DateTime.now();
       if (!_locked && AppPrefs.read(P.lockAfter, 0) == 0) setState(() => _locked = true);
     } else if (state == AppLifecycleState.resumed && _pausedAt != null) {
@@ -109,34 +110,37 @@ class _AppGuardState extends ConsumerState<AppGuard> with WidgetsBindingObserver
   Widget build(BuildContext context) {
     ref.listen(appPrefsProvider, (_, _) => _syncSecure());
     ref.listen(incognitoProvider, (_, _) => _syncSecure());
-    return Stack(
-      children: [
-        ExcludeFocus(
-          excluding: _locked,
-          child: ExcludeSemantics(
+    return PopScope(
+      canPop: !_locked,
+      child: Stack(
+        children: [
+          ExcludeFocus(
             excluding: _locked,
-            child: IgnorePointer(ignoring: _locked, child: widget.child),
+            child: ExcludeSemantics(
+              excluding: _locked,
+              child: IgnorePointer(ignoring: _locked, child: widget.child),
+            ),
           ),
-        ),
-        if (_locked)
-          Positioned.fill(
-            child: Material(
-              color: Theme.of(context).colorScheme.surface,
-              child: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.lock_outline, size: 56),
-                    const SizedBox(height: 16),
-                    const Text('Ark Novel 已锁定'),
-                    const SizedBox(height: 16),
-                    FilledButton(onPressed: _unlock, child: const Text('解锁')),
-                  ],
+          if (_locked)
+            Positioned.fill(
+              child: Material(
+                color: Theme.of(context).colorScheme.surface,
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.lock_outline, size: 56),
+                      const SizedBox(height: 16),
+                      const Text('Ark Novel 已锁定'),
+                      const SizedBox(height: 16),
+                      FilledButton(onPressed: _unlock, child: const Text('解锁')),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-      ],
+        ],
+      ),
     );
   }
 }

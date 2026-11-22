@@ -40,18 +40,43 @@ class RuinsScene extends StatefulWidget {
   State<RuinsScene> createState() => _RuinsSceneState();
 }
 
-class _RuinsSceneState extends State<RuinsScene> with SingleTickerProviderStateMixin {
+class _RuinsSceneState extends State<RuinsScene> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final _t = AnimationController(vsync: this, duration: const Duration(seconds: 90));
+  bool _active = true;
+
+  void _syncTicker() {
+    if (!mounted) return;
+    final still = !_active || !widget.animate || MediaQuery.of(context).disableAnimations;
+    still ? _t.stop() : (_t.isAnimating ? null : _t.repeat());
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _active = state == AppLifecycleState.resumed;
+    _syncTicker();
+  }
+
+  @override
+  void didUpdateWidget(RuinsScene oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.animate != widget.animate) _syncTicker();
+  }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final still = !widget.animate || MediaQuery.of(context).disableAnimations;
-    still ? _t.stop() : _t.repeat();
+    _syncTicker();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _t.dispose();
     super.dispose();
   }
@@ -137,18 +162,26 @@ class _ScenePainter extends CustomPainter {
     }
   }
 
+  static final _bumpCache = <(int, int, int, int), (double, List<(double, double, double)>)>{};
+
   /// 一排起伏的云：底边平，顶上一串大小不一的圆，阴影层整体往右下偏一点；横向循环平移。
   void _cloudBand(Canvas canvas, Size size, double base, double r, Color fill, Color shade, double dx, int seed) {
     final w = size.width;
-    final rnd = math.Random(seed);
-    final bumps = <(double, double, double)>[];
-    var x = 0.0;
-    while (x < w * 2) {
-      final rr = r * (0.55 + rnd.nextDouble() * 0.6);
-      bumps.add((x, base - rr * (0.2 + rnd.nextDouble() * 0.5), rr));
-      x += rr * 1.25;
+    final key = (w.round(), base.round(), r.round(), seed);
+    var cached = _bumpCache[key];
+    if (cached == null) {
+      if (_bumpCache.length > 24) _bumpCache.remove(_bumpCache.keys.first);
+      final rnd = math.Random(seed);
+      final bumps = <(double, double, double)>[];
+      var x = 0.0;
+      while (x < w * 2) {
+        final rr = r * (0.55 + rnd.nextDouble() * 0.6);
+        bumps.add((x, base - rr * (0.2 + rnd.nextDouble() * 0.5), rr));
+        x += rr * 1.25;
+      }
+      cached = _bumpCache[key] = (x, bumps);
     }
-    final period = x;
+    final (period, bumps) = cached;
     Path band(double ox, double oy) {
       final path = Path()..addRect(Rect.fromLTWH(-10, base + oy - r * 0.2, w + 20, r * 0.75));
       for (final (bx, by, br) in bumps) {

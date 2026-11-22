@@ -14,6 +14,11 @@ class Wenku8UnexpectedPageException extends Wenku8Exception {
   const Wenku8UnexpectedPageException(super.message);
 }
 
+/// 拿到的页面要求先登录文库账号（游客访问受限页面，或登录已过期）。
+class Wenku8LoginRequiredException extends Wenku8UnexpectedPageException {
+  const Wenku8LoginRequiredException([super.message = '登录轻小说文库账号后即可访问']);
+}
+
 /// 网站明确返回业务错误页（例如书架已满）；和登录失效、结构变化区分，调用方才能决定是否放弃操作。
 class Wenku8ActionRejectedException extends Wenku8UnexpectedPageException {
   const Wenku8ActionRejectedException(super.message);

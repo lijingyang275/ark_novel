@@ -15,7 +15,7 @@ import '../volumes.dart';
 import '../widgets.dart';
 import '../text.dart';
 
-String _duration(int seconds) => seconds >= 3600 ? '${seconds ~/ 3600} 小时 ${(seconds % 3600) ~/ 60} 分' : '${(seconds / 60).ceil()} 分钟';
+String _duration(int seconds) => ReadingStats.formatDuration(seconds);
 
 /// 连续阅读天数：从今天往前数（今天还没读就从昨天开始数）
 int readingStreak(Map<String, int> perDay, DateTime now) {
@@ -186,7 +186,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
       ),
       body: total == 0 && ReadingStats.chapters == 0
           ? const StatePanel(title: '还没有阅读数据', detail: '读几章之后这里会出现统计。')
-          : ListView(
+          : contentWidth(ListView(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
               children: [
                 // 今天
@@ -260,9 +260,11 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                               children: [
                                 for (final (i, (label, sec, _, _)) in bars.indexed)
                                   Expanded(
-                                    child: GestureDetector(
-                                      behavior: HitTestBehavior.opaque,
-                                      onTap: () => setState(() => _picked = _picked == i ? null : i),
+                                    child: MouseRegion(
+                                      cursor: SystemMouseCursors.click,
+                                      child: GestureDetector(
+                                        behavior: HitTestBehavior.opaque,
+                                        onTap: () => setState(() => _picked = _picked == i ? null : i),
                                       child: Padding(
                                         padding: EdgeInsets.symmetric(horizontal: _range == 1 ? 1 : 4),
                                         child: Column(
@@ -293,6 +295,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                                             ),
                                           ],
                                         ),
+                                      ),
                                       ),
                                     ),
                                   ),
@@ -488,7 +491,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                     },
                   ),
               ],
-            ),
+            )),
     );
   }
 }
@@ -524,17 +527,19 @@ class _ManageStatsPageState extends State<_ManageStatsPage> {
     final books = ReadingStats.perBook().entries.toList()..sort((a, b) => b.value.compareTo(a.value));
     return Scaffold(
       appBar: AppBar(title: const Text('管理记录')),
-      body: ListView.builder(
-        itemCount: books.length,
-        itemBuilder: (context, i) {
-          final e = books[i];
-          final title = ReadingStats.info(e.key).title;
-          return ListTile(
-            title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: Text(_duration(e.value)),
-            trailing: IconButton(tooltip: hz(context, '删除'), icon: const Icon(Icons.delete_outline), onPressed: () => _delete(e.key, title)),
-          );
-        },
+      body: contentWidth(
+        ListView.builder(
+          itemCount: books.length,
+          itemBuilder: (context, i) {
+            final e = books[i];
+            final title = ReadingStats.info(e.key).title;
+            return ListTile(
+              title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle: Text(_duration(e.value)),
+              trailing: IconButton(tooltip: hz(context, '删除'), icon: const Icon(Icons.delete_outline), onPressed: () => _delete(e.key, title)),
+            );
+          },
+        ),
       ),
     );
   }

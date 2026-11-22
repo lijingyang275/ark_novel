@@ -122,8 +122,34 @@ class _ReportPageState extends ConsumerState<ReportPage> {
             maintainSize: true,
             maintainAnimation: true,
             maintainState: true,
-            child: _Indicator(count: vols.length + 1, index: page),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  tooltip: hz(context, '上一项'),
+                  visualDensity: VisualDensity.compact,
+                  color: Colors.white70,
+                  disabledColor: Colors.white24,
+                  icon: const Icon(Icons.chevron_left, size: 20),
+                  onPressed: page > 0 ? () => _pager.previousPage(duration: const Duration(milliseconds: 240), curve: Curves.easeOutCubic) : null,
+                ),
+                _Indicator(count: vols.length + 1, index: page),
+                IconButton(
+                  tooltip: hz(context, '下一项'),
+                  visualDensity: VisualDensity.compact,
+                  color: Colors.white70,
+                  disabledColor: Colors.white24,
+                  icon: const Icon(Icons.chevron_right, size: 20),
+                  onPressed: page < vols.length ? () => _pager.nextPage(duration: const Duration(milliseconds: 240), curve: Curves.easeOutCubic) : null,
+                ),
+              ],
+            ),
           ),
+          if (!_capturing && vols.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(page == 0 ? '左右滑动或点箭头查看各卷报告' : '第 $page / ${vols.length} 卷（长按封面可更换）', style: const TextStyle(color: Colors.white54, fontSize: 12)),
+            ),
           const SizedBox(height: 16),
           Text(info.title, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.w700, fontFamilyFallback: kSerifFallback)),
           const SizedBox(height: 6),
@@ -154,7 +180,10 @@ class _ReportPageState extends ConsumerState<ReportPage> {
                     value: Row(
                       children: [
                         for (var i = 1; i <= 5; i++)
-                          GestureDetector(onTap: () => rate(i), child: Icon(i <= rating ? Icons.star_rounded : Icons.star_outline_rounded, color: _gold, size: 22)),
+                          MouseRegion(
+                            cursor: SystemMouseCursors.click,
+                            child: GestureDetector(onTap: () => rate(i), child: Icon(i <= rating ? Icons.star_rounded : Icons.star_outline_rounded, color: _gold, size: 22)),
+                          ),
                       ],
                     ),
                   ),
@@ -252,11 +281,13 @@ class _ReportPageState extends ConsumerState<ReportPage> {
 
 const _big = TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w700);
 
-List<(String, String)> _duration(int s) => s == 0
-    ? [('—', '')]
-    : s >= 3600
-    ? [('${s ~/ 3600}', '时'), (' ${(s % 3600) ~/ 60}', '分')]
-    : [('${(s / 60).ceil()}', '分')];
+List<(String, String)> _duration(int s) {
+  if (s <= 0) return [('—', '')];
+  final mins = (s + 59) ~/ 60;
+  return s >= 3600 || mins >= 60
+      ? [('${s >= 3600 ? s ~/ 3600 : 1}', '时'), (' ${s >= 3600 ? (s % 3600) ~/ 60 : 0}', '分')]
+      : [('$mins', '分')];
+}
 
 /// 大数字 + 小单位，如"1时 53分"
 Widget _amount(List<(String, String)> parts) => Text.rich(

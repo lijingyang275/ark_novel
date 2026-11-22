@@ -87,4 +87,17 @@ void main() {
     adapter.responses.add((200, fixture('error.html')));
     await expectLater(api.sendComment('1', '标题', 'A&B+C'), throwsA(isA<Wenku8UnexpectedPageException>()));
   });
+
+  test('加入书架遇到要求登录的错误页：抛登录失效而非业务拒绝，避免离线队列丢弃', () async {
+    const loginErr = '<div class="blocktitle">出现错误！</div><div class="blockcontent">对不起，您需要登录后才能访问本页！</div>';
+    adapter.responses.add((200, loginErr));
+    await expectLater(api.addToBookshelf('1'), throwsA(isA<Wenku8LoginRequiredException>()));
+  });
+
+  test('搜索无结果页面返回空列表而非解析异常', () async {
+    adapter.responses.add((200, '<html><body><div id="content"><table class="grid"></table></div></body></html>'));
+    final res = await api.search('不存在的书名xyz', byAuthor: false, page: 1);
+    expect(res.items, isEmpty);
+    expect(res.maxPage, 0);
+  });
 }

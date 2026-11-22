@@ -12,4 +12,10 @@ void main() {
     const text = '最后一句没有标点';
     expect([for (final (s, e) in splitSentences(text)) text.substring(s, e)], [text]);
   });
+
+  test('连续句末标点不拆碎，纯符号分隔线跳过不读', () {
+    const text = '　　***\n“怎么会这样……！？”少女惊讶地抬起头。\n———\n下一幕开始了。';
+    final out = [for (final (s, e) in splitSentences(text)) text.substring(s, e)];
+    expect(out, ['“怎么会这样……！？”', '少女惊讶地抬起头。', '下一幕开始了。']);
+  });
 }

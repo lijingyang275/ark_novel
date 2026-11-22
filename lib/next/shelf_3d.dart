@@ -210,6 +210,7 @@ class _Shelf3DViewState extends State<Shelf3DView> {
         final pc = _controller((Shelf3DLayout.step(w) / c.maxWidth).clamp(0.15, 0.95));
         final cur = _cur.clamp(0, books.length - 1);
         return Focus(
+          autofocus: true,
           focusNode: _focus,
           onKeyEvent: _onKey,
           child: Listener(
@@ -266,11 +267,15 @@ class _Shelf3DViewState extends State<Shelf3DView> {
               setState(() => _cur = i);
               widget.onFocusChanged?.call(books[i].aid);
             },
-            itemBuilder: (context, i) => GestureDetector(
-              key: ValueKey('shelf-3d-hit-${books[i].aid}'),
-              behavior: HitTestBehavior.opaque,
-              onTap: () => _tap(i),
-              onLongPress: () => widget.onToggleSelect(books[i]),
+            itemBuilder: (context, i) => MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                key: ValueKey('shelf-3d-hit-${books[i].aid}'),
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _tap(i),
+                onLongPress: () => widget.onToggleSelect(books[i]),
+                onSecondaryTap: () => widget.onToggleSelect(books[i]),
+              ),
             ),
           ),
         ],

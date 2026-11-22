@@ -34,10 +34,11 @@ Future<void> applyWebViewProxy(String proxy) async {
   if (!Platform.isAndroid) return;
   try {
     final controller = ProxyController.instance();
-    if (proxy.isEmpty) {
+    final clean = proxy.replaceFirst(RegExp(r'^https?://', caseSensitive: false), '').trim();
+    if (clean.isEmpty) {
       await controller.clearProxyOverride();
     } else {
-      await controller.setProxyOverride(settings: ProxySettings(proxyRules: [ProxyRule(url: 'http://$proxy')]));
+      await controller.setProxyOverride(settings: ProxySettings(proxyRules: [ProxyRule(url: 'http://$clean')]));
     }
   } catch (_) {}
 }
@@ -87,7 +88,7 @@ Future<String> _load(String url, String? referer, String proxy, Future<void> Fun
     },
   );
   try {
-    await view.run();
+    await view.run().timeout(const Duration(seconds: 10), onTimeout: () => throw CloudflareChallengeException(requestOptions: RequestOptions(path: url)));
     return await done.future.timeout(const Duration(seconds: 20), onTimeout: () => throw CloudflareChallengeException(requestOptions: RequestOptions(path: url)));
   } finally {
     await view.dispose();
@@ -152,7 +153,7 @@ Future<Uint8List> _loadImage(String url, String? referer, String proxy, Future<v
     },
   );
   try {
-    await view.run();
+    await view.run().timeout(const Duration(seconds: 10), onTimeout: () => throw CloudflareChallengeException(requestOptions: RequestOptions(path: url)));
     return await done.future.timeout(const Duration(seconds: 20), onTimeout: () => throw CloudflareChallengeException(requestOptions: RequestOptions(path: url)));
   } finally {
     await view.dispose();

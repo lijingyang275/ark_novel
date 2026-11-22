@@ -44,7 +44,9 @@ int pageOfOffset(List<int> starts, int offset) {
   return page;
 }
 
-/// 把正文切成句子：按 。！？… 和换行切，太短的并入下一句；返回每句的 [start, end)。
+final _speakable = RegExp(r'[\p{L}\p{N}]', unicode: true);
+
+/// 把正文切成句子：按 。！？… 和换行切，太短的并入下一句，纯符号分隔线跳过；返回每句的 [start, end)。
 List<(int, int)> splitSentences(String text) {
   final out = <(int, int)>[];
   int? start;
@@ -58,14 +60,24 @@ List<(int, int)> splitSentences(String text) {
     final stop = ch == '\n' || '。！？!?…'.contains(ch);
     if (!stop) continue;
     var end = i + 1;
-    while (end < text.length && '”」』）"\''.contains(text[end])) {
-      end++;
+    if (ch != '\n') {
+      while (end < text.length && '。！？!?…”」』）"\''.contains(text[end])) {
+        end++;
+      }
     }
-    if (ch != '\n' && end - start < 8 && end < text.length && text[end] != '\n') continue; // 太短，并入下一句
+    if (!_speakable.hasMatch(text.substring(start, end))) {
+      i = end - 1;
+      start = null;
+      continue;
+    }
+    if (ch != '\n' && end - start < 8 && end < text.length && text[end] != '\n') {
+      i = end - 1;
+      continue; // 太短，并入下一句
+    }
     out.add((start, end));
     i = end - 1;
     start = null;
   }
-  if (start != null && text.substring(start).trim().isNotEmpty) out.add((start, text.length));
+  if (start != null && _speakable.hasMatch(text.substring(start))) out.add((start, text.length));
   return out;
 }

@@ -56,15 +56,18 @@ class _ColorPickerFieldState extends State<ColorPickerField> {
 
   Widget _swatch(int c, {double size = 28}) {
     final selected = widget.color == c;
-    return GestureDetector(
-      onTap: () {
-        _pick(c);
-        setState(() {
-          _hsv = HSVColor.fromColor(Color(c));
-          _hex.text = _hexOf(c);
-        });
-      },
-      child: Container(width: size, height: size, decoration: BoxDecoration(color: Color(c), shape: BoxShape.circle, border: Border.all(width: selected ? 3 : 0, color: Theme.of(context).colorScheme.onSurface))),
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: () {
+          _pick(c);
+          setState(() {
+            _hsv = HSVColor.fromColor(Color(c));
+            _hex.text = _hexOf(c);
+          });
+        },
+        child: Container(width: size, height: size, decoration: BoxDecoration(color: Color(c), shape: BoxShape.circle, border: Border.all(width: selected ? 3 : 0, color: Theme.of(context).colorScheme.onSurface))),
+      ),
     );
   }
 

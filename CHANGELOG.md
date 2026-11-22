@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.4.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.3.1...ark_novel-v1.4.0) (2026-11-21)
+
+
+### Features
+
+* 优化各页面新手指引、游客登录提示与设置搜索定位 ([fae97e3](https://github.com/chenshi221/ark_novel/commit/fae97e3fea54d15fbad7069b54e2aefdbc49d67a))
+* 完善桌面端窗口拖动、触控板翻页、快捷键与右键菜单体验 ([690b737](https://github.com/chenshi221/ark_novel/commit/690b737461b1f97874b456af1bdcc205a1171eb1))
+* 支持阅读页插图全屏缩放查看、点击区域示意图与受限章节引导 ([bcbccce](https://github.com/chenshi221/ark_novel/commit/bcbccce62ed94e6f5ce2f0bbcdf4601019e4af69))
+
+
+### Bug Fixes
+
+* 修复同步与备份一致性、登录失效识别及阅读时长统计问题 ([1e8bce8](https://github.com/chenshi221/ark_novel/commit/1e8bce88d2dafd3818f356f4c0e61fdfd50d3eda))
+
+## [1.3.1](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.3.0...ark_novel-v1.3.1) (2026-11-21)
+
+
+### Features
+
+* 显著缩小安卓安装包体积并优化编译速度与缓存 ([c39a05c](https://github.com/chenshi221/ark_novel/commit/c39a05ce6f9049449807af0d727bb260d361a980))
+
 ## [1.3.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.2.0...ark_novel-v1.3.0) (2026-11-17)
 
 

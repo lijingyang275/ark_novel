@@ -18,13 +18,13 @@ class NextApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    ref.watch(appPrefsProvider);
-    final hant = AppPrefs.read(P.uiHant, false) ? ref.watch(_hantProvider).value : null;
+    final (uiHant, pureBlack) = ref.watch(appPrefsProvider.select((_) => (AppPrefs.read(P.uiHant, false), AppPrefs.read(P.pureBlack, true))));
+    final hant = uiHant ? ref.watch(_hantProvider).value : null;
     return MaterialApp.router(
       title: 'Ark Novel',
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(Brightness.light, appPalettes[ref.watch(paletteProvider)]),
-      darkTheme: buildAppTheme(Brightness.dark, appPalettes[ref.watch(paletteProvider)], AppPrefs.read(P.pureBlack, true)),
+      darkTheme: buildAppTheme(Brightness.dark, appPalettes[ref.watch(paletteProvider)], pureBlack),
       themeMode: ref.watch(themeModeProvider),
       routerConfig: ref.watch(routerProvider),
       scrollBehavior: const _MouseDragBehavior(),

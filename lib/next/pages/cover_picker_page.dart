@@ -374,11 +374,38 @@ class _CropPageState extends ConsumerState<_CropPage> {
                       ),
                     ),
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+                    padding: const EdgeInsets.fromLTRB(20, 0, 24, 24),
                     child: Row(
                       children: [
+                        IconButton(
+                          tooltip: hz(context, '缩小'),
+                          color: Colors.white70,
+                          icon: const Icon(Icons.remove_circle_outline),
+                          onPressed: () {
+                            final cur = _tc.value.getMaxScaleOnAxis();
+                            if (cur <= 1.01) return;
+                            final f = math.max(1.0, cur / 1.2) / cur;
+                            final cx = frame.width / 2, cy = frame.height / 2;
+                            _tc.value = (Matrix4.translationValues(cx, cy, 0)..multiply(Matrix4.diagonal3Values(f, f, 1))..multiply(Matrix4.translationValues(-cx, -cy, 0)))..multiply(_tc.value);
+                            _retrim(px, img, frame);
+                          },
+                        ),
+                        IconButton(
+                          tooltip: hz(context, '放大'),
+                          color: Colors.white70,
+                          icon: const Icon(Icons.add_circle_outline),
+                          onPressed: () {
+                            final cur = _tc.value.getMaxScaleOnAxis();
+                            if (cur >= 5.99) return;
+                            final f = math.min(6.0, cur * 1.2) / cur;
+                            final cx = frame.width / 2, cy = frame.height / 2;
+                            _tc.value = (Matrix4.translationValues(cx, cy, 0)..multiply(Matrix4.diagonal3Values(f, f, 1))..multiply(Matrix4.translationValues(-cx, -cy, 0)))..multiply(_tc.value);
+                            _retrim(px, img, frame);
+                          },
+                        ),
+                        const SizedBox(width: 4),
                         const Expanded(
-                          child: Text('拖动、双指缩放，把封面放进框里', style: TextStyle(color: Colors.white70)),
+                          child: Text('拖动、缩放把封面放进框里', style: TextStyle(color: Colors.white70, fontSize: 13)),
                         ),
                         FilledButton(
                           style: FilledButton.styleFrom(minimumSize: const Size(88, 44)), // 主题默认按钮占满整行，这里要和文字并排

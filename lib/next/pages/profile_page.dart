@@ -29,7 +29,7 @@ class ProfilePage extends ConsumerWidget {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('退出登录？'),
-        content: const Text('退出后以游客身份浏览，书架等功能需要重新登录。'),
+        content: const Text('退出后转为游客模式。本机书架、阅读进度、统计与离线缓存都会保留；站内搜索、评论和在线书架同步需要重新登录。'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
           TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('退出')),
@@ -79,7 +79,13 @@ class ProfilePage extends ConsumerWidget {
     final user = session is SessionLoggedIn ? session.user : null;
 
     final name = user?.username ?? '未登录';
-    final sub = user == null ? '点击登录' : (session is SessionLoggedIn && session.offline ? 'UID ${user.uid} · 离线' : 'UID ${user.uid}');
+    final sub = user == null
+        ? '点击登录'
+        : [
+            'UID ${user.uid}',
+            if (user.userLevel.isNotEmpty) user.userLevel,
+            if (session is SessionLoggedIn && session.offline) '离线',
+          ].join(' · ');
     final useCustom = custom != null && !isWebPreview;
     final initial = Text(name.characters.firstOrNull ?? '?', style: theme.textTheme.titleLarge);
     final avatar = CircleAvatar(
@@ -98,18 +104,23 @@ class ProfilePage extends ConsumerWidget {
             ),
     );
 
-    final tappableAvatar = isWebPreview || user == null ? avatar : GestureDetector(onTap: () => _avatarMenu(context, ref), child: avatar);
+    final tappableAvatar = isWebPreview || user == null
+        ? avatar
+        : MouseRegion(cursor: SystemMouseCursors.click, child: GestureDetector(onTap: () => _avatarMenu(context, ref), child: avatar));
     final info = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        GestureDetector(
-          onTap: user == null ? () => context.push(Routes.login) : null,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: scheme.onSurface)),
-              Text(sub, style: TextStyle(fontSize: 14, color: scheme.onSurfaceVariant)),
-            ],
+        MouseRegion(
+          cursor: user == null ? SystemMouseCursors.click : MouseCursor.defer,
+          child: GestureDetector(
+            onTap: user == null ? () => context.push(Routes.login) : null,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: scheme.onSurface)),
+                Text(sub, style: TextStyle(fontSize: 14, color: scheme.onSurfaceVariant)),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 10),
@@ -187,49 +198,42 @@ class ProfilePage extends ConsumerWidget {
 }
 
 /// 名字下面那行数字，写法照 X 的「64 正在关注　1 关注者」：数字粗体、说明灰色，点了进阅读统计。
-/// 每分钟刷新一次（这页一直留在后台）。
-class _StatsLine extends ConsumerStatefulWidget {
+class _StatsLine extends ConsumerWidget {
   const _StatsLine();
 
   @override
-  ConsumerState<_StatsLine> createState() => _StatsLineState();
-}
-
-class _StatsLineState extends ConsumerState<_StatsLine> {
-  late final Timer _tick;
-
-  @override
-  void initState() {
-    super.initState();
-    _tick = Timer.periodic(const Duration(minutes: 1), (_) => setState(() {}));
-  }
-
-  @override
-  void dispose() {
-    _tick.cancel();
-    super.dispose();
-  }
-
-  static String _short(int sec) => sec >= 3600 ? '${(sec / 3600).toStringAsFixed(sec >= 36000 ? 0 : 1)} 小时' : '${(sec / 60).ceil()} 分钟';
-
-  @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     ref.watch(volumeChangesProvider);
     final scheme = Theme.of(context).colorScheme;
-    final perDay = ReadingStats.perDay();
-    final today = perDay[ReadingStats.dayKey(DateTime.now())] ?? 0;
-    final total = perDay.values.fold(0, (a, b) => a + b);
-    TextSpan item(String value, String label) => TextSpan(
-      children: [
-        TextSpan(text: value, style: TextStyle(fontWeight: FontWeight.w600, color: scheme.onSurface)),
-        TextSpan(text: ' $label　', style: TextStyle(color: scheme.onSurfaceVariant)),
-      ],
-    );
-    return GestureDetector(
-      onTap: () => context.push(Routes.stats),
-      child: Text.rich(
-        TextSpan(style: const TextStyle(fontSize: 14), children: [item(_short(today), '今天'), item(_short(total), '累计'), item('${Volumes.allDone().length}', '卷读完')]),
-      ),
+    return ValueListenableBuilder<int>(
+      valueListenable: ReadingStats.changes,
+      builder: (context, _, _) {
+        final perDay = ReadingStats.perDay();
+        final today = perDay[ReadingStats.dayKey(DateTime.now())] ?? 0;
+        final total = perDay.values.fold(0, (a, b) => a + b);
+        TextSpan item(String value, String label) => TextSpan(
+          children: [
+            TextSpan(text: value, style: TextStyle(fontWeight: FontWeight.w600, color: scheme.onSurface)),
+            TextSpan(text: ' $label　', style: TextStyle(color: scheme.onSurfaceVariant)),
+          ],
+        );
+        return MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: () => context.push(Routes.stats),
+            child: Text.rich(
+              TextSpan(
+                style: const TextStyle(fontSize: 14),
+                children: [
+                  item(ReadingStats.formatDuration(today, compact: true), '今天'),
+                  item(ReadingStats.formatDuration(total, compact: true), '累计'),
+                  item('${Volumes.allDone().length}', '卷读完'),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

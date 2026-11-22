@@ -1,8 +1,8 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show ValueListenable, defaultTargetPlatform;
+import 'package:flutter/foundation.dart' show TargetPlatform, ValueListenable, defaultTargetPlatform;
 import 'package:flutter/material.dart' hide Text;
-import 'package:flutter/services.dart' show SystemNavigator;
+import 'package:flutter/services.dart' show LogicalKeyboardKey, SystemNavigator;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -44,10 +44,15 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
   // 桌面小组件：阅读历史、更新变了过一会儿写一次；冷启动时的点击只处理一次（换账号重建主界面时别再跳）
   Timer? _widgetTimer;
   ValueListenable<Box>? _widgetWatch;
+  ValueListenable<Box>? _unreadWatch;
   StreamSubscription<Uri?>? _widgetClicks;
   static bool _widgetLaunchHandled = false;
 
   StatefulNavigationShell get shell => widget.shell;
+
+  void _onUnreadChanged() {
+    if (mounted) setState(() {});
+  }
 
   void _onSyncChanged() {
     if (!mounted) return;
@@ -83,6 +88,9 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     WidgetsBinding.instance.addObserver(this);
     Sync.changes.addListener(_onSyncChanged);
     LibraryStore.removedElsewhere.addListener(_onRemovedElsewhere);
+    if (Hive.isBoxOpen('session')) {
+      _unreadWatch = Hive.box('session').listenable(keys: ['updates', 'updates:seen'])..addListener(_onUnreadChanged);
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _onRemovedElsewhere()); // 主界面重建前就记下的
     Future.microtask(_syncAndCheck);
     Sync.auto();
@@ -152,6 +160,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     _maintenance?.cancel();
     _widgetTimer?.cancel();
     _widgetWatch?.removeListener(_scheduleWidget);
+    _unreadWatch?.removeListener(_onUnreadChanged);
     Volumes.changes.removeListener(_scheduleWidget);
     _widgetClicks?.cancel();
     super.dispose();
@@ -289,22 +298,34 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       ],
     );
     final wide = MediaQuery.sizeOf(context).width >= 720;
-    // 不在书架页时按返回先回书架；在书架页 2 秒内连按两次才退出
-    Widget back(Widget child) => PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, _) {
-        if (didPop) return;
-        if (shell.currentIndex != 0) return _go(0);
-        if (shelfSelecting.value || shelfSearching.value) return; // 书架自己先退出多选 / 搜索
-        final now = DateTime.now();
-        if (now.difference(_lastBack) < const Duration(seconds: 2)) {
-          SystemNavigator.pop();
-          return;
-        }
-        _lastBack = now;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('再按一次退出'), duration: Duration(seconds: 2)));
+    final mac = defaultTargetPlatform == TargetPlatform.macOS;
+    // 不在书架页时按返回先回书架；安卓在书架页 2 秒内连按两次才退出
+    Widget back(Widget child) => CallbackShortcuts(
+      bindings: {
+        SingleActivator(LogicalKeyboardKey.digit1, meta: mac, control: !mac): () => _go(0),
+        SingleActivator(LogicalKeyboardKey.digit2, meta: mac, control: !mac): () => _go(1),
+        SingleActivator(LogicalKeyboardKey.digit3, meta: mac, control: !mac): () => _go(2),
+        SingleActivator(LogicalKeyboardKey.digit4, meta: mac, control: !mac): () => _go(3),
+        SingleActivator(LogicalKeyboardKey.keyF, meta: mac, control: !mac): () => context.push(Routes.search),
+        SingleActivator(LogicalKeyboardKey.comma, meta: mac, control: !mac): () => context.push(Routes.settings),
       },
-      child: child,
+      child: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (didPop) return;
+          if (shell.currentIndex != 0) return _go(0);
+          if (shelfSelecting.value || shelfSearching.value) return; // 书架自己先退出多选 / 搜索
+          if (defaultTargetPlatform != TargetPlatform.android) return;
+          final now = DateTime.now();
+          if (now.difference(_lastBack) < const Duration(seconds: 2)) {
+            SystemNavigator.pop();
+            return;
+          }
+          _lastBack = now;
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('再按一次退出'), duration: Duration(seconds: 2)));
+        },
+        child: child,
+      ),
     );
     if (wide) {
       return back(Scaffold(

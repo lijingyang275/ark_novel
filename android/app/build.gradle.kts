@@ -26,6 +26,20 @@ android {
 
     androidResources {
         noCompress += "tflite"
+        // 只保留中英文资源，剔除第三方依赖自带的其余语言字符串
+        localeFilters += listOf("zh", "zh-rCN", "zh-rTW", "zh-rHK", "b+zh+Hans", "b+zh+Hant", "en")
+    }
+
+    packaging {
+        resources {
+            excludes += setOf(
+                "DebugProbesKt.bin",
+                "kotlin-tooling-metadata.json",
+                "META-INF/DEPENDENCIES",
+                "META-INF/AL2.0",
+                "META-INF/LGPL2.1",
+            )
+        }
     }
 
     defaultConfig {
@@ -107,4 +121,11 @@ flutter {
 dependencies {
     // 封面超分辨率的推理库（原 TensorFlow Lite），见 Upscaler.kt
     implementation("com.google.ai.edge.litert:litert:1.4.2")
+}
+
+// release 包压缩 APK 内的 .so 原生库，显著减小安装包体积（debug 保持不压缩以加快调试安装）
+androidComponents {
+    onVariants(selector().withBuildType("release")) { variant ->
+        variant.packaging.jniLibs.useLegacyPackaging.set(true)
+    }
 }

@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ark_novel/next/pages/stats_page.dart';
+import 'package:ark_novel/next/stats.dart';
 
 void main() {
   test('连续阅读天数：今天没读从昨天数，断一天就停', () {
@@ -19,5 +20,13 @@ void main() {
   test('阅读速度：字数除以时间，不到三章返回 null', () {
     expect(charsPerMinute([(6000, 600), (3000, 300), (4000, 400), (9999, 10)]), 600);
     expect(charsPerMinute([(6000, 600), (3000, 300)]), isNull);
+  });
+
+  test('时长格式化：59 分零几秒进位成 1 小时而非 60 分钟', () {
+    expect(ReadingStats.formatDuration(0), '0 分钟');
+    expect(ReadingStats.formatDuration(65), '2 分钟');
+    expect(ReadingStats.formatDuration(3540), '59 分钟');
+    expect(ReadingStats.formatDuration(3550), '1 小时 0 分');
+    expect(ReadingStats.formatDuration(3550, compact: true), '1.0 小时');
   });
 }
