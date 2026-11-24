@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart' hide Text;
-import 'package:flutter/rendering.dart' show RenderAbstractViewport;
+import 'package:flutter/rendering.dart' show RenderAbstractViewport, ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -9,7 +9,7 @@ import '../catalog.dart';
 import '../data.dart';
 import '../env.dart';
 import '../library.dart';
-import '../router.dart';
+import '../routes.dart';
 import '../session.dart';
 import '../widgets.dart';
 import '../text.dart';
@@ -57,31 +57,86 @@ class _RecommendTabState extends ConsumerState<_RecommendTab> with AutomaticKeep
       child: ref
           .watch(_recommendProvider)
           .when(
-            loading: () => const Center(child: CircularProgressIndicator()),
+            loading: () => const _RecommendSkeleton(),
             error: (e, _) => StatePanel(title: '加载失败', detail: e.toString(), error: e, onRetry: () => ref.invalidate(_recommendProvider)),
-            data: (blocks) => ListView(
-              padding: const EdgeInsets.only(bottom: 24),
-              children: [
-                for (final block in blocks) ...[
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                    child: Text(block.title, style: theme.textTheme.titleLarge),
-                  ),
-                  // 一个分区通常 6 本：手机上 3 列排两排，宽屏放得下就 6 列一排
-                  LayoutBuilder(
-                    builder: (context, c) => GridView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: gridColumns(c.maxWidth) >= 6 ? 6 : 3, mainAxisSpacing: 16, crossAxisSpacing: 14, childAspectRatio: 0.52),
-                      itemCount: block.list.length,
-                      itemBuilder: (_, i) => NovelCard(title: block.list[i].title, aid: block.list[i].aid, imageUrl: block.list[i].imageUrl),
-                    ),
-                  ),
-                ],
-              ],
+            data: (blocks) => blocks.isEmpty
+                ? StatePanel(title: '暂无推荐内容', detail: '请稍后重试或检查网络连接', onRetry: () => ref.invalidate(_recommendProvider))
+                : LayoutBuilder(
+              builder: (context, c) {
+                final cols = gridColumns(c.maxWidth) >= 6 ? 6 : 3;
+                final itemW = ((c.maxWidth - 32 - 14 * (cols - 1)) / cols).clamp(1.0, double.infinity);
+                final coverSize = Size(itemW, itemW * 4 / 3);
+                final delegate = SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 16, crossAxisSpacing: 14, childAspectRatio: 0.52);
+                return CustomScrollView(
+                  scrollCacheExtent: const ScrollCacheExtent.viewport(0.8),
+                  slivers: [
+                    for (final block in blocks) ...[
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                        sliver: SliverToBoxAdapter(child: Text(block.title, style: theme.textTheme.titleLarge)),
+                      ),
+                      // 一个分区通常 6 本：手机上 3 列排两排，宽屏放得下就 6 列一排
+                      SliverPadding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        sliver: SliverGrid.builder(
+                          gridDelegate: delegate,
+                          itemCount: block.list.length,
+                          itemBuilder: (_, i) => NovelCard(title: block.list[i].title, aid: block.list[i].aid, imageUrl: block.list[i].imageUrl, decodeSize: coverSize),
+                        ),
+                      ),
+                    ],
+                    const SliverPadding(padding: EdgeInsets.only(bottom: 24)),
+                  ],
+                );
+              },
             ),
           ),
+    );
+  }
+}
+
+/// 推荐页首次加载骨架：两个分区标题条 + 封面网格占位。
+class _RecommendSkeleton extends StatelessWidget {
+  const _RecommendSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.surfaceContainer;
+    Widget bar(double w, [double h = 12]) => Container(height: h, width: w, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(6)));
+    return LayoutBuilder(
+      builder: (context, c) {
+        final cols = gridColumns(c.maxWidth) >= 6 ? 6 : 3;
+        final delegate = SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 16, crossAxisSpacing: 14, childAspectRatio: 0.52);
+        return CustomScrollView(
+          physics: const NeverScrollableScrollPhysics(),
+          slivers: [
+            for (var s = 0; s < 2; s++) ...[
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
+                sliver: SliverToBoxAdapter(child: Align(alignment: Alignment.centerLeft, child: bar(110, 20))),
+              ),
+              SliverPadding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                sliver: SliverGrid.builder(
+                  gridDelegate: delegate,
+                  itemCount: 6,
+                  itemBuilder: (_, _) => Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: DecoratedBox(decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)), child: const SizedBox.expand())),
+                      const SizedBox(height: 8),
+                      bar(double.infinity),
+                      const SizedBox(height: 6),
+                      bar(48),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            const SliverPadding(padding: EdgeInsets.only(bottom: 24)),
+          ],
+        );
+      },
     );
   }
 }
@@ -192,9 +247,9 @@ Widget _sideIcon({required String tooltip, required Widget icon, Widget? selecte
   onPressed: onPressed,
 );
 
-/// 「隐藏书架里的书」开关：排行和分类共用一个设置
+/// 「隐藏书架里的书」开关：排行、分类与完结共用一个设置
 Widget _hideShelfChip(BuildContext context, WidgetRef ref) {
-  final on = AppPrefs.read(P.hideShelved, false);
+  final on = ref.watch(appPref(P.hideShelved, false));
   return Padding(
     padding: const EdgeInsets.only(right: 6),
     child: _sideIcon(
@@ -214,8 +269,7 @@ Widget _hideShelfChip(BuildContext context, WidgetRef ref) {
 
 /// 打开了「隐藏书架里的」就返回判断函数，否则 null
 bool Function(String)? _hideShelved(WidgetRef ref) {
-  ref.watch(appPrefsProvider);
-  if (!AppPrefs.read(P.hideShelved, false)) return null;
+  if (!ref.watch(appPref(P.hideShelved, false))) return null;
   final books = ref.watch(libraryProvider).books;
   return books.containsKey;
 }
@@ -298,7 +352,7 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
     });
   }
 
-  /// 全部标签：盖住标签那排往下展开，每行 5 个，多了在里面滑
+  /// 全部标签：盖住标签那排往下展开，流式换行，多了在里面滑
   Widget _panel() {
     final theme = Theme.of(context);
     return Material(
@@ -319,13 +373,17 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
             ),
           ),
           ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 200),
-            child: GridView.count(
-              shrinkWrap: true,
-              crossAxisCount: 5,
-              childAspectRatio: 2.1,
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 12),
-              children: [for (final t in categoryTags) Center(child: _Pill(t, selected: t == _tag, onTap: () => _pick(t)))],
+            constraints: const BoxConstraints(maxHeight: 240),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: SizedBox(
+                width: double.infinity,
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [for (final t in categoryTags) _Pill(t, selected: t == _tag, onTap: () => _pick(t))],
+                ),
+              ),
             ),
           ),
         ],
@@ -400,6 +458,26 @@ class _CompletedTabState extends ConsumerState<_CompletedTab> with AutomaticKeep
     if (!isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut) {
       return const LoginPrompt(title: '完结列表需要登录', detail: '登录轻小说文库账号后可浏览全部已完结小说。');
     }
-    return PagedNovelGrid(hide: _hideShelved(ref), fetch: ref.watch(apiProvider).completed);
+    final hideOn = ref.watch(appPref(P.hideShelved, false));
+    return Column(
+      children: [
+        SizedBox(
+          height: 44,
+          child: Row(
+            children: [
+              const SizedBox(width: 16),
+              Expanded(
+                child: Text(
+                  hideOn ? '已隐藏书架里的书' : '全部已完结小说',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                ),
+              ),
+              _hideShelfChip(context, ref),
+            ],
+          ),
+        ),
+        Expanded(child: PagedNovelGrid(hide: _hideShelved(ref), fetch: ref.watch(apiProvider).completed)),
+      ],
+    );
   }
 }

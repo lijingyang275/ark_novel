@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/services.dart';
 
 /// 简体转繁体（台湾写法），用 OpenCC 的词表（在 assets/opencc/）：STPhrases 词组优先、最长匹配，其余按 STCharacters 逐字转换，
@@ -13,34 +14,77 @@ class Hant {
     _read(fixes, fixed); // = 开头的行键比值多一个字，这里会被跳过
     _read(fixes.split('\n').where((l) => l.startsWith('=')).map((l) => l.substring(1)).join('\n'), _post);
     fixed.forEach((k, v) => k.length == 1 ? variants[k] = v : null);
-    String toTw(String s) => s.split('').map((c) => variants[c] ?? c).join();
-    _read(chars, _chars);
+    final variantCodes = <int, int>{
+      for (final e in variants.entries)
+        if (e.key.length == 1 && e.value.length == 1) e.key.codeUnitAt(0): e.value.codeUnitAt(0),
+    };
+    String toTw(String s) {
+      List<int>? units;
+      for (var i = 0; i < s.length; i++) {
+        final cu = s.codeUnitAt(i);
+        final mapped = variantCodes[cu];
+        if (mapped != null && mapped != cu) {
+          units ??= s.codeUnits.toList();
+          units[i] = mapped;
+        }
+      }
+      return units == null ? s : String.fromCharCodes(units);
+    }
+
+    final rawChars = <String, String>{};
+    _read(chars, rawChars);
     _read(phrases, _phrases);
-    _chars.updateAll((_, v) => toTw(v));
+    rawChars.forEach((k, v) {
+      if (k.length == 1 && v.length == 1) {
+        final cu = v.codeUnitAt(0);
+        _chars[k.codeUnitAt(0)] = variantCodes[cu] ?? cu;
+      }
+    });
     _phrases.updateAll((_, v) => toTw(v));
-    variants.forEach((k, v) => _chars.putIfAbsent(k, () => v)); // 原文本来就是繁体的「爲」也换成「為」
+    variantCodes.forEach((k, v) => _chars.putIfAbsent(k, () => v)); // 原文本来就是繁体的「爲」也换成「為」
     fixed.forEach((k, v) => k.length > 1 ? _phrases[k] = toTw(v) : null);
+
+    // 按首字分桶记录实际存在的词长（降序），避免对每个首字都从全局最大词长 12 倒序切片。
+    final lenSets = <int, Set<int>>{};
     for (final k in _phrases.keys) {
-      _starts.add(k.codeUnitAt(0));
-      if (k.length > _maxLen) _maxLen = k.length;
+      if (k.length < 2) continue;
+      (lenSets[k.codeUnitAt(0)] ??= <int>{}).add(k.length);
+    }
+    lenSets.forEach((cu, set) {
+      final list = set.toList()..sort((a, b) => b.compareTo(a));
+      _lensByStart[cu] = list;
+    });
+    for (final k in _post.keys) {
+      if (k.isNotEmpty) _postTriggers.add(k.codeUnitAt(0));
     }
   }
 
-  final _chars = <String, String>{};
+  final _chars = <int, int>{};
   final _phrases = <String, String>{};
-  final _starts = <int>{};
+  final _lensByStart = <int, List<int>>{};
   final _post = <String, String>{};
-  var _maxLen = 1;
+  final _postTriggers = <int>{};
 
   static Future<Hant>? _loading;
 
+  /// 在后台 Isolate 解析词表（原生端走 `Isolate.run`，Web 端自动同步执行），避免主线程冷卡顿。
+  static Future<Hant> parseAsync(String chars, String phrases, [String tw = '', String fixes = '']) =>
+      compute(_parseHantTask, (chars, phrases, tw, fixes));
+
   /// 第一次用到时才加载词表（约 1 MB），之后复用。
   static Future<Hant> load() => _loading ??= () async {
-    final chars = await rootBundle.loadString('assets/opencc/STCharacters.txt');
-    final phrases = await rootBundle.loadString('assets/opencc/STPhrases.txt');
-    final tw = await rootBundle.loadString('assets/opencc/TWVariants.txt');
-    final fixes = await rootBundle.loadString('assets/opencc/ArkFixes.txt');
-    return loaded = Hant.parse(chars, phrases, tw, fixes);
+    try {
+      final [chars, phrases, tw, fixes] = await Future.wait([
+        rootBundle.loadString('assets/opencc/STCharacters.txt'),
+        rootBundle.loadString('assets/opencc/STPhrases.txt'),
+        rootBundle.loadString('assets/opencc/TWVariants.txt'),
+        rootBundle.loadString('assets/opencc/ArkFixes.txt'),
+      ]);
+      return loaded = await parseAsync(chars, phrases, tw, fixes);
+    } catch (_) {
+      _loading = null;
+      rethrow;
+    }
   }();
 
   /// 已经加载好的词表；界面在 build 里同步用它，没加载完时为 null（先显示原文）。
@@ -66,30 +110,55 @@ class Hant {
       if (hit != null) return hit;
     }
     final out = StringBuffer();
+    final hasPost = _postTriggers.isNotEmpty;
+    var maybePost = false;
     var i = 0;
-    while (i < text.length) {
-      if (_starts.contains(text.codeUnitAt(i))) {
+    final len = text.length;
+    while (i < len) {
+      final cu = text.codeUnitAt(i);
+      final lens = _lensByStart[cu];
+      if (lens != null) {
+        final rem = len - i;
         String? hit;
-        for (var n = _maxLen < text.length - i ? _maxLen : text.length - i; n >= 2 && hit == null; n--) {
+        for (final n in lens) {
+          if (n > rem) continue;
           final v = _phrases[text.substring(i, i + n)];
-          if (v != null) hit = v;
+          if (v != null) {
+            hit = v;
+            break;
+          }
         }
         if (hit != null) {
           out.write(hit);
+          if (hasPost && !maybePost) {
+            for (var j = 0; j < hit.length; j++) {
+              if (_postTriggers.contains(hit.codeUnitAt(j))) {
+                maybePost = true;
+                break;
+              }
+            }
+          }
           i += hit.length;
           continue;
         }
       }
-      final c = text[i];
-      out.write(_chars[c] ?? c);
+      final outCu = _chars[cu] ?? cu;
+      out.writeCharCode(outCu);
+      if (hasPost && !maybePost && _postTriggers.contains(outCu)) maybePost = true;
       i++;
     }
     var s = out.toString();
-    _post.forEach((k, v) => s = s.replaceAll(k, v));
-    if (text.length <= 80) {
+    if (maybePost) {
+      _post.forEach((k, v) {
+        if (s.contains(k)) s = s.replaceAll(k, v);
+      });
+    }
+    if (len <= 80) {
       if (_shortCache.length >= 512) _shortCache.remove(_shortCache.keys.first);
       _shortCache[text] = s;
     }
     return s;
   }
 }
+
+Hant _parseHantTask((String, String, String, String) args) => Hant.parse(args.$1, args.$2, args.$3, args.$4);

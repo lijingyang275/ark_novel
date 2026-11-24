@@ -71,10 +71,17 @@ class _RulesPageState extends ConsumerState<RulesPage> {
       key: ValueKey('${r.id}_$i'),
       direction: DismissDirection.endToStart,
       background: Container(
-        color: scheme.error.withValues(alpha: 0.12),
+        color: scheme.error,
         alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 24),
-        child: Icon(Icons.delete_outline, color: scheme.error),
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.delete_outline, color: scheme.onError),
+            const SizedBox(width: 6),
+            Text('删除', style: TextStyle(color: scheme.onError)),
+          ],
+        ),
       ),
       onDismissed: (_) => _deleteAt(i),
       child: XTile(

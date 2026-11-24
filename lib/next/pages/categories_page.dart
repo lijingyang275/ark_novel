@@ -4,9 +4,9 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../app_prefs.dart';
 import '../library.dart';
+import '../shelf_tabs.dart';
 import '../widgets.dart';
 import '../x_list.dart';
-import 'bookshelf_page.dart';
 import '../text.dart';
 
 /// 选分类（可多选，一个都不选就是"默认"）。取消返回 null。
@@ -47,19 +47,24 @@ Future<List<String>?> pickCategories(BuildContext context, List<LibCategory> cat
   );
 }
 
-Future<String?> _askName(BuildContext context, String title, [String initial = '']) {
+Future<String?> _askName(BuildContext context, String title, [String initial = '']) async {
   final controller = TextEditingController(text: initial);
-  return showDialog<String>(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: Text(title),
-      content: TextField(controller: controller, autofocus: true, decoration: const InputDecoration(hint: Text('分类名称', maxLines: 1, overflow: TextOverflow.ellipsis)), onSubmitted: (v) => Navigator.pop(context, v)),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-        FilledButton(onPressed: () => Navigator.pop(context, controller.text), child: const Text('确定')),
-      ],
-    ),
-  ).then((v) => v?.trim().isEmpty ?? true ? null : v!.trim());
+  try {
+    final v = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(controller: controller, autofocus: true, decoration: const InputDecoration(hint: Text('分类名称', maxLines: 1, overflow: TextOverflow.ellipsis)), onSubmitted: (v) => Navigator.pop(context, v)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(context, controller.text), child: const Text('确定')),
+        ],
+      ),
+    );
+    return v?.trim().isEmpty ?? true ? null : v!.trim();
+  } finally {
+    WidgetsBinding.instance.addPostFrameCallback((_) => controller.dispose()); // 退出动画还在用它，晚一帧再释放
+  }
 }
 
 /// 管理书架标签：默认、连载、完结和自己建的分类放在一起拖动排序（和书架上拖标签是同一个顺序），每个都能隐藏；
@@ -70,12 +75,11 @@ class CategoriesPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final lib = ref.watch(libraryProvider);
-    ref.watch(appPrefsProvider);
+    final hidden = ref.watch(appPrefList(P.hiddenTabs));
     final ctl = ref.read(libraryProvider.notifier);
     final scheme = Theme.of(context).colorScheme;
     final tabs = allShelfTabs(lib.cats);
     final merged = lib.cats.where(isMergedCategory).toList(); // 和连载 / 完结同名的，书并进那个标签，不单独排
-    final hidden = AppPrefs.readList(P.hiddenTabs);
     Future<void> create() async {
       final name = await _askName(context, '新建分类');
       if (name != null) await ctl.addCategory(name);
@@ -110,7 +114,7 @@ class CategoriesPage extends ConsumerWidget {
             content: const Text('分类中的书不会被删除，只是不再属于该分类。'),
             actions: [
               TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
-              FilledButton(style: FilledButton.styleFrom(backgroundColor: scheme.error), onPressed: () => Navigator.pop(context, true), child: const Text('删除')),
+              FilledButton(style: FilledButton.styleFrom(backgroundColor: scheme.error, foregroundColor: scheme.onError), onPressed: () => Navigator.pop(context, true), child: const Text('删除')),
             ],
           ),
         );

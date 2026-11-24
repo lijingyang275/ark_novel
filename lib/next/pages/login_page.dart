@@ -5,7 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../models/common/wenku8_node.dart';
 import '../env.dart';
-import '../router.dart';
+import '../routes.dart';
 import '../session.dart';
 import 'login_webview_page.dart';
 import '../text.dart';
@@ -27,6 +27,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
   late final _proxy = TextEditingController(text: ref.read(sessionStoreProvider).proxy);
   late int _keepSeconds = ref.read(sessionStoreProvider).keepSeconds;
   bool _remember = false;
+  bool _showPassword = false;
   bool _busy = false;
   String? _error;
 
@@ -134,21 +135,35 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 
   List<Widget> _form(ThemeData theme) {
     return [
-      TextField(
-        controller: _username,
-        enabled: !_busy,
-        decoration: const InputDecoration(label: Text('用户名')),
-        textInputAction: TextInputAction.next,
-        autofillHints: const [AutofillHints.username],
-      ),
-      const SizedBox(height: 14),
-      TextField(
-        controller: _password,
-        enabled: !_busy,
-        obscureText: true,
-        decoration: const InputDecoration(label: Text('密码')),
-        autofillHints: const [AutofillHints.password],
-        onSubmitted: (_) => _submit(),
+      AutofillGroup(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _username,
+              enabled: !_busy,
+              decoration: const InputDecoration(label: Text('用户名')),
+              textInputAction: TextInputAction.next,
+              autofillHints: const [AutofillHints.username],
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _password,
+              enabled: !_busy,
+              obscureText: !_showPassword,
+              decoration: InputDecoration(
+                label: const Text('密码'),
+                suffixIcon: IconButton(
+                  tooltip: hz(context, _showPassword ? '隐藏密码' : '显示密码'),
+                  icon: Icon(_showPassword ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 20),
+                  onPressed: _busy ? null : () => setState(() => _showPassword = !_showPassword),
+                ),
+              ),
+              autofillHints: const [AutofillHints.password],
+              onSubmitted: (_) => _submit(),
+            ),
+          ],
+        ),
       ),
       const SizedBox(height: 20),
       Text('保持登录', style: theme.textTheme.labelLarge),
@@ -193,18 +208,16 @@ class _LoginPageState extends ConsumerState<LoginPage> {
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
           title: const Text('系统网络栈'),
-          subtitle: Text('更容易通过 Cloudflare 验证，重启后生效（设了代理时不启用）', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-          value: ref.watch(sessionStoreProvider).nativeNet,
-          onChanged: _busy
-              ? null
-              : (v) async {
-                  await ref.read(sessionStoreProvider).setNativeNet(v);
-                  if (mounted) setState(() {});
-                },
+          subtitle: Text('更容易通过 Cloudflare 验证，切换后立即生效（设了代理时不启用）', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          value: ref.watch(nativeNetProvider),
+          onChanged: _busy ? null : (v) => ref.read(nativeNetProvider.notifier).set(v),
         ),
       ],
       const SizedBox(height: 24),
-      FilledButton(onPressed: _busy ? null : _submit, child: _busy ? const _ButtonSpinner() : const Text('登录')),
+      SizedBox(
+        width: double.infinity,
+        child: FilledButton(onPressed: _busy ? null : _submit, child: _busy ? const _ButtonSpinner() : const Text('登录')),
+      ),
       const SizedBox(height: 8),
       Center(
         child: TextButton.icon(
@@ -230,7 +243,7 @@ class _ButtonSpinner extends StatelessWidget {
   const _ButtonSpinner();
 
   @override
-  Widget build(BuildContext context) => const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white));
+  Widget build(BuildContext context) => SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Theme.of(context).colorScheme.onPrimary));
 }
 
 class _Notice extends StatelessWidget {

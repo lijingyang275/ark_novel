@@ -1,5 +1,6 @@
 import 'package:ark_novel/next/library.dart';
 import 'package:ark_novel/next/shelf_3d.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -142,5 +143,68 @@ void main() {
     final heroes = tester.widgetList<Hero>(find.byType(Hero, skipOffstage: false)).toList();
     expect(heroes.map((h) => h.tag), ['vols:1']);
     expect(tester.widget<HeroMode>(find.ancestor(of: find.byType(Hero), matching: find.byType(HeroMode)).first).enabled, isFalse);
+  });
+
+  testWidgets('Shelf3DView：圆点指示器可点击切书且封面带 Semantics', (tester) async {
+    final handle = tester.ensureSemantics();
+    try {
+      await tester.pumpWidget(shelf(books));
+      await tester.pumpAndSettle();
+      expect(find.text('狼与香辛料'), findsOneWidget);
+      expect(find.bySemanticsLabel('狼与香辛料'), findsWidgets);
+
+      await tester.tap(find.byKey(const ValueKey('shelf-3d-dot-2')));
+      await tester.pumpAndSettle();
+      expect(find.text('败北女角太多了！'), findsOneWidget);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  testWidgets('Shelf3DView：macOS 触控板惯性滚动单次手势只翻 1 本', (tester) async {
+    final many = [for (var i = 0; i < 10; i++) LibBook(aid: 'm$i', title: '书 $i', img: '')];
+    await tester.pumpWidget(shelf(many));
+    await tester.pumpAndSettle();
+    expect(find.text('书 0'), findsOneWidget);
+
+    final center = tester.getCenter(find.byKey(const ValueKey('shelf-3d-stage')));
+    // 模拟 macOS 触控板一次轻滑产生的衰减惯性滚轮序列（每 16ms 一次，持续 300ms+）
+    for (final dy in [12.0, 26.0, 32.0, 28.0, 22.0, 16.0, 12.0, 9.0, 6.0, 4.0, 2.0]) {
+      tester.binding.handlePointerEvent(PointerScrollEvent(position: center, scrollDelta: Offset(0, dy)));
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    await tester.pumpAndSettle();
+    expect(find.text('书 1'), findsOneWidget);
+  });
+
+  testWidgets('Shelf3DView：矮窗超屏时允许滚动，不裁切底部主按钮', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 390,
+              height: 260,
+              child: Shelf3DView(
+                books: books,
+                selected: const {},
+                heroEnabled: false,
+                coverOf: (_) => '',
+                badgeOf: (_) => null,
+                subtitleOf: (b) => 'sub-${b.aid}',
+                actionOf: (b) => (label: '继续读', cid: '101'),
+                onOpen: (_) {},
+                onRead: (_, _) {},
+                onToggleSelect: (_) {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final scrollView = tester.widget<SingleChildScrollView>(find.byType(SingleChildScrollView));
+    expect(scrollView.physics, isA<ClampingScrollPhysics>());
+    expect(tester.takeException(), isNull);
   });
 }

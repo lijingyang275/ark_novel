@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
 import 'package:ark_novel/models/cat_chapter.dart';
@@ -11,14 +12,23 @@ import 'package:ark_novel/next/image_cache.dart';
 import 'package:ark_novel/next/read_state.dart';
 import 'package:ark_novel/next/pages/volumes_page.dart';
 import 'package:ark_novel/next/progress.dart';
+import 'package:ark_novel/next/volume_covers.dart';
 import 'package:ark_novel/next/volumes.dart';
 
 CatVolume vol(String t, List<String> chapters) => CatVolume(title: t, chapters: [for (final c in chapters) CatChapter(title: c.startsWith('i') ? '插图' : '第$c章', cid: c)]);
 
 void main() {
+  late Directory tmp;
+
   setUpAll(() async {
-    Hive.init(Directory.systemTemp.createTempSync('ark_vol_test').path);
+    tmp = Directory.systemTemp.createTempSync('ark_vol_test');
+    Hive.init(tmp.path);
     await Hive.openBox('session');
+  });
+
+  tearDownAll(() async {
+    await Hive.close();
+    if (tmp.existsSync()) tmp.deleteSync(recursive: true);
   });
 
   test('一卷的正文章节全读了才算读完（插图章不算），标回未读就不算了', () async {
@@ -121,5 +131,68 @@ void main() {
     await Volumes.setCover('6', '第二卷', 'custom#crop=0,0,0.5,1', picked: true);
     await Volumes.saveCatalogue('6', [vol('第一卷', ['i1', 'a']), vol('第二卷', ['b', 'i2_new'])]);
     expect(Volumes.cover('6', '第二卷'), 'custom#crop=0,0,0.5,1');
+  });
+
+  test('Volumes 内存只读缓存按 Hive 引用复用，写入或外部直接写 Box 后自动失效；ReadState.readView 零拷贝只读', () async {
+    await Volumes.saveCatalogue('7', [vol('第一卷', ['a', 'b'])]);
+    final v1 = Volumes.of('7');
+    final v2 = Volumes.of('7');
+    expect(identical(v1, v2), isTrue);
+    expect(() => v1.add(const Vol('x', [], null)), throwsUnsupportedError);
+
+    await Volumes.setCover('7', '第一卷', 'u1');
+    final c1 = Volumes.covers('7');
+    final c2 = Volumes.covers('7');
+    expect(identical(c1, c2), isTrue);
+    await Hive.box('session').put('vcover2:7', {'第一卷': 'u2'});
+    final c3 = Volumes.covers('7');
+    expect(identical(c1, c3), isFalse);
+    expect(c3['第一卷'], 'u2');
+
+    await ReadState.setRead('7', ['a', 'b'], true);
+    final d1 = Volumes.done('7');
+    final d2 = Volumes.done('7');
+    expect(identical(d1, d2), isTrue);
+    final r1 = ReadState.readView('7');
+    final r2 = ReadState.readView('7');
+    expect(identical(r1, r2), isTrue);
+    expect(() => r1.add('c'), throwsUnsupportedError);
+  });
+
+  test('Volumes 按 aid 细粒度通知：单本书变更只刷新对应 aid 订阅者，全局广播可刷新全部并支持自动释放', () async {
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+    var hitsA = 0;
+    var hitsB = 0;
+    var hitsGlobal = 0;
+    final subA = c.listen(volumeChangeForProvider('aidA'), (_, _) => hitsA++);
+    final subB = c.listen(volumeChangeForProvider('aidB'), (_, _) => hitsB++);
+    final subG = c.listen(volumeChangesProvider, (_, _) => hitsGlobal++);
+
+    await Volumes.saveCatalogue('aidA', [vol('第一卷', ['c1'])]);
+    await Volumes.setCover('aidA', '第一卷', 'https://img.example/a.jpg');
+    await Future<void>.delayed(Duration.zero);
+    expect(hitsA, greaterThanOrEqualTo(1));
+    expect(hitsB, 0);
+    expect(hitsGlobal, greaterThanOrEqualTo(1));
+
+    final aBefore = hitsA;
+    final bBefore = hitsB;
+    await Volumes.setRating('aidB', '第一卷', 5);
+    await Future<void>.delayed(Duration.zero);
+    expect(hitsA, aBefore);
+    expect(hitsB, bBefore + 1);
+
+    // 全局广播（Volumes.changes.value++）同步通知所有已订阅 aid
+    final aPrev = hitsA;
+    final bPrev = hitsB;
+    Volumes.changes.value++;
+    await Future<void>.delayed(Duration.zero);
+    expect(hitsA, aPrev + 1);
+    expect(hitsB, bPrev + 1);
+
+    subA.close();
+    subB.close();
+    subG.close();
   });
 }

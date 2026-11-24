@@ -12,7 +12,6 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-import '../common/constants.dart';
 import '../data/wenku8/wenku8_client.dart';
 import '../data/wenku8/wenku8_exceptions.dart';
 import '../data/wenku8/wenku8_parser.dart';
@@ -50,10 +49,57 @@ class SessionStore {
 
   Future<void> setCookie(String? value) => value == null ? _box.delete('cookie') : _box.put('cookie', value);
 
-  /// Cloudflare 放行 cookie（`cf_clearance` 等）按站点保存：它只对验证时的那个域名有效。
-  String? cfCookie(String host) => _box.get('cf:$host') as String?;
+  static const cfClearanceMaxAge = Duration(hours: 24);
+  static const _desktopUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0';
 
-  Future<void> setCfCookie(String host, String? value) => value == null || value.isEmpty ? _box.delete('cf:$host') : _box.put('cf:$host', value);
+  /// Cloudflare 放行 cookie（`cf_clearance` 等）按站点保存：它只对验证时的那个域名有效。
+  String? cfCookie(String host) {
+    final raw = _box.get('cf:$host');
+    if (raw is String) return raw;
+    if (raw is Map) return raw['v'] as String?;
+    return null;
+  }
+
+  /// 站点 Cloudflare cookie 最近一次写入时间（毫秒时间戳），无记录为 null。
+  int? cfCookieTimestamp(String host) {
+    final ts = _box.get('cf:ts:$host');
+    if (ts is int) return ts;
+    final raw = _box.get('cf:$host');
+    if (raw is Map) return raw['ts'] as int?;
+    return null;
+  }
+
+  Future<void> setCfCookie(String host, String? value, {int? timestampMs}) async {
+    if (value == null || value.isEmpty) {
+      await _box.delete('cf:$host');
+      await _box.delete('cf:ts:$host');
+    } else {
+      await _box.put('cf:$host', value);
+      await _box.put('cf:ts:$host', timestampMs ?? DateTime.now().millisecondsSinceEpoch);
+    }
+  }
+
+  /// 启动恢复时清理已过期的 `cf_clearance`（超过 [maxAge] 或旧版本无时间戳记录），避免冷启动反复发送失效放行 cookie。
+  Future<int> pruneExpiredCfCookies({Duration maxAge = cfClearanceMaxAge, int? nowMs}) async {
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final cutoff = now - maxAge.inMilliseconds;
+    final expired = <String>[];
+    for (final k in _box.keys.whereType<String>()) {
+      if (!k.startsWith('cf:') || k.startsWith('cf:ts:')) continue;
+      final host = k.substring(3);
+      final ts = cfCookieTimestamp(host);
+      if (ts != null && ts < cutoff) {
+        expired.add(host);
+      } else if (ts == null) {
+        // 旧版本未记录时间戳的放行 cookie 先补打当前时间戳，避免升级首启就强制重验；若已失效会在实际请求时自然刷新
+        await _box.put('cf:ts:$host', now);
+      }
+    }
+    for (final host in expired) {
+      await setCfCookie(host, null);
+    }
+    return expired.length;
+  }
 
   /// WebView 的真实浏览器标识。Dio 用同一个，Cloudflare 才认得放行 cookie。
   /// 还没验证过（没有 WebView 的标识）时按本机平台给一个自洽的：手机上自称桌面 Chrome 会被 Cloudflare 当成可疑。
@@ -63,7 +109,7 @@ class SessionStore {
     TargetPlatform.android => 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36',
     TargetPlatform.iOS => 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
     TargetPlatform.macOS => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15',
-    _ => kUserAgent['User-Agent']!,
+    _ => _desktopUserAgent,
   };
 
   /// 用系统网络栈发请求（浏览器级 TLS 指纹）。没填代理时才生效：系统网络栈走不了自定义代理。
@@ -72,7 +118,11 @@ class SessionStore {
   Future<void> setNativeNet(bool value) => _box.put('nativeNet', value);
 
   HttpClientAdapter adapter() {
-    HttpClientAdapter io() => IOHttpClientAdapter(createHttpClient: () => HttpClient()..findProxy = (_) => proxy.isEmpty ? 'DIRECT' : 'PROXY $proxy');
+    HttpClientAdapter io() => IOHttpClientAdapter(
+      createHttpClient: () => HttpClient()
+        ..idleTimeout = const Duration(seconds: 45)
+        ..findProxy = (_) => proxy.isEmpty ? 'DIRECT' : 'PROXY $proxy',
+    );
     return nativeNet && proxy.isEmpty ? (nativeAdapter(io) ?? io()) : io();
   }
 
@@ -195,6 +245,19 @@ class HttpProxyController extends Notifier<String> {
 
 final proxyProvider = NotifierProvider<HttpProxyController, String>(HttpProxyController.new);
 
+/// 是否启用系统原生网络栈（安卓 Cronet / 苹果 NSURLSession）。切换后实时热更新各 Dio 适配器，无需重启。
+class NativeNetController extends Notifier<bool> {
+  @override
+  bool build() => ref.read(sessionStoreProvider).nativeNet;
+
+  Future<void> set(bool value) async {
+    await ref.read(sessionStoreProvider).setNativeNet(value);
+    state = value;
+  }
+}
+
+final nativeNetProvider = NotifierProvider<NativeNetController, bool>(NativeNetController.new);
+
 /// 当前用于请求的站点地址：网页预览走转发程序，原生 App 直连所选节点。
 String siteBase(Wenku8Node node) => isWebPreview ? previewProxyBase : node.node;
 
@@ -213,15 +276,20 @@ final wenku8ClientProvider = Provider<Wenku8Client>((ref) {
             url,
             referer: referer,
             proxy: ref.read(proxyProvider),
-            onSession: (cookies, ua) {
+            loginCookies: store.cookie,
+            onSession: (cookies, ua, origin) {
               final session = ref.read(sessionProvider.notifier);
               // 退出登录不清 WebView 的 cookie：没登录时只收 Cloudflare 的，不把旧账号存回来
-              return session.acceptWebCookies(cookies, userAgent: ua, login: ref.read(sessionProvider) is SessionLoggedIn);
+              return session.acceptWebCookies(cookies, userAgent: ua, login: ref.read(sessionProvider) is SessionLoggedIn, origin: origin);
             },
           ),
+    shouldRetryAfterFallback: kIsWeb ? null : (html) => store.cookie != null && store.cookie != 'preview' && Wenku8Parser.needsLogin(html),
   );
-  // shortcut: 换代理时旧适配器不关（Cronet 有请求在途时关闭可能出错），只有手动改代理才多留一个，真成问题再等请求结束后关
-  if (!kIsWeb) ref.listen(proxyProvider, (_, _) => client.dio.httpClientAdapter = store.adapter());
+  // shortcut: 换代理或切换原生网络栈时热替换适配器（旧适配器在途请求自然结束，避免正在传输时强关底层引擎）
+  if (!kIsWeb) {
+    ref.listen(proxyProvider, (_, _) => client.dio.httpClientAdapter = store.adapter());
+    ref.listen(nativeNetProvider, (_, _) => client.dio.httpClientAdapter = store.adapter());
+  }
   return client;
 });
 
@@ -237,37 +305,38 @@ final imageChallengeProvider = Provider<ImageChallengeFallback?>((ref) {
     final store = ref.read(sessionStoreProvider);
     final node = ref.read(nodeProvider);
     final jar = ref.read(imageCookieJarProvider);
-    final origin = 'https://${Uri.parse(url).host}';
     return webFetchImage(
       url,
       referer: '${siteBase(node)}/',
       proxy: ref.read(proxyProvider),
-      onSession: (cookies, ua) async {
+      onSession: (cookies, ua, origin) async {
         await store.setCfCookie(origin, cookies);
         await jar.saveFromResponse(Uri.parse(origin), Wenku8Client.parseCookieString(cookies));
         if (ua != null && ua.isNotEmpty && ua != store.userAgent) {
           await store.setUserAgent(ua);
           ref.read(wenku8ClientProvider).dio.options.headers['User-Agent'] = ua;
-          ref.read(imageDioProvider).options.headers['User-Agent'] = ua;
+          // imageDioProvider 通过拦截器动态读取 store.userAgent，不在此提前初始化它
         }
       },
     );
   };
 });
 
-/// 图片专用的 Dio：和请求页面一样走所选代理，并带上浏览器 UA、Referer 与各图床保存的 Cloudflare cookie。
+/// 图片专用的 Dio：和请求页面一样走所选代理与原生网络栈，通过拦截器动态读取当前节点 Referer、浏览器 UA 与各图床保存的 Cloudflare cookie。
 final imageDioProvider = Provider<Dio>((ref) {
   final store = ref.watch(sessionStoreProvider);
-  final node = ref.watch(nodeProvider);
   ref.watch(proxyProvider);
+  ref.watch(nativeNetProvider);
   final jar = ref.watch(imageCookieJarProvider);
-  final dio = Dio(BaseOptions(responseType: ResponseType.bytes, connectTimeout: const Duration(seconds: 12), receiveTimeout: const Duration(seconds: 25), headers: {'User-Agent': store.userAgent, 'Referer': '${siteBase(node)}/'}))
+  final dio = Dio(BaseOptions(responseType: ResponseType.bytes, connectTimeout: const Duration(seconds: 12), receiveTimeout: const Duration(seconds: 25)))
     ..httpClientAdapter = store.adapter();
   if (!kIsWeb) {
     final restoring = <String, Future<void>>{};
     dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) async {
+          options.headers['User-Agent'] = store.userAgent;
+          options.headers['Referer'] ??= '${siteBase(ref.read(nodeProvider))}/';
           final host = options.uri.host;
           if (host.isNotEmpty) {
             final origin = 'https://$host';
@@ -333,17 +402,40 @@ String friendlyError(Object e) {
   if (e is FormatException) return e.message;
   if (e is StateError) return e.message;
   if (e is DioException) {
+    if (e.type == DioExceptionType.cancel) return '请求已取消';
+    if (e.type == DioExceptionType.badCertificate) return '安全证书校验失败，请检查系统时间或网络环境';
     if (e.type == DioExceptionType.connectionTimeout || e.type == DioExceptionType.sendTimeout || e.type == DioExceptionType.receiveTimeout) {
       return '连接超时，请检查网络或切换线路';
     }
     final err = e.error;
     if (err != null && isCloudflare(err)) return err.toString();
     final detail = err?.toString() ?? e.message ?? e.type.name;
-    if (detail.contains('127.0.0.1') || detail.contains('Connection refused')) {
+    final lower = detail.toLowerCase();
+    if (detail.contains('127.0.0.1') || lower.contains('connection refused') || detail.contains('ERR_CONNECTION_REFUSED')) {
       return '连接被拒绝（本地 DNS 可能拦截了域名，建议切到 wenku8.cc 或开启代理）';
     }
+    if (detail.contains('ERR_NAME_NOT_RESOLVED') || detail.contains('HOSTNAME_NOT_RESOLVED') || lower.contains('failed host lookup') || detail.contains('NSURLErrorCannotFindHost') || detail.contains('Code=-1003') || lower.contains('cannot find host')) {
+      return '无法解析域名，请检查网络或切换站点线路';
+    }
+    if (detail.contains('ERR_CONNECTION_TIMED_OUT') || detail.contains('ERR_TIMED_OUT') || detail.contains('NSURLErrorTimedOut') || detail.contains('Code=-1001') || lower.contains('request timed out')) {
+      return '连接超时，请检查网络或切换线路';
+    }
+    if (detail.contains('ERR_INTERNET_DISCONNECTED') || detail.contains('ERR_NETWORK_CHANGED') || detail.contains('NSURLErrorNotConnectedToInternet') || detail.contains('Code=-1009') || lower.contains('appears to be offline')) {
+      return '网络已断开，请检查网络连接';
+    }
+    if (detail.contains('ERR_CONNECTION_RESET') || detail.contains('ERR_CONNECTION_CLOSED') || detail.contains('ERR_CONNECTION_ABORTED') || detail.contains('NSURLErrorNetworkConnectionLost') || detail.contains('Code=-1005') || lower.contains('connection reset') || lower.contains('connection closed')) {
+      return '网络连接被中断，请稍后重试或切换线路';
+    }
+    if (detail.contains('ERR_PROXY_CONNECTION_FAILED') || detail.contains('ERR_TUNNEL_CONNECTION_FAILED')) {
+      return '代理服务器连接失败，请检查代理地址与端口';
+    }
+    if (err is HandshakeException || detail.contains('ERR_SSL_') || detail.contains('ERR_CERT_') || detail.contains('NSURLErrorSecureConnectionFailed') || detail.contains('NSURLErrorServerCertificate') || detail.contains('Code=-1200') || detail.contains('Code=-1202')) {
+      return '安全连接（TLS）握手失败，可能被网络拦截，建议切换线路或开关系统网络栈';
+    }
+    if (detail.contains('ERR_ADDRESS_UNREACHABLE') || lower.contains('network is unreachable')) {
+      return '网络不可达，请检查网络连接';
+    }
     if (err is SocketException) return '网络不可达：${err.osError?.message ?? err.message}';
-    if (err is HandshakeException) return '安全连接（TLS）握手失败，可能被网络拦截，建议切换线路或开启系统网络栈';
     return '连接失败：$detail';
   }
   final raw = e.toString();
@@ -352,10 +444,15 @@ String friendlyError(Object e) {
   return raw;
 }
 
+const _restoreTimeoutReason = 'restore_timeout';
+
 /// 登录状态。没登录也能进主界面（游客），需要账号的页面再提示登录。
 class SessionController extends Notifier<SessionState> {
   int _restoreEpoch = 0;
   int _cookieSwaps = 0;
+  CancelToken? _restoreCancel;
+  Future<void> _cookieOp = Future<void>.value();
+  bool _prunedCf = false;
 
   static UserInfo? _tryParseUser(String? html) {
     if (html == null) return null;
@@ -368,6 +465,7 @@ class SessionController extends Notifier<SessionState> {
 
   @override
   SessionState build() {
+    ref.onDispose(() => _restoreCancel?.cancel('disposed'));
     Future.microtask(restore);
     // 换节点后重新确认：两个站点的验证状态不一样，顶部"被拦住 / 离线"提示要跟着变（静默重连不闪回启动页）
     ref.listen(nodeProvider, (_, _) => restore(silent: true));
@@ -392,15 +490,37 @@ class SessionController extends Notifier<SessionState> {
 
   static const _nodeHosts = [Wenku8Node.wwwWenku8Net, Wenku8Node.wwwWenku8Cc];
 
+  /// 对所有写入/清理 cookie jar 的操作互斥串行，防止并发覆盖或空窗。
+  Future<T> _serializeCookies<T>(Future<T> Function() fn) {
+    final prev = _cookieOp;
+    final next = prev.then((_) => fn());
+    _cookieOp = next.then<void>((_) {}, onError: (_) {});
+    return next;
+  }
+
+  /// 业务请求遇到 Cloudflare 拦截时同步点亮顶部验证提示（即便页面回落到了旧缓存）。
+  void markNeedsVerify() {
+    final s = state;
+    if (s is SessionLoggedIn) {
+      if (!s.needsVerify) state = SessionLoggedIn(s.user, offline: s.offline, needsVerify: true);
+    } else if (s is SessionLoggedOut) {
+      if (!s.needsVerify) state = SessionLoggedOut(message: s.message, needsVerify: true);
+    }
+  }
+
   /// 把保存的登录 cookie 和各站点的 Cloudflare cookie 放进请求用的 cookie jar。
-  Future<void> _restoreCookies() async {
+  Future<void> _restoreCookies() => _serializeCookies(() async {
     if (isWebPreview) return;
+    if (!_prunedCf) {
+      _prunedCf = true;
+      await _store.pruneExpiredCfCookies();
+    }
     final login = _store.cookie;
     for (final n in _nodeHosts) {
       final parts = [?login, ?_store.cfCookie(n.node)];
       if (parts.isNotEmpty) await _client.restoreCookie(parts.join(';'), [n.node]);
     }
-  }
+  });
 
   /// 把 cookie jar 里的最新 cookie 写回本地：服务端续期过的 cookie 重启后才不会丢。
   Future<void> persistCookies() async {
@@ -417,17 +537,19 @@ class SessionController extends Notifier<SessionState> {
     }
   }
 
-  /// 启动时：有保存的登录信息就向网站确认一次（最多等 15 秒）。失效则清除；网络出错、超时、被拦截都按"离线"处理，保留 cookie。
+  /// 启动时：有保存的登录信息就向网站确认一次（最多等 [timeout]，用 CancelToken 真正中断在途请求）。
+  /// 失效则清除；网络出错、超时、被拦截都按"离线"处理，保留 cookie。
   /// 有上次保存的账号信息就先当已登录，直接进主界面，确认在后台做，不在启动页干等。
-  Future<String?> restore({bool silent = false}) async {
+  Future<String?> restore({bool silent = false, Duration timeout = const Duration(seconds: 15)}) async {
     final epoch = ++_restoreEpoch;
+    _restoreCancel?.cancel('superseded');
     try {
       await _restoreCookies();
     } finally {
       // 出错也要放行：等着它的书架同步、小组件跳转不能一直卡住
       if (!_cookiesReady.isCompleted) _cookiesReady.complete();
     }
-    if (epoch != _restoreEpoch) return null;
+    if (!ref.mounted || epoch != _restoreEpoch) return null;
     final startup = _startup;
     _startup = false;
     final cookie = _store.cookie;
@@ -439,16 +561,21 @@ class SessionController extends Notifier<SessionState> {
     // 静默重连时也保持在主界面，避免 GoRouter 重定向闪回启动页。
     if (!silent && !(startup && state is SessionLoggedIn)) state = const SessionChecking();
     final swaps = _cookieSwaps;
+    final cancel = _restoreCancel = CancelToken();
+    final timer = Timer(timeout, () {
+      if (!cancel.isCancelled) cancel.cancel(_restoreTimeoutReason);
+    });
     try {
-      final user = await _fetchUser().timeout(const Duration(seconds: 15));
-      if (epoch != _restoreEpoch) return null;
+      final user = await _fetchUser(cancelToken: cancel);
+      if (!ref.mounted || epoch != _restoreEpoch) return null;
       state = SessionLoggedIn(user);
       return null;
     } catch (e) {
-      if (epoch != _restoreEpoch) return null;
+      if (!ref.mounted || epoch != _restoreEpoch) return null;
       // 只有确认是要求登录的页面才清登录（见 [_fetchUser]）；途中换过 cookie 时请求可能没带登录 cookie，这个结论不可信
       if (e is Wenku8UnexpectedPageException && swaps == _cookieSwaps) {
         await _clear();
+        if (!ref.mounted || epoch != _restoreEpoch) return null;
         state = const SessionLoggedOut(message: '登录已过期，请重新登录');
         return null;
       }
@@ -457,44 +584,63 @@ class SessionController extends Notifier<SessionState> {
       final verify = isCloudflare(e);
       state = cached == null ? SessionLoggedOut(needsVerify: verify) : SessionLoggedIn(cached, offline: true, needsVerify: verify);
       return _describeError(e);
+    } finally {
+      timer.cancel();
+      if (identical(_restoreCancel, cancel)) _restoreCancel = null;
     }
   }
 
   static String _describeError(Object e) {
     if (e is TimeoutException) return '连接超时（15 秒）';
+    if (e is DioException && e.type == DioExceptionType.cancel && e.error == _restoreTimeoutReason) return '连接超时（15 秒）';
     return friendlyError(e);
   }
 
-  /// 过完 Cloudflare 验证（或登录）后，WebView 里的 cookie 分流：登录 cookie 全站点通用，其余只属于验证过的站点。
-  Future<void> acceptWebCookies(String cookies, {String? userAgent, bool login = true}) async {
-    // 下面要先清空 cookie 再放回去，这段时间里的确认请求可能不带登录 cookie。不能作废确认：这里可能正由确认请求的网页兜底调用
+  String _normalizeOrigin(String? origin) {
+    if (origin != null && origin.isNotEmpty) {
+      final uri = Uri.tryParse(origin);
+      if (uri != null && uri.host.isNotEmpty) return 'https://${uri.host}';
+    }
+    return _store.node.node;
+  }
+
+  /// 过完 Cloudflare 验证（或登录）后，WebView 里的 cookie 分流：登录 cookie 全站点通用，其余按实际请求 [origin] 原位覆盖写入。
+  /// 不再调用 `clearCookie()`，消除并发请求出现无 cookie 空窗的问题；全部 cookie 变更经互斥串行执行。
+  Future<void> acceptWebCookies(String cookies, {String? userAgent, bool login = true, String? origin}) => _serializeCookies(() async {
     ++_cookieSwaps;
     final pairs = cookies.split(';').map((e) => e.trim()).where((e) => e.contains('='));
     final jieqi = pairs.where((e) => e.startsWith('jieqi')).join(';');
     final cf = pairs.where((e) => !e.startsWith('jieqi')).join(';');
-    final host = _store.node.node;
-    if (cf.isNotEmpty) await _store.setCfCookie(host, cf);
-    if (login && jieqi.contains('jieqiUserInfo')) await _store.setCookie(jieqi);
+    final host = _normalizeOrigin(origin);
+    if (cf.isNotEmpty) {
+      await _store.setCfCookie(host, cf);
+      if (!isWebPreview) await _client.restoreCookie(cf, [host]);
+      _client.clearChallengeCooldown(Uri.parse(host).host);
+    }
+    if (login && jieqi.contains('jieqiUserInfo')) {
+      await _store.setCookie(jieqi);
+      if (!isWebPreview) await _client.restoreCookie(jieqi, [for (final n in _nodeHosts) n.node]);
+    }
     if (userAgent != null && userAgent.isNotEmpty && userAgent != _store.userAgent) {
       await _store.setUserAgent(userAgent);
       _client.dio.options.headers['User-Agent'] = userAgent;
-      ref.read(imageDioProvider).options.headers['User-Agent'] = userAgent;
+      // imageDioProvider 通过拦截器动态读取 store.userAgent，不在此提前初始化它
     }
-    await _client.clearCookie();
-    await _restoreCookies();
     ++_cookieSwaps;
-  }
+  });
 
   /// 原生 App：在内嵌网页里登录后拿到的 cookie。
-  Future<void> loginWithCookie(String cookies, {String? userAgent}) async {
-    await acceptWebCookies(cookies, userAgent: userAgent);
+  Future<void> loginWithCookie(String cookies, {String? userAgent, String? origin}) async {
+    await acceptWebCookies(cookies, userAgent: userAgent, origin: origin);
     await _confirm(_store.cookie ?? cookies);
+    await persistCookies();
   }
 
   /// 验证完成后静默确认一次登录状态（不切到 SessionChecking，保留二级页面的导航栈）。
-  Future<void> afterVerify(String cookies, {String? userAgent}) async {
-    await acceptWebCookies(cookies, userAgent: userAgent);
+  Future<void> afterVerify(String cookies, {String? userAgent, String? origin}) async {
+    await acceptWebCookies(cookies, userAgent: userAgent, origin: origin);
     await restore(silent: true);
+    await persistCookies();
   }
 
   /// 网页预览：账号密码登录，由转发程序提交并保存 cookie。
@@ -506,6 +652,7 @@ class SessionController extends Notifier<SessionState> {
 
   Future<void> _confirm(String cookie) async {
     ++_restoreEpoch;
+    _restoreCancel?.cancel('confirm');
     try {
       final user = await _fetchUser();
       await _store.setCookie(cookie);
@@ -518,8 +665,8 @@ class SessionController extends Notifier<SessionState> {
 
   /// 取用户页。不是用户页时：确认是要求登录的页面才抛 [Wenku8UnexpectedPageException]（调用方据此清掉登录），
   /// 其他意外页面（维护页、没认出来的验证页）抛 [_OddUserPage]，按网络问题处理、保留登录。
-  Future<UserInfo> _fetchUser() async {
-    final html = await _client.getPage(_urls.userInfo(), charsetParam: false);
+  Future<UserInfo> _fetchUser({CancelToken? cancelToken}) async {
+    final html = await _client.getPage(_urls.userInfo(), charsetParam: false, cancelToken: cancelToken);
     final UserInfo user;
     try {
       user = Wenku8Parser.userInfo(html);
@@ -535,6 +682,7 @@ class SessionController extends Notifier<SessionState> {
 
   Future<void> logout() async {
     ++_restoreEpoch;
+    _restoreCancel?.cancel('logout');
     final s = state;
     if (isWebPreview) {
       try {
@@ -548,12 +696,18 @@ class SessionController extends Notifier<SessionState> {
     state = const SessionLoggedOut();
   }
 
-  Future<void> _clear() async {
+  /// 注销或登录失效时清理 `jieqi*` 登录 cookie，保留有效 Cloudflare cookie。
+  Future<void> _clear() => _serializeCookies(() async {
     await _store.setCookie(null);
     await _store.setUserHtml(null);
     await _client.clearCookie();
-    await _restoreCookies();
-  }
+    if (!isWebPreview) {
+      for (final n in _nodeHosts) {
+        final cf = _store.cfCookie(n.node);
+        if (cf != null && cf.isNotEmpty) await _client.restoreCookie(cf, [n.node]);
+      }
+    }
+  });
 }
 
 final sessionProvider = NotifierProvider<SessionController, SessionState>(SessionController.new);

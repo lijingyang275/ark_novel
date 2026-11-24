@@ -8,6 +8,7 @@ import '../data/wenku8/wenku8_client.dart';
 import '../data/wenku8/wenku8_exceptions.dart';
 import 'catalog.dart';
 import 'data.dart';
+import 'local_books.dart' show isLocalAid;
 import 'progress.dart';
 import 'session.dart';
 import 'sync.dart';
@@ -98,6 +99,11 @@ typedef RemoteBook = ({String bid, String title, String img, int shelf});
 Map<String, LibBook> reconcile(Map<String, LibBook> local, Map<String, RemoteBook> remote, Map<String, String> ops, {required int now, bool firstImport = false}) {
   final out = <String, LibBook>{};
   for (final stored in local.values) {
+    // 本地导入的书与网站书架完全隔离：对账永远保留，不与网站书架比对。
+    if (isLocalAid(stored.aid)) {
+      out[stored.aid] = stored;
+      continue;
+    }
     // 首次对当前账号：旧账号的 bid 不能用来判断这本书已从网站移出。
     final b = firstImport ? stored.withoutBid() : stored;
     final r = remote[b.aid];
@@ -233,11 +239,12 @@ class LibraryController extends Notifier<LibraryState> {
     _refresh();
     if (state.books.containsKey(aid)) return;
     final now = DateTime.now().millisecondsSinceEpoch;
+    final local = isLocalAid(aid);
     await Future.wait([
       _save({...state.books, aid: LibBook(aid: aid, title: title, img: img, added: now, cats: cats, ts: now)}),
-      _queue(aid, {'op': 'add'}),
+      if (!local) _queue(aid, {'op': 'add'}),
     ]);
-    unawaited(_push());
+    if (!local) unawaited(_push());
   }
 
   Future<void> remove(Iterable<String> aids) async {
@@ -246,16 +253,20 @@ class LibraryController extends Notifier<LibraryState> {
     final removed = <String>[];
     final claiming = _claimOps(_uid);
     final ops = _ops();
+    var hasRemote = false;
     for (final aid in aids) {
       final b = books.remove(aid);
       if (b != null) {
         removed.add('lib:$aid');
-        _enqueue(ops, aid, {'op': 'remove', 'bid': b.bid});
+        if (!isLocalAid(aid)) {
+          hasRemote = true;
+          _enqueue(ops, aid, {'op': 'remove', 'bid': b.bid});
+        }
       }
     }
     // 先在同一轮事件里提交全部改动，再等落盘；等待期间新增的书不能被旧 books 覆盖。
     await Future.wait([claiming, _save(books), _box.put('lib:ops', ops), Sync.tombstone(removed)]);
-    unawaited(_push());
+    if (hasRemote) unawaited(_push());
   }
 
   /// 把同步时被移出的书加回来（见 [LibraryStore.removedElsewhere]），分类和自己起的名字照旧。
@@ -265,14 +276,15 @@ class LibraryController extends Notifier<LibraryState> {
     final cats = {for (final c in state.cats) c.id};
     final back = [for (final b in books) if (!state.books.containsKey(b.aid)) restoredBook(b, cats, now)];
     if (back.isEmpty) return;
+    final remoteBack = [for (final b in back) if (!isLocalAid(b.aid)) b];
     // 不走 [_queue]：同步排的「移出」要直接换成「加入」，不能当成本机加了又移、互相抵消（网站上可能早就移出了）
     final claiming = _claimOps(_uid);
     await Future.wait([
       claiming,
       _save({...state.books, for (final b in back) b.aid: b}),
-      _box.put('lib:ops', {..._ops(), for (final b in back) b.aid: {'op': 'add'}}),
+      if (remoteBack.isNotEmpty) _box.put('lib:ops', {..._ops(), for (final b in remoteBack) b.aid: {'op': 'add'}}),
     ]);
-    unawaited(_push());
+    if (remoteBack.isNotEmpty) unawaited(_push());
   }
 
   /// 改显示名称；空的或和原书名一样就恢复原名
@@ -367,6 +379,10 @@ class LibraryController extends Notifier<LibraryState> {
     try {
       for (final MapEntry(key: aid, value: op) in _ops().entries) {
         if (!_sameAccount(uid)) return null;
+        if (isLocalAid(aid)) {
+          done[aid] = op['op'];
+          continue;
+        }
         _flushingAid = aid;
         try {
           if (op['op'] == 'add') {
@@ -407,7 +423,7 @@ class LibraryController extends Notifier<LibraryState> {
 
   /// 和网站书架同步：拉网站全部 6 个书架 → 推本地排队的操作 → 对一遍。没登录、离线时什么都不做。
   /// 距上次不到 30 分钟时跳过（[force] 除外）。返回出错信息，成功或跳过返回 null；[force]（用户下拉）时跳过也说明原因。
-  Future<String?> sync({bool force = false, bool details = true}) async {
+  Future<String?> sync({bool force = false, bool details = true, Duration shelfDelay = const Duration(seconds: 1)}) async {
     final s = ref.read(sessionProvider);
     if (s is! SessionLoggedIn) return null;
     if (s.offline) return force ? '现在是离线模式（没连上网站），点顶部的提示重新连接后再下拉' : null;
@@ -425,7 +441,7 @@ class LibraryController extends Notifier<LibraryState> {
       final api = ref.read(apiProvider);
       final remote = <String, RemoteBook>{};
       for (var shelf = 0; shelf < 6; shelf++) {
-        if (shelf > 0) await Future<void>.delayed(const Duration(seconds: 1)); // 连续读太快，网站会回 429
+        if (shelf > 0 && shelfDelay > Duration.zero) await Future<void>.delayed(shelfDelay); // 连续读太快，网站会回 429
         if (!_sameAccount(s.user.uid)) return null;
         final shelfBooks = (await api.bookshelf(shelf, fresh: true)).list;
         if (!_sameAccount(s.user.uid)) return null;
@@ -490,7 +506,7 @@ class LibraryController extends Notifier<LibraryState> {
     try {
       final api = ref.read(apiProvider);
       for (final b in state.books.values.toList()) {
-        if (api.hasDetail(b.aid)) continue;
+        if (isLocalAid(b.aid) || api.hasDetail(b.aid)) continue;
         final d = await runInBackground(() => api.detail(b.aid));
         pending[b.aid] = (title: d.title, img: d.imgUrl, status: d.status);
         if (pending.length >= 8) await flushPending();

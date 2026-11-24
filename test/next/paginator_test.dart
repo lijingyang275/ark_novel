@@ -68,5 +68,69 @@ void main() {
     expect(a, hasLength(1));
     expect(b, a);
   });
+
+  test('pageOfOffset 二分查找覆盖边界、中间值、空列表与越界偏移', () {
+    expect(pageOfOffset(const [], 0), 0);
+    expect(pageOfOffset(const [0], 0), 0);
+    expect(pageOfOffset(const [0], 100), 0);
+    final starts = [for (var i = 0; i < 500; i++) i * 37];
+    expect(pageOfOffset(starts, -10), 0);
+    expect(pageOfOffset(starts, 0), 0);
+    expect(pageOfOffset(starts, 36), 0);
+    expect(pageOfOffset(starts, 37), 1);
+    expect(pageOfOffset(starts, 38), 1);
+    expect(pageOfOffset(starts, 250 * 37 - 1), 249);
+    expect(pageOfOffset(starts, 250 * 37), 250);
+    expect(pageOfOffset(starts, 499 * 37), 499);
+    expect(pageOfOffset(starts, 999999), 499);
+  });
+
+  test('超长章节（>16000 字）分块分页与单 TextPainter 逐字符偏移完全一致', () {
+    List<int> referencePaginate(String t, TextStyle s, Size sz, {StrutStyle? strut, double firstTop = 0}) {
+      final p = TextPainter(text: TextSpan(text: t, style: s), textDirection: TextDirection.ltr, strutStyle: strut)..layout(maxWidth: sz.width);
+      final starts = <int>[0];
+      var pageTop = -firstTop;
+      for (final line in p.computeLineMetrics()) {
+        final bottom = line.baseline + line.descent;
+        if (bottom - pageTop > sz.height && line.baseline - line.ascent > pageTop) {
+          pageTop = line.baseline - line.ascent;
+          final offset = p.getPositionForOffset(Offset(0, pageTop + line.height / 2)).offset;
+          if (offset > starts.last) starts.add(offset);
+        }
+      }
+      p.dispose();
+      return starts;
+    }
+
+    final strut = readerStrut(style);
+    final head = headingHeight('终章 漫长的旅途', style, 280);
+    // 含单换行、连续空行、中英混排、标点与超过 22000 字的真实长章结构
+    final longText = List.generate(
+      420,
+      (i) => i % 15 == 0
+          ? ''
+          : '　　第$i段：在漫长的夜色里，Hero-0$i 穿过石阶与长廊，回望身后的灯火与远方的山谷，轻声说道「明天一定会抵达终点」。',
+    ).join('\n');
+    expect(longText.length, greaterThan(16000));
+
+    final actual = paginate(longText, style, const Size(280, 420), strut: strut, firstTop: head);
+    final expected = referencePaginate(longText, style, const Size(280, 420), strut: strut, firstTop: head);
+    expect(actual, equals(expected));
+
+    // 不带 strut、末尾带换行的长章同样逐偏移一致
+    final withTrailingNewline = '$longText\n';
+    expect(
+      paginate(withTrailingNewline, style, const Size(240, 360)),
+      equals(referencePaginate(withTrailingNewline, style, const Size(240, 360))),
+    );
+
+    // 极端场景：超长单段（无任何换行符）不吞字、不重叠且与参考实现一致
+    final megaPara = List.filled(2000, '轻小说长段落排版测试').join();
+    expect(megaPara.length, greaterThan(16000));
+    expect(
+      paginate(megaPara, style, const Size(260, 380), strut: strut),
+      equals(referencePaginate(megaPara, style, const Size(260, 380), strut: strut)),
+    );
+  });
 }
 

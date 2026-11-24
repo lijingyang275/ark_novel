@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 
@@ -29,7 +30,7 @@ class PageCurlController {
 ///
 /// 往回翻不卷页：上一页从左边水平滑进来，盖在当前页上（和常见阅读器一致）。
 class PageCurl extends StatefulWidget {
-  const PageCurl({super.key, this.debugT, this.debugDir = 1, this.debugCorner = 1, this.cover = false, this.dual = false, required this.pageCount, this.firstIndex = 0, required this.pageBuilder, required this.initialIndex, required this.background, this.controller, this.onIndexChanged, this.onReachStart, this.onReachEnd});
+  const PageCurl({super.key, this.debugT, this.debugDir = 1, this.debugCorner = 1, this.cover = false, this.dual = false, required this.pageCount, this.firstIndex = 0, required this.pageBuilder, required this.initialIndex, required this.background, this.pageBackground, this.cacheKey, this.cacheInvalidator, this.controller, this.onIndexChanged, this.onReachStart, this.onReachEnd, this.onUserDragStart});
 
   /// 仅用于 tool/curl_demo.dart 目测：把折叠状态固定在进度 [debugT]（方向 [debugDir]，折角在高度的 [debugCorner] 处）
   final double? debugT;
@@ -50,10 +51,20 @@ class PageCurl extends StatefulWidget {
   final Widget Function(BuildContext context, int index, bool live) pageBuilder;
   final int initialIndex;
   final Color background;
+
+  /// 可选自定义页面背景层（纸张纹理 / 自定义背景图）；为 null 时使用纯色 [background]。
+  final Widget? pageBackground;
+
+  /// 翻页动画期间页面缓存的失效签名（字体、主题、正文排版等变化时更新）。
+  final Object? cacheKey;
+
+  /// 翻页动画期间的外部缓存失效通知（如页脚时间/电量每分钟刷新）。
+  final ValueListenable<Object?>? cacheInvalidator;
   final PageCurlController? controller;
   final ValueChanged<int>? onIndexChanged;
   final VoidCallback? onReachStart;
   final VoidCallback? onReachEnd;
+  final VoidCallback? onUserDragStart;
 
   @override
   State<PageCurl> createState() => _PageCurlState();
@@ -72,28 +83,59 @@ class _PageCurlState extends State<PageCurl> with SingleTickerProviderStateMixin
   Curve _curve = Curves.easeOutCubic;
   Size _size = Size.zero;
 
+  // 翻页动画期间（_dir != 0）按 (index, sig) 缓存 RepaintBoundary 子树，避免每帧重复构建 2~3 份完整页面
+  final _animPages = <(int, Object?), Widget>{};
+  Object? _animSig;
+  int _invalidations = 0;
+
   // 拖动状态
   double _startX = 0, _startY = 0, _cornerY = 0, _dy = 0;
   bool _dragging = false;
   bool _edgeFired = false; // 一次拖动里只通知一次"到头了"，否则会连续切好几章
 
-  @override
-  void initState() {
-    super.initState();
-    widget.controller
+  void _bindController(PageCurlController? controller) {
+    controller
       ?.._next = (() => _auto(1))
       .._prev = (() => _auto(-1))
       .._goTo = _jump;
   }
 
+  void _onCacheInvalidate() {
+    _invalidations++;
+    _animPages.clear();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _bindController(widget.controller);
+    widget.cacheInvalidator?.addListener(_onCacheInvalidate);
+  }
+
   @override
   void didUpdateWidget(PageCurl old) {
     super.didUpdateWidget(old);
+    if (widget.controller != old.controller) _bindController(widget.controller);
+    if (widget.cacheInvalidator != old.cacheInvalidator) {
+      old.cacheInvalidator?.removeListener(_onCacheInvalidate);
+      widget.cacheInvalidator?.addListener(_onCacheInvalidate);
+      _onCacheInvalidate();
+    }
+    if (widget.cacheKey != old.cacheKey ||
+        widget.background != old.background ||
+        widget.dual != old.dual ||
+        widget.cover != old.cover ||
+        widget.pageCount != old.pageCount ||
+        widget.firstIndex != old.firstIndex) {
+      _animPages.clear();
+    }
     if (widget.pageCount != old.pageCount || widget.firstIndex != old.firstIndex) _index = _index.clamp(widget.firstIndex, math.max(widget.firstIndex, widget.pageCount - 1));
   }
 
   @override
   void dispose() {
+    widget.cacheInvalidator?.removeListener(_onCacheInvalidate);
+    _animPages.clear();
     _anim.dispose();
     super.dispose();
   }
@@ -110,6 +152,7 @@ class _PageCurlState extends State<PageCurl> with SingleTickerProviderStateMixin
   void _settle() {
     final turned = _dir == 1 ? _t >= 1 : _t <= 0;
     final dir = _dir;
+    _animPages.clear();
     setState(() {
       if (turned) _index += dir;
       _dir = 0;
@@ -161,6 +204,7 @@ class _PageCurlState extends State<PageCurl> with SingleTickerProviderStateMixin
   }
 
   void _onDragStart(DragStartDetails d) {
+    widget.onUserDragStart?.call();
     _finishNow();
     _startX = d.localPosition.dx;
     _startY = d.localPosition.dy;
@@ -219,71 +263,86 @@ class _PageCurlState extends State<PageCurl> with SingleTickerProviderStateMixin
           _cornerY = widget.debugCorner * _size.height;
         }
         final bg = widget.background;
-        Widget page(int i, bool live) => ColoredBox(color: bg, child: SizedBox.expand(child: widget.pageBuilder(context, i, live)));
+        final bgLayer = widget.pageBackground;
+        Widget withBg(Widget child) => bgLayer == null ? ColoredBox(color: bg, child: SizedBox.expand(child: child)) : Stack(fit: StackFit.expand, children: [bgLayer, child]);
+        Widget livePage(int i) => withBg(widget.pageBuilder(context, i, true));
 
         Widget body;
         if (_dir == 0 || widget.pageCount == 0) {
-          body = widget.pageCount == 0 ? ColoredBox(color: bg) : page(_index, true);
-        } else if (!widget.dual && (_dir == -1 || widget.cover)) {
-          // 单页模式下往回翻：上一页从左边滑进来盖住当前页；覆盖模式往后翻：当前页向左滑出，露出下一页
-          final dx = -_size.width * _t;
-          final (below, above) = _dir == -1 ? (_index, _index - 1) : (_index + 1, _index);
-          body = Stack(
-            fit: StackFit.expand,
-            children: [
-              page(below, false),
-              Transform.translate(
-                offset: Offset(dx, 0),
-                child: DecoratedBox(
-                  decoration: BoxDecoration(boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.28), blurRadius: 14)]),
-                  child: page(above, false),
-                ),
-              ),
-            ],
-          );
+          _animPages.clear();
+          body = widget.pageCount == 0 ? (bgLayer ?? ColoredBox(color: bg)) : livePage(_index);
         } else {
-          final turning = _dir == 1 ? _index : _index - 1;
-          final under = _dir == 1 ? _index + 1 : _index;
-          // 宽屏双页：以中轴线（x = width / 2）为书脊翻页；覆盖模式下折线保持竖直，仿真模式下带卷角弧度
-          final fold = _Fold.at(
-            size: _size,
-            t: _t,
-            cornerY: widget.dual && widget.cover ? _size.height / 2 : _cornerY,
-            dy: widget.dual && widget.cover ? 0 : _dy,
-            dual: widget.dual,
+          final sig = Object.hash(widget.cacheKey, bg, _size, widget.dual, widget.cover, _invalidations);
+          if (sig != _animSig) {
+            _animSig = sig;
+            _animPages.clear();
+          }
+          Widget cachedPage(int i) => _animPages.putIfAbsent(
+            (i, sig),
+            () => RepaintBoundary(child: withBg(widget.pageBuilder(context, i, false))),
           );
-          final dark = ThemeData.estimateBrightnessForColor(bg) == Brightness.dark;
-          final spineMirror = Matrix4(-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, _size.width, 0, 0, 1);
-          final shade = widget.dual ? math.sin(math.pi * _t.clamp(0.0, 1.0)) : 1.0;
-          body = Stack(
-            fit: StackFit.expand,
-            children: [
-              page(under, false),
-              if (fold.back.length >= 3) CustomPaint(painter: _UnderShadow(fold, dark)),
-              if (fold.front.length >= 3) ClipPath(clipper: _PolyClipper(fold.front), child: page(turning, false)),
-              if (fold.flap.length >= 3) CustomPaint(painter: _FlapShadow(fold, dark)),
-              if (fold.flap.length >= 3)
-                ClipPath(
-                  clipper: _PolyClipper(fold.flap),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      if (widget.dual) ...[
-                        // 双页模式下，右页背面就是下一屏的左页：先沿中轴线镜像到右半屏，再随折线镜像回左半屏（两次镜像合成刚体旋转平移）
-                        Transform(transform: fold.mirror.multiplied(spineMirror), child: page(under, false)),
-                        if (shade > 0.01)
-                          ColoredBox(color: Colors.black.withValues(alpha: (dark ? 0.16 : 0.08) * shade)),
-                      ] else ...[
-                        Transform(transform: fold.mirror, child: page(turning, false)),
-                        // 纸背：比正面暗一点、透出一点字迹
-                        ColoredBox(color: Color.lerp(bg, dark ? Colors.black : const Color(0xFFEDE6D6), dark ? 0.35 : 0.55)!.withValues(alpha: 0.78)),
-                      ],
-                      CustomPaint(painter: _FlapShade(fold, dark)),
-                    ],
+          if (!widget.dual && (_dir == -1 || widget.cover)) {
+            // 单页模式下往回翻：上一页从左边滑进来盖住当前页；覆盖模式往后翻：当前页向左滑出，露出下一页
+            final dx = -_size.width * _t;
+            final (below, above) = _dir == -1 ? (_index, _index - 1) : (_index + 1, _index);
+            body = Stack(
+              fit: StackFit.expand,
+              children: [
+                cachedPage(below),
+                Transform.translate(
+                  offset: Offset(dx, 0),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.28), blurRadius: 14)]),
+                    child: cachedPage(above),
                   ),
                 ),
-            ],
-          );
+              ],
+            );
+          } else {
+            final turning = _dir == 1 ? _index : _index - 1;
+            final under = _dir == 1 ? _index + 1 : _index;
+            final underPage = cachedPage(under);
+            final turningPage = cachedPage(turning);
+            // 宽屏双页：以中轴线（x = width / 2）为书脊翻页；覆盖模式下折线保持竖直，仿真模式下带卷角弧度
+            final fold = _Fold.at(
+              size: _size,
+              t: _t,
+              cornerY: widget.dual && widget.cover ? _size.height / 2 : _cornerY,
+              dy: widget.dual && widget.cover ? 0 : _dy,
+              dual: widget.dual,
+            );
+            final dark = ThemeData.estimateBrightnessForColor(bg) == Brightness.dark;
+            final spineMirror = Matrix4(-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, _size.width, 0, 0, 1);
+            final shade = widget.dual ? math.sin(math.pi * _t.clamp(0.0, 1.0)) : 1.0;
+            body = Stack(
+              fit: StackFit.expand,
+              children: [
+                underPage,
+                if (fold.back.length >= 3) CustomPaint(painter: _UnderShadow(fold, dark)),
+                if (fold.front.length >= 3) ClipPath(clipper: _PolyClipper(fold.front), child: turningPage),
+                if (fold.flap.length >= 3) CustomPaint(painter: _FlapShadow(fold, dark)),
+                if (fold.flap.length >= 3)
+                  ClipPath(
+                    clipper: _PolyClipper(fold.flap),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        if (widget.dual) ...[
+                          // 双页模式下，右页背面就是下一屏的左页：先沿中轴线镜像到右半屏，再随折线镜像回左半屏（两次镜像合成刚体旋转平移）
+                          Transform(transform: fold.mirror.multiplied(spineMirror), child: underPage),
+                          if (shade > 0.01) ColoredBox(color: Colors.black.withValues(alpha: (dark ? 0.16 : 0.08) * shade)),
+                        ] else ...[
+                          Transform(transform: fold.mirror, child: turningPage),
+                          // 纸背：比正面暗一点、透出一点字迹
+                          ColoredBox(color: Color.lerp(bg, dark ? Colors.black : const Color(0xFFEDE6D6), dark ? 0.35 : 0.55)!.withValues(alpha: 0.78)),
+                        ],
+                        CustomPaint(painter: _FlapShade(fold, dark)),
+                      ],
+                    ),
+                  ),
+              ],
+            );
+          }
         }
         return GestureDetector(
           behavior: HitTestBehavior.translucent,

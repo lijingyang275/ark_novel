@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -12,7 +13,8 @@ import '../cover_color.dart';
 import '../read_state.dart';
 import '../stats.dart';
 import '../theme.dart';
-import '../volumes.dart';
+import '../volume_covers.dart';
+import '../volumes.dart' show Volumes, volumeChangesProvider;
 import '../widgets.dart';
 import 'cover_picker_page.dart';
 import '../text.dart';
@@ -159,36 +161,48 @@ class _ReportPageState extends ConsumerState<ReportPage> {
             style: const TextStyle(color: Colors.white70, fontSize: 15, fontFamilyFallback: kSerifFallback),
           ),
           const SizedBox(height: 26),
+          SizedBox(
+            width: double.infinity,
+            child: _Tile(
+              header: Row(
+                children: [
+                  Transform.flip(flipX: true, child: const Icon(Icons.spa, size: 14, color: _gold)),
+                  const SizedBox(width: 4),
+                  Text(_ratingLabels[rating], style: const TextStyle(color: _gold, fontSize: 14, fontWeight: FontWeight.w700)),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.spa, size: 14, color: _gold),
+                ],
+              ),
+              value: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var i = 1; i <= 5; i++)
+                    Semantics(
+                      button: true,
+                      selected: i <= rating,
+                      label: '$i 星，${_ratingLabels[i]}',
+                      child: MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => rate(i),
+                          child: SizedBox(
+                            width: 44,
+                            height: 44,
+                            child: Center(child: Icon(i <= rating ? Icons.star_rounded : Icons.star_outline_rounded, color: _gold, size: 28)),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
           IntrinsicHeight(
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(
-                  child: _Tile(
-                    header: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: Row(
-                        children: [
-                          Transform.flip(flipX: true, child: const Icon(Icons.spa, size: 14, color: _gold)),
-                          const SizedBox(width: 3),
-                          Text(_ratingLabels[rating], style: const TextStyle(color: _gold, fontSize: 14, fontWeight: FontWeight.w700)),
-                          const SizedBox(width: 3),
-                          const Icon(Icons.spa, size: 14, color: _gold),
-                        ],
-                      ),
-                    ),
-                    value: Row(
-                      children: [
-                        for (var i = 1; i <= 5; i++)
-                          MouseRegion(
-                            cursor: SystemMouseCursors.click,
-                            child: GestureDetector(onTap: () => rate(i), child: Icon(i <= rating ? Icons.star_rounded : Icons.star_outline_rounded, color: _gold, size: 22)),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
                 Expanded(child: _Tile(header: header(Icons.hourglass_bottom, '阅读时间'), value: _amount(_duration(time.seconds)))),
                 const SizedBox(width: 10),
                 Expanded(child: _Tile(header: header(Icons.text_fields, '已读字数'), value: _amount(chars >= 10000 ? [((chars / 10000).toStringAsFixed(1), '万')] : [('$chars', '字')]))),
@@ -216,60 +230,64 @@ class _ReportPageState extends ConsumerState<ReportPage> {
       ),
     );
 
-    return Scaffold(
-      backgroundColor: base,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        foregroundColor: Colors.white,
-        actions: [
-          if (v != null) IconButton(tooltip: hz(context, '换这一卷的封面'), icon: const Icon(Icons.image_outlined), onPressed: () => pickVolumeCover(context, aid, v)),
-          IconButton(tooltip: hz(context, '保存为图片并分享'), icon: const Icon(Icons.ios_share), onPressed: () => _share(info.title)),
-        ],
-      ),
-      extendBodyBehindAppBar: true,
-      body: SingleChildScrollView(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 600),
-            child: RepaintBoundary(
-              key: _shot,
-              child: TweenAnimationBuilder<Color?>(
-                tween: ColorTween(end: base),
-                duration: const Duration(milliseconds: 400),
-                builder: (context, color, child) => Stack(
-                  children: [
-                    Positioned.fill(child: ColoredBox(color: color!)),
-                    // 顶部：放大模糊的封面，往下渐变到背景色
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      height: bookWidth * 4 / 3 + 260,
-                      child: ClipRect(
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            AnimatedSwitcher(
-                              duration: const Duration(milliseconds: 400),
-                              child: ImageFiltered(
-                                key: ValueKey(cover),
-                                imageFilter: ui.ImageFilter.blur(sigmaX: 30, sigmaY: 30),
-                                child: Opacity(opacity: 0.6, child: NetImage(cover)),
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle.light,
+      child: Scaffold(
+        backgroundColor: base,
+        appBar: AppBar(
+          systemOverlayStyle: SystemUiOverlayStyle.light,
+          backgroundColor: Colors.transparent,
+          foregroundColor: Colors.white,
+          actions: [
+            if (v != null) IconButton(tooltip: hz(context, '换这一卷的封面'), icon: const Icon(Icons.image_outlined), onPressed: () => pickVolumeCover(context, aid, v)),
+            IconButton(tooltip: hz(context, '保存为图片并分享'), icon: const Icon(Icons.ios_share), onPressed: () => _share(info.title)),
+          ],
+        ),
+        extendBodyBehindAppBar: true,
+        body: SingleChildScrollView(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 600),
+              child: RepaintBoundary(
+                key: _shot,
+                child: TweenAnimationBuilder<Color?>(
+                  tween: ColorTween(end: base),
+                  duration: const Duration(milliseconds: 400),
+                  builder: (context, color, child) => Stack(
+                    children: [
+                      Positioned.fill(child: ColoredBox(color: color!)),
+                      // 顶部：放大模糊的封面，往下渐变到背景色
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        height: bookWidth * 4 / 3 + 260,
+                        child: ClipRect(
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 400),
+                                child: ImageFiltered(
+                                  key: ValueKey(cover),
+                                  imageFilter: ui.ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+                                  child: Opacity(opacity: 0.6, child: NetImage(cover)),
+                                ),
                               ),
-                            ),
-                            DecoratedBox(
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [color.withValues(alpha: 0.15), color.withValues(alpha: 0.6), color]),
+                              DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [color.withValues(alpha: 0.15), color.withValues(alpha: 0.6), color]),
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                    child!,
-                  ],
+                      child!,
+                    ],
+                  ),
+                  child: content,
                 ),
-                child: content,
               ),
             ),
           ),

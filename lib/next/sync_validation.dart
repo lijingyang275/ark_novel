@@ -68,6 +68,14 @@ const _preferences = <String, Object>{
   'r.prefetchWifi': false,
   'r.prefetchBook': false,
   'r.hant': false,
+  'r.autoScrollSpeed': 60.0,
+  'r.autoTurnSeconds': 8,
+  'r.bgTexture': 0,
+  'r.bgImageOpacity': 0.35,
+  'r.headerLeft': 1,
+  'r.headerRight': 0,
+  'r.footerLeft': 3,
+  'r.footerRight': 4,
   'p.${P.resumeButton}': true,
   'p.${P.unreadBadge}': true,
   'p.${P.cacheBadge}': true,
@@ -90,6 +98,8 @@ const _preferences = <String, Object>{
   'p.${P.pureBlack}': false,
   'p.${P.sceneMotion}': true,
   'p.${P.uiHant}': false,
+  'p.${P.statsDailyGoal}': 0,
+  'p.${P.statsYearlyVolGoal}': 0,
 };
 
 const _ranges = <String, (num, num)>{
@@ -107,8 +117,18 @@ const _ranges = <String, (num, num)>{
   'r.tapZone': (0, 4),
   'r.tapInvert': (0, 3),
   'r.prefetch': (0, 10),
+  'r.autoScrollSpeed': (20, 220),
+  'r.autoTurnSeconds': (3, 30),
+  'r.bgTexture': (0, 3),
+  'r.bgImageOpacity': (0.05, 0.85),
+  'r.headerLeft': (0, 6),
+  'r.headerRight': (0, 6),
+  'r.footerLeft': (0, 6),
+  'r.footerRight': (0, 6),
   'p.${P.coverSr}': (0, 1),
   'p.${P.updInterval}': (0, 168),
+  'p.${P.statsDailyGoal}': (0, 1440),
+  'p.${P.statsYearlyVolGoal}': (0, 9999),
 };
 
 Object? _typed(Object? value, Object? expected) => switch (expected) {

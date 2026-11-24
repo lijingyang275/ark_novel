@@ -321,6 +321,13 @@ class UnlockFullTextRule {
     if (urls.isEmpty) {
       throw const FormatException('fullText.urlTemplates 不能为空');
     }
+    for (final tpl in urls) {
+      final sample = tpl.replaceAll(RegExp(r'\{\{.*?\}\}'), '1');
+      final uri = Uri.tryParse(sample);
+      if (uri == null || !uri.hasScheme || (uri.scheme != 'http' && uri.scheme != 'https') || uri.host.isEmpty) {
+        throw FormatException('fullText.urlTemplates 包含无效地址：$tpl');
+      }
+    }
     final titlePattern = _readString(json['titlePattern']);
     final separatorPattern = _readString(json['separatorPattern']);
     return UnlockFullTextRule(

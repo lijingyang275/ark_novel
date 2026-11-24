@@ -3,7 +3,7 @@ import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:go_router/go_router.dart';
 
 import '../cover_color.dart';
-import '../router.dart';
+import '../routes.dart';
 import '../theme_doodle.dart';
 import '../volumes.dart';
 import '../widgets.dart';

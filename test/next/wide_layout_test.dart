@@ -14,17 +14,27 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive_ce/hive.dart';
 
 /// 桌面窗口的最小、常见、超宽三种尺寸下，不用联网的页面都不能溢出。
 void main() {
   late SessionStore store;
+  late Directory tempDir;
 
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
-    final dir = Directory.systemTemp.createTempSync('ark_wide_test').path;
+    tempDir = Directory.systemTemp.createTempSync('ark_wide_test');
+    final dir = tempDir.path;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'), (_) async => dir);
     store = await SessionStore.open();
     await ChapterCache.open();
+  });
+
+  tearDownAll(() async {
+    try {
+      await Hive.close().timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
   });
 
   const pages = <String, Widget>{

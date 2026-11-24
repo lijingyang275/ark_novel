@@ -11,15 +11,23 @@ import 'package:ark_novel/next/rules.dart';
 import 'package:ark_novel/next/stats.dart';
 import 'package:ark_novel/next/settings.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:ark_novel/next/pages/bookshelf_page.dart' show ShelfOptions, ShelfSort, shelfOptionsProvider;
 import 'package:ark_novel/next/sync.dart';
 import 'package:ark_novel/next/volumes.dart';
 
 void main() {
+  late Directory tmp;
   late Box box;
 
   setUpAll(() async {
-    Hive.init(Directory.systemTemp.createTempSync('ark_sync_test').path);
+    tmp = Directory.systemTemp.createTempSync('ark_sync_test');
+    Hive.init(tmp.path);
     box = await Hive.openBox('session');
+  });
+
+  tearDownAll(() async {
+    await Hive.close();
+    if (tmp.existsSync()) tmp.deleteSync(recursive: true);
   });
 
   setUp(() => box.clear());
@@ -250,12 +258,12 @@ void main() {
     files['other.json'] = jsonEncode(remote(extra: {
       'progress': {'8': ['d', 4, 6000]},
     }));
-    await expectLater(Sync.run(), throwsA(allOf(contains('已合并 1 台'), contains('broken.json'))));
+    await expectLater(Sync.run(), throwsA(isA<SyncException>().having((e) => e.message, 'message', allOf(contains('已合并 1 台'), contains('broken.json')))));
     expect(box.get('progress:8'), ['d', 4, 6000]);
     files.remove('broken.json');
 
     await Sync.save(url: 'http://127.0.0.1:${server.port}/dav/', user: 'me', pass: 'wrong', folder: 'ArkNovel');
-    await expectLater(Sync.run(), throwsA(contains('应用密码')));
+    await expectLater(Sync.run(), throwsA(isA<SyncException>().having((e) => e.statusCode, 'statusCode', 401).having((e) => e.message, 'message', contains('应用密码'))));
     await server.close(force: true);
   });
 
@@ -618,6 +626,30 @@ void main() {
     expect(box.get('progress:5'), isNull);
     expect(box.get('progress:6'), ['b', 1, 5]);
     await server.close(force: true);
+  });
+
+  test('Sync.merge 写入统计后统一递增 ReadingStats.changes，且 refreshAllSyncedProviders 刷新 shelfOptionsProvider 等全部同步项', () async {
+    final before = ReadingStats.changes.value;
+    await AppPrefs.write(P.syncShelfPrefs, true);
+    await Sync.merge(remote(extra: {
+      'shelfPrefs': {
+        'ts': 1000,
+        'shelfOpts': const ShelfOptions(sort: ShelfSort.name, display: 2).toMap(),
+        'p': <String, Object?>{},
+      },
+      'stats': {'day': {'2026-11-22': 120}, 'book': {'1': 120}, 'chapters': 1, 'meta': {}, 'days': {}},
+    }));
+    expect(ReadingStats.changes.value, greaterThan(before));
+
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+    // 先读取旧缓存值（写新 Hive 值模拟另一轮合并），再调统一刷新入口验证 shelfOptionsProvider 同步更新
+    expect(c.read(shelfOptionsProvider).sort, ShelfSort.name);
+    await box.put('shelfOpts', const ShelfOptions(sort: ShelfSort.lastRead, display: 0).toMap());
+    expect(c.read(shelfOptionsProvider).sort, ShelfSort.name); // invalidate 前仍为旧状态
+    refreshAllSyncedProviders(c);
+    expect(c.read(shelfOptionsProvider).sort, ShelfSort.lastRead);
+    expect(c.read(shelfOptionsProvider).display, 0);
   });
 }
 

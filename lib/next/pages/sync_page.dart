@@ -100,7 +100,9 @@ class _SyncPageState extends ConsumerState<SyncPage> {
     final status = ref.watch(syncProvider);
     ref.watch(appPrefsProvider);
     final prefs = ref.read(appPrefsProvider.notifier);
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final cardRadius = (theme.cardTheme.shape as RoundedRectangleBorder?)?.borderRadius ?? BorderRadius.circular(16);
     final last = Sync.lastSync;
     final busy = _busy || status.busy || !_passLoaded;
     final lastText = last > 0 ? '上次同步：${'${DateTime.fromMillisecondsSinceEpoch(last)}'.split('.').first.substring(0, 16)}' : '尚未同步';
@@ -109,7 +111,7 @@ class _SyncPageState extends ConsumerState<SyncPage> {
     final card = Container(
       margin: const EdgeInsets.fromLTRB(16, 4, 16, 8),
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(color: scheme.surfaceContainer, borderRadius: BorderRadius.circular(14)),
+      decoration: BoxDecoration(color: scheme.surfaceContainer, borderRadius: cardRadius),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -197,7 +199,7 @@ class _SyncPageState extends ConsumerState<SyncPage> {
                             await _save();
                             await ref.read(syncProvider.notifier).run();
                           },
-                    child: status.busy ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('立即同步'),
+                    child: status.busy ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: scheme.onPrimary)) : const Text('立即同步'),
                   ),
                 ),
               ],

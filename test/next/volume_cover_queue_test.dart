@@ -7,6 +7,7 @@ import 'package:ark_novel/next/bangumi.dart';
 import 'package:ark_novel/next/cache.dart';
 import 'package:ark_novel/next/data.dart';
 import 'package:ark_novel/next/image_cache.dart';
+import 'package:ark_novel/next/volume_covers.dart';
 import 'package:ark_novel/next/volumes.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';

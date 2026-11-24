@@ -10,10 +10,18 @@ import 'package:ark_novel/next/read_state.dart';
 import 'package:ark_novel/next/swipe.dart';
 
 void main() {
+  late Directory dir;
+
   setUpAll(() async {
-    Hive.init(Directory.systemTemp.createTempSync('ark_swipe_test').path);
+    dir = Directory.systemTemp.createTempSync('ark_swipe_test');
+    Hive.init(dir.path);
     await Hive.openBox('session');
     await ChapterCache.open();
+  });
+
+  tearDownAll(() async {
+    // testWidgets 内触发的 Hive 写入落在 fake-async zone，Hive.close() 可能阻塞；直接清理临时目录即可
+    if (dir.existsSync()) dir.deleteSync(recursive: true);
   });
 
   Widget row(String cid) => ProviderScope(

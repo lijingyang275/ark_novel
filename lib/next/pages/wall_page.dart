@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart' hide Text;
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../cover_color.dart';
-import '../router.dart';
+import '../routes.dart';
 import '../stats.dart';
-import '../volumes.dart';
+import '../volume_covers.dart';
+import '../volumes.dart' show Vol, Volumes, volumeChangesProvider;
 import '../widgets.dart';
 import '../text.dart';
 
@@ -19,8 +20,10 @@ class WallPage extends ConsumerWidget {
     final theme = Theme.of(context);
     final all = Volumes.allDone();
     final years = <int, List<(String, int, Vol, int)>>{};
+    final infos = <String, ({String title, String author, String img})>{};
     for (final e in all) {
       years.putIfAbsent(DateTime.fromMillisecondsSinceEpoch(e.$4).year, () => []).add(e);
+      infos.putIfAbsent(e.$1, () => ReadingStats.info(e.$1));
     }
 
     return Scaffold(
@@ -29,17 +32,23 @@ class WallPage extends ConsumerWidget {
           ? const StatePanel(title: '还没有读完的卷', detail: '一卷的正文章节全部读完后会出现在这里。也可以在书籍详情页的目录里，点卷名旁边的圆圈标记读完。')
           : contentWidth(
               CustomScrollView(
+                scrollCacheExtent: const ScrollCacheExtent.viewport(0.8),
                 slivers: [
                   for (final MapEntry(key: year, value: list) in years.entries) ...[
                     SliverToBoxAdapter(child: _YearHeader(year: year, list: list)),
                     SliverPadding(
                       padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
                       sliver: SliverLayoutBuilder(
-                        builder: (context, c) => SliverGrid.builder(
-                          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: (c.crossAxisExtent / 180).floor().clamp(2, 5), mainAxisSpacing: 12, crossAxisSpacing: 12, childAspectRatio: 0.66),
-                          itemCount: list.length,
-                          itemBuilder: (context, i) => _VolumeTile(entry: list[i]),
-                        ),
+                        builder: (context, c) {
+                          final cols = (c.crossAxisExtent / 180).floor().clamp(2, 5);
+                          final tileW = (c.crossAxisExtent - 12 * (cols - 1)) / cols;
+                          final tileSize = Size(tileW, tileW / 0.66);
+                          return SliverGrid.builder(
+                            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 12, crossAxisSpacing: 12, childAspectRatio: 0.66),
+                            itemCount: list.length,
+                            itemBuilder: (context, i) => _VolumeTile(entry: list[i], info: infos[list[i].$1]!, decodeSize: tileSize),
+                          );
+                        },
                       ),
                     ),
                   ],
@@ -93,28 +102,35 @@ class _YearHeader extends StatelessWidget {
                   ),
                   const SizedBox(width: 20),
                   Expanded(
-                    child: SizedBox(
-                      height: 64,
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          for (var m = 0; m < 12; m++)
-                            Expanded(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        for (var m = 0; m < 12; m++)
+                          Expanded(
+                            child: Semantics(
+                              label: '${m + 1}月读完 ${perMonth[m]} 卷',
                               child: Column(
+                                mainAxisSize: MainAxisSize.min,
                                 mainAxisAlignment: MainAxisAlignment.end,
                                 children: [
-                                  Container(
-                                    margin: const EdgeInsets.symmetric(horizontal: 2),
-                                    height: 44 * perMonth[m] / most + 2,
-                                    decoration: BoxDecoration(color: perMonth[m] == 0 ? theme.colorScheme.outlineVariant : theme.colorScheme.primary, borderRadius: BorderRadius.circular(2)),
+                                  SizedBox(
+                                    height: 46,
+                                    child: Align(
+                                      alignment: Alignment.bottomCenter,
+                                      child: Container(
+                                        margin: const EdgeInsets.symmetric(horizontal: 2),
+                                        height: 44 * perMonth[m] / most + 2,
+                                        decoration: BoxDecoration(color: perMonth[m] == 0 ? theme.colorScheme.outlineVariant : theme.colorScheme.primary, borderRadius: BorderRadius.circular(2)),
+                                      ),
+                                    ),
                                   ),
                                   const SizedBox(height: 4),
-                                  Text('${m + 1}', style: theme.textTheme.labelSmall?.copyWith(fontSize: 9, color: theme.colorScheme.onSurfaceVariant)),
+                                  Text('${m + 1}', maxLines: 1, softWrap: false, style: theme.textTheme.labelSmall?.copyWith(fontSize: 9, color: theme.colorScheme.onSurfaceVariant)),
                                 ],
                               ),
                             ),
-                        ],
-                      ),
+                          ),
+                      ],
                     ),
                   ),
                 ],
@@ -129,16 +145,16 @@ class _YearHeader extends StatelessWidget {
 
 /// 一卷：卷封面，底部渐变上压卷名、书名、读完日期和星级。
 class _VolumeTile extends ConsumerWidget {
-  const _VolumeTile({required this.entry});
+  const _VolumeTile({required this.entry, required this.info, required this.decodeSize});
 
   final (String, int, Vol, int) entry;
+  final ({String title, String author, String img}) info;
+  final Size decodeSize;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final (aid, index, v, at) = entry;
-    final info = ReadingStats.info(aid);
     final cover = ref.read(volumeCoverQueueProvider).volCover(aid, v, info.img);
-    ref.watch(coverColorProvider(cover)); // 顺手把背景色算好存下，点进报告时直接用
     final stars = Volumes.rating(aid, v.title);
     final d = DateTime.fromMillisecondsSinceEpoch(at);
     return InkWell(
@@ -147,7 +163,7 @@ class _VolumeTile extends ConsumerWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          CoverImage(cover),
+          CoverImage(cover, thumbnail: true, decodeSize: decodeSize),
           DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(10),

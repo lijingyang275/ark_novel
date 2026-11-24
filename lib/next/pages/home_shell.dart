@@ -16,15 +16,16 @@ import '../image_cache.dart';
 import '../incognito.dart';
 import '../library.dart';
 import '../reading_widget.dart';
-import '../pages/bookshelf_page.dart' show shelfSearching, shelfSelecting;
-import '../router.dart';
+import '../routes.dart';
 import '../session.dart';
 import '../settings.dart';
+import '../shelf_tabs.dart' show shelfSearching, shelfSelecting;
 import '../sync.dart';
 import '../theme.dart';
 import '../theme_art.dart';
 import '../updates.dart';
-import '../volumes.dart';
+import '../volume_covers.dart';
+import '../volumes.dart' show Volumes;
 import '../text.dart';
 
 /// 主界面框架：窄屏底部导航，宽屏（平板、电脑、网页）左侧导航。
@@ -40,6 +41,7 @@ class HomeShell extends ConsumerStatefulWidget {
 class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserver {
   Timer? _timer;
   DateTime _lastBack = DateTime(0);
+  bool _reconnecting = false;
 
   // 桌面小组件：阅读历史、更新变了过一会儿写一次；冷启动时的点击只处理一次（换账号重建主界面时别再跳）
   Timer? _widgetTimer;
@@ -94,6 +96,12 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     WidgetsBinding.instance.addPostFrameCallback((_) => _onRemovedElsewhere()); // 主界面重建前就记下的
     Future.microtask(_syncAndCheck);
     Sync.auto();
+    // 空闲时提前加载 imgsr 目录索引，避免首次加载超分封面在热路径扫盘
+    if (!isWebPreview && ImageStore.srSupported) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) ref.read(imageStoreProvider).warmSrIndex().ignore();
+      });
+    }
     // 清缓存、压图这些不急的活等主界面稳定了再做，不和第一屏抢 CPU 和磁盘
     _maintenance = Timer(const Duration(seconds: 6), _tidy);
     _timer = Timer.periodic(const Duration(hours: 1), (_) {
@@ -237,13 +245,14 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       final wasOffline = prev is! SessionLoggedIn || prev.offline;
       if (wasOffline && next is SessionLoggedIn && !next.offline) _syncAndCheck();
     });
-    ref.watch(updateProvider);
     final session = ref.watch(sessionProvider);
     final needsVerify = (session is SessionLoggedIn && session.needsVerify) || (session is SessionLoggedOut && session.needsVerify);
     final offline = (session is SessionLoggedIn && session.offline) || needsVerify;
     final unread = UpdateStore.unread();
     final palette = appPalettes[ref.watch(paletteProvider)];
     final incognito = ref.watch(incognitoProvider);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     Widget icon(int i, bool selected) {
       final (outlined, filled, label, artIndex) = _items[i];
       final art = ThemeArt.navIcon(palette, artIndex, selected: selected) ?? Icon(selected ? filled : outlined);
@@ -254,33 +263,62 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       children: [
         if (offline)
           Material(
-            color: Theme.of(context).colorScheme.surfaceContainer,
+            color: scheme.surfaceContainer,
             child: InkWell(
               onTap: needsVerify
-                  ? () => context.push(Routes.verify)
-                  : () async {
-                      final reason = await ref.read(sessionProvider.notifier).restore(silent: true);
-                      if (!mounted || reason == null) return;
-                      final onNet = ref.read(nodeProvider) == Wenku8Node.wwwWenku8Net;
-                      final messenger = ScaffoldMessenger.of(this.context)..hideCurrentSnackBar();
-                      messenger.showSnackBar(
-                        SnackBar(
-                          content: Text(onNet ? '$reason（wenku8.net 可能被本地 DNS 拦截，可切到 wenku8.cc）' : reason),
-                          action: onNet
-                              ? SnackBarAction(label: '切到 wenku8.cc', onPressed: () => ref.read(nodeProvider.notifier).set(Wenku8Node.wwwWenku8Cc))
-                              : null,
-                        ),
-                      );
-                    },
+                  ? () async {
+                      final ok = await context.push<bool>(Routes.verify);
+                      if (ok == true && mounted) _syncAndCheck();
+                    }
+                  : (_reconnecting
+                        ? null
+                        : () async {
+                            setState(() => _reconnecting = true);
+                            try {
+                              final reason = await ref.read(sessionProvider.notifier).restore(silent: true);
+                              if (!mounted || reason == null) return;
+                              final onNet = ref.read(nodeProvider) == Wenku8Node.wwwWenku8Net;
+                              final messenger = ScaffoldMessenger.of(this.context)..hideCurrentSnackBar();
+                              messenger.showSnackBar(
+                                SnackBar(
+                                  content: Text(onNet ? '$reason（wenku8.net 可能被本地 DNS 拦截，可切到 wenku8.cc）' : reason),
+                                  action: onNet
+                                      ? SnackBarAction(label: '切到 wenku8.cc', onPressed: () => ref.read(nodeProvider.notifier).set(Wenku8Node.wwwWenku8Cc))
+                                      : null,
+                                ),
+                              );
+                            } finally {
+                              if (mounted) setState(() => _reconnecting = false);
+                            }
+                          }),
               child: SafeArea(
                 bottom: false,
-                child: Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6), child: Row(children: [const Icon(Icons.cloud_off_outlined, size: 16), const SizedBox(width: 8), Expanded(child: Text(needsVerify ? '被网站的验证拦住了，点这里去验证' : '离线模式，显示的是已保存的内容，点这里重新连接', style: const TextStyle(fontSize: 12)))])),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  child: Row(
+                    children: [
+                      if (_reconnecting && !needsVerify)
+                        const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      else
+                        const Icon(Icons.cloud_off_outlined, size: 16),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          needsVerify
+                              ? '被网站的验证拦住了，点这里去验证'
+                              : (_reconnecting ? '正在重新连接…' : '离线模式，显示的是已保存的内容，点这里重新连接'),
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
         if (incognito)
           Material(
-            color: Theme.of(context).colorScheme.tertiaryContainer,
+            color: scheme.tertiaryContainer,
             child: InkWell(
               onTap: () => ref.read(incognitoProvider.notifier).set(false),
               child: SafeArea(
@@ -288,7 +326,18 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
                 top: !offline,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                  child: Row(children: [const Icon(Icons.visibility_off_outlined, size: 16), const SizedBox(width: 8), const Expanded(child: Text('无痕模式：不记录阅读进度和历史，点这里关闭', style: TextStyle(fontSize: 12)))]),
+                  child: Row(
+                    children: [
+                      Icon(Icons.visibility_off_outlined, size: 16, color: scheme.onTertiaryContainer),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '无痕模式：不记录阅读进度和历史，点这里关闭',
+                          style: TextStyle(fontSize: 12, color: scheme.onTertiaryContainer),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -328,6 +377,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       ),
     );
     if (wide) {
+      final navTheme = theme.navigationBarTheme;
       return back(Scaffold(
         body: Row(
           children: [
@@ -336,8 +386,10 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
               onDestinationSelected: _go,
               groupAlignment: 0.0,
               labelType: NavigationRailLabelType.all,
-              backgroundColor: Theme.of(context).colorScheme.surface,
-              indicatorColor: Theme.of(context).colorScheme.primary.withValues(alpha: 0.14),
+              leading: mac ? const SizedBox(height: 28) : null,
+              backgroundColor: navTheme.backgroundColor ?? scheme.surfaceContainerLow,
+              indicatorColor: navTheme.indicatorColor ?? (palette.scene ? scheme.secondary.withValues(alpha: 0.26) : scheme.primary.withValues(alpha: 0.14)),
+              indicatorShape: navTheme.indicatorShape ?? (palette.scene ? RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)) : null),
               destinations: [
                 for (final (i, item) in _items.indexed) NavigationRailDestination(icon: icon(i, false), selectedIcon: icon(i, true), label: Text(item.$3)),
               ],

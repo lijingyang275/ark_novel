@@ -8,6 +8,7 @@ import 'package:ark_novel/data/wenku8/wenku8_client.dart';
 import 'package:ark_novel/data/wenku8/wenku8_exceptions.dart';
 import 'package:ark_novel/data/wenku8/wenku8_urls.dart';
 import 'package:ark_novel/models/common/charset_type.dart';
+import 'package:ark_novel/models/custom_exception.dart';
 import 'package:ark_novel/next/cache.dart';
 import 'package:ark_novel/next/data.dart';
 import 'package:hive_ce/hive.dart';
@@ -29,18 +30,25 @@ class _Seq implements HttpClientAdapter {
 String fixture(String name) => File('test/data/wenku8/fixtures/$name').readAsStringSync();
 
 void main() {
+  late Directory tempDir;
   late _Seq adapter;
   late Api api;
 
   setUpAll(() async {
-    Hive.init(Directory.systemTemp.createTempSync('ark_test').path);
+    tempDir = Directory.systemTemp.createTempSync('ark_test');
+    Hive.init(tempDir.path);
     await ChapterCache.open();
+  });
+
+  tearDownAll(() async {
+    await Hive.close();
+    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
   });
 
   setUp(() {
     adapter = _Seq();
     const base = 'https://www.wenku8.net';
-    final client = Wenku8Client(baseUrl: () => base, charset: () => CharsetType.gbk, headers: const {}, dio: Dio()..httpClientAdapter = adapter);
+    final client = Wenku8Client(baseUrl: () => base, charset: () => CharsetType.gbk, headers: const {}, dio: Dio()..httpClientAdapter = adapter, rateLimitPause: Duration.zero);
     api = Api(client, Wenku8Urls(base, CharsetType.gbk), base, 'guest');
   });
 
@@ -99,5 +107,59 @@ void main() {
     final res = await api.search('不存在的书名xyz', byAuthor: false, page: 1);
     expect(res.items, isEmpty);
     expect(res.maxPage, 0);
+  });
+
+  test('_cached 遇 Cloudflare 异常即使回落旧缓存也会触发 onCloudflare 通知', () async {
+    var cfNotified = 0;
+    const base = 'https://www.wenku8.net';
+    final client = Wenku8Client(baseUrl: () => base, charset: () => CharsetType.gbk, headers: const {}, dio: Dio()..httpClientAdapter = adapter, rateLimitPause: Duration.zero);
+    final trackedApi = Api(client, Wenku8Urls(base, CharsetType.gbk), base, 'guest', onCloudflare: () => cfNotified++);
+
+    adapter.responses.addAll([(200, fixture('catalogue.html')), (403, '<html>blocked by cf</html>')]);
+    final first = await trackedApi.catalogue('2001');
+    final second = await trackedApi.catalogue('2001');
+    expect(second.map((v) => v.title), first.map((v) => v.title));
+    expect(cfNotified, 1);
+  });
+
+  test('search() 遇 CF 异常与 429 不做二次 5.2s 自动重试，异常搜索页记录 lastFailedHtml', () async {
+    var cfNotified = 0;
+    const base = 'https://www.wenku8.net';
+    final client = Wenku8Client(baseUrl: () => base, charset: () => CharsetType.gbk, headers: const {}, dio: Dio()..httpClientAdapter = adapter, rateLimitPause: Duration.zero);
+    final trackedApi = Api(client, Wenku8Urls(base, CharsetType.gbk), base, 'guest', onCloudflare: () => cfNotified++);
+
+    // 403 CF：立即上抛，不消耗第二条响应也不等 5.2s
+    adapter.responses.addAll([(403, 'cf'), (200, '<html><body><div id="content"></div></body></html>')]);
+    final sw = Stopwatch()..start();
+    await expectLater(trackedApi.search('cf_test', byAuthor: false, page: 1), throwsA(isA<Cloudflare403Exception>()));
+    sw.stop();
+    expect(sw.elapsed, lessThan(const Duration(seconds: 2)));
+    expect(adapter.responses.length, 1);
+    expect(cfNotified, 1);
+
+    // 429：Wenku8Client 内试 3 次后立即上抛，search 不再等 5.2s 重跑
+    adapter.responses.clear();
+    adapter.responses.addAll([(429, 'rate'), (429, 'rate'), (429, 'rate'), (200, 'should_not_be_called')]);
+    final api2 = Api(
+      Wenku8Client(baseUrl: () => base, charset: () => CharsetType.gbk, headers: const {}, dio: Dio()..httpClientAdapter = adapter, rateLimitPause: Duration.zero),
+      Wenku8Urls(base, CharsetType.gbk),
+      base,
+      'guest',
+    );
+    await expectLater(api2.search('rate_test', byAuthor: false, page: 1), throwsA(isA<Wenku8HttpException>()));
+    expect(adapter.responses.length, 1);
+
+    // 异常搜索页：同步写入实例 lastFailedSearchHtml 与兼容顶层 lastFailedHtml
+    adapter.responses.clear();
+    adapter.responses.add((200, '<html><title>Weird</title><body>unexpected</body></html>'));
+    final api3 = Api(
+      Wenku8Client(baseUrl: () => base, charset: () => CharsetType.gbk, headers: const {}, dio: Dio()..httpClientAdapter = adapter, rateLimitPause: Duration.zero),
+      Wenku8Urls(base, CharsetType.gbk),
+      base,
+      'guest',
+    );
+    await expectLater(api3.search('weird', byAuthor: false, page: 1), throwsA(isA<Wenku8UnexpectedPageException>()));
+    expect(api3.lastFailedSearchHtml, contains('Weird'));
+    expect(lastFailedHtml, contains('Weird'));
   });
 }

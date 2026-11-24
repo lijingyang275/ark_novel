@@ -401,7 +401,7 @@ class _NavPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_NavPainter old) => old.on != on || old.accent != accent || old.idle != idle || old.i != i;
+  bool shouldRepaint(_NavPainter old) => old.on != on || old.accent != accent || old.gold != gold || old.idle != idle || old.bg != bg || old.i != i;
 }
 
 /// 封面角上挂的燕尾小旗，代替圆形数字角标

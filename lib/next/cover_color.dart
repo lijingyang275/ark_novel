@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -37,33 +38,73 @@ Uint8List cropRgba(Uint8List rgba, int w, int h, Rect crop) {
 /// 封面颜色还没算出来时的背景
 const kNeutralCoverColor = Color(0xFF3A3A3E);
 
+// 刚算出来还没落盘的封面色：防抖后一次性批量写入 Hive，避免滚动书籍墙每算完 1 张就整表写盘 400 条。
+final _pendingCoverColors = <String, int>{};
+Timer? _coverColorFlushTimer;
+const _coverColorFlushDelay = Duration(milliseconds: 500);
+const _coverColorFlushBatch = 20;
+
+/// 立即把待落盘的封面背景色批量写入本地库。
+Future<void> flushCoverColors() async {
+  _coverColorFlushTimer?.cancel();
+  _coverColorFlushTimer = null;
+  if (_pendingCoverColors.isEmpty || !Hive.isBoxOpen('session')) return;
+  final batch = Map<String, int>.from(_pendingCoverColors);
+  _pendingCoverColors.clear();
+  final box = Hive.box('session');
+  final prev = Map<String, Object?>.from((box.get('ccolor') as Map?) ?? const {});
+  for (final e in batch.entries) {
+    prev.remove(e.key);
+    prev[e.key] = e.value;
+  }
+  while (prev.length > 400) {
+    prev.remove(prev.keys.first);
+  }
+  await box.put('ccolor', prev);
+}
+
+void _queueCoverColor(String url, int argb) {
+  _pendingCoverColors.remove(url);
+  _pendingCoverColors[url] = argb;
+  if (_pendingCoverColors.length >= _coverColorFlushBatch) {
+    flushCoverColors().ignore();
+    return;
+  }
+  _coverColorFlushTimer?.cancel();
+  _coverColorFlushTimer = Timer(_coverColorFlushDelay, () => flushCoverColors().ignore());
+}
+
 /// 算过的封面颜色（同步读，没算过为 null）
 Color? savedCoverColor(String url) {
+  final pending = _pendingCoverColors[url];
+  if (pending != null) return Color(pending);
   final v = (Hive.box('session').get('ccolor') as Map?)?[url] as int?;
   return v == null ? null : Color(v);
 }
 
 // autoDispose：书架、报告页没在显示的封面不常驻内存（算过的颜色存在本地，再用时 [savedCoverColor] 直接给）
 final coverColorProvider = FutureProvider.autoDispose.family<Color, String>((ref, url) async {
-  final box = Hive.box('session');
   final saved = savedCoverColor(url);
   if (saved != null) return saved;
   final crop = splitCrop(url).crop;
   final bytes = await ref.read(imageStoreProvider).load(url);
-  final codec = await ui.instantiateImageCodec(bytes, targetWidth: crop == null ? 24 : 64);
-  final image = (await codec.getNextFrame()).image;
-  final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-  final (w, h) = (image.width, image.height);
-  image.dispose();
-  codec.dispose();
-  final rgba = data!.buffer.asUint8List();
-  final color = tintFrom(crop == null ? rgba : cropRgba(rgba, w, h, crop));
-  final prev = Map<String, Object?>.from((box.get('ccolor') as Map?) ?? const {});
-  prev.remove(url);
-  while (prev.length >= 400) {
-    prev.remove(prev.keys.first);
+  ui.Codec? codec;
+  ui.Image? image;
+  final Uint8List rgba;
+  final int w, h;
+  try {
+    codec = await ui.instantiateImageCodec(bytes, targetWidth: crop == null ? 24 : 64);
+    image = (await codec.getNextFrame()).image;
+    final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (data == null) return kNeutralCoverColor;
+    w = image.width;
+    h = image.height;
+    rgba = data.buffer.asUint8List();
+  } finally {
+    image?.dispose();
+    codec?.dispose();
   }
-  prev[url] = color.toARGB32();
-  await box.put('ccolor', prev);
+  final color = tintFrom(crop == null ? rgba : cropRgba(rgba, w, h, crop));
+  _queueCoverColor(url, color.toARGB32());
   return color;
 });

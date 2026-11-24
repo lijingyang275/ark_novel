@@ -205,6 +205,9 @@ class Wenku8Parser {
   /// 首页推荐区块。
   static List<RecommendBlock> recommend(String html) {
     final Document document = parse(html);
+    if (needsLoginDoc(document)) {
+      throw const Wenku8LoginRequiredException('推荐页面需要登录轻小说文库账号后查看');
+    }
     final Element? centers = document.getElementById("centers");
     final List<RecommendBlock> blocks = [];
 
@@ -368,7 +371,9 @@ class Wenku8Parser {
 
   /// 用户详情页。拿到的不是详情页（未登录、会话过期、Cloudflare 等）时抛出 [Wenku8UnexpectedPageException]。
   static UserInfo userInfo(String html) {
-    final Element? tbody = parse(html).getElementById('content')?.querySelector('tbody');
+    final doc = parse(html);
+    if (needsLoginDoc(doc)) throw const Wenku8LoginRequiredException();
+    final Element? tbody = doc.getElementById('content')?.querySelector('tbody');
     if (tbody == null) throw const Wenku8UnexpectedPageException("user info: not a user detail page");
     final List<Element> rows = tbody.querySelectorAll('tr');
 
@@ -377,6 +382,11 @@ class Wenku8Parser {
       final tds = rows[row].querySelectorAll('td');
       if (col >= tds.length) return "";
       return tds[col].text.trim();
+    }
+
+    final uid = cell(0, 1);
+    if (uid.isEmpty || !RegExp(r'^\d+$').hasMatch(uid)) {
+      throw const Wenku8UnexpectedPageException("user info: not a user detail page");
     }
 
     String avatar = "";
@@ -391,7 +401,7 @@ class Wenku8Parser {
 
     return UserInfo(
       avatar: avatar,
-      uid: cell(0, 1),
+      uid: uid,
       username: cell(2, 1),
       userLevel: cell(4, 1),
       email: email,

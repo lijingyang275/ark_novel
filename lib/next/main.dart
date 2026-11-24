@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart' show LicenseEntryWithLineBreaks, LicenseRegistry, debugPrint;
+import 'package:flutter/foundation.dart' show LicenseEntryWithLineBreaks, LicenseRegistry, TargetPlatform, debugPrint, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,8 +17,9 @@ import 'text.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   registerFontLicenses();
-  // 解码好的封面多留一些（默认 100 MB），滑回去不用重新解码
-  PaintingBinding.instance.imageCache.maximumSizeBytes = 200 << 20;
+  // 解码好的封面多留一些，滑回去不用重新解码；移动端 150 MB 避免内存吃紧，桌面保留 200 MB
+  final mobile = !kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS);
+  PaintingBinding.instance.imageCache.maximumSizeBytes = (mobile ? 150 : 200) << 20;
   final SessionStore store;
   try {
     store = await SessionStore.open();

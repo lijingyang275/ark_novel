@@ -1,16 +1,19 @@
 import 'package:battery_plus/battery_plus.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../data/wenku8/wenku8_client.dart';
+import '../data/wenku8/wenku8_exceptions.dart';
 import 'app_prefs.dart';
 import 'data.dart';
 import 'library.dart';
+import 'local_books.dart' show isLocalAid;
 import 'net_state.dart';
 import 'progress.dart';
 import 'read_state.dart';
-import 'session.dart' show friendlyError;
+import 'session.dart' show friendlyError, isCloudflare;
 import 'volumes.dart';
 
 class UpdateEntry {
@@ -41,7 +44,16 @@ class UpdateStore {
 
   static Future<void> markSeen() => _box.put('updates:seen', DateTime.now().millisecondsSinceEpoch);
 
-  static int unread() => feed().where((e) => e.time.millisecondsSinceEpoch > lastSeen).length;
+  static int unread() {
+    final raw = _box.get('updates') as List?;
+    if (raw == null || raw.isEmpty) return 0;
+    final seen = lastSeen;
+    var count = 0;
+    for (final item in raw) {
+      if (item is Map && ((item['time'] as int?) ?? 0) > seen) count++;
+    }
+    return count;
+  }
 
   /// 这本书最近一次发现更新的时间（毫秒），没有为 0。
   static int updatedAt(String aid) => (_box.get('updates:at:$aid') as int?) ?? 0;
@@ -74,17 +86,38 @@ class UpdateStore {
 }
 
 class UpdateProgress {
-  const UpdateProgress({this.done = 0, this.total = 0, this.running = false, this.error});
+  const UpdateProgress({this.done = 0, this.total = 0, this.running = false, this.error, this.errorObject});
 
   final int done;
   final int total;
   final bool running;
   final String? error;
+
+  /// 触发中止或失败的原始异常对象（例如 Cloudflare 异常），便于界面据此给出"去验证"等快捷操作。
+  final Object? errorObject;
 }
 
 class UpdateController extends Notifier<UpdateProgress> {
+  static const _maxConsecutiveErrors = 3;
+
+  CancelToken? _cancelToken;
+  bool _cancelled = false;
+
   @override
-  UpdateProgress build() => const UpdateProgress();
+  UpdateProgress build() {
+    ref.onDispose(() {
+      _cancelled = true;
+      _cancelToken?.cancel('disposed');
+    });
+    return const UpdateProgress();
+  }
+
+  /// 手动取消正在进行的批量更新检查，并立即取消在途请求。
+  void cancel() {
+    if (!state.running) return;
+    _cancelled = true;
+    _cancelToken?.cancel('已取消检查更新');
+  }
 
   /// 自动检查是否该跑了：设了"不自动"、没到间隔、不在 Wi-Fi / 没充电（设置里勾了限制时）都不跑。手动检查不受这些限制。
   Future<bool> _autoAllowed() async {
@@ -124,12 +157,25 @@ class UpdateController extends Notifier<UpdateProgress> {
     return !b.cats.any(exclude.contains);
   }
 
+  static bool _shouldAbortImmediately(Object err) => isCloudflare(err) || (err is Wenku8HttpException && err.status == 429);
+
   /// 检查本地书架里的书。第一次只记录当前章节数作为基准，不产生更新。
   /// [force] 为 false 是自动检查（要看间隔和网络限制）；[only] 只检查这几本（检查某个分类）。
+  /// 遇 Cloudflare 拦截或 HTTP 429 立即中止并上抛至错误状态；连续 3 次网络错误自动熔断；支持 [cancel] 手动取消。
   Future<void> refresh({bool force = true, Set<String>? only}) async {
     if (state.running) return;
     if (!force && !await _autoAllowed()) return;
+    if (!ref.mounted) return;
+    if (!kIsWeb && await isOffline()) {
+      if (!ref.mounted) return;
+      if (force) state = const UpdateProgress(error: '当前处于离线状态，无法检查更新');
+      return;
+    }
     final api = ref.read(apiProvider);
+    final cancelToken = _cancelToken = CancelToken();
+    _cancelled = false;
+    var done = 0;
+    var total = 0;
     state = const UpdateProgress(running: true);
     try {
       final all = ref.read(libraryProvider).books.values.toList();
@@ -137,32 +183,29 @@ class UpdateController extends Notifier<UpdateProgress> {
       final firstRun = UpdateStore.lastCheck == 0; // 第一次要查全部的书，中途关掉下次接着查
       final books = {
         for (final b in all)
-          if ((only == null ? _catOk(b) && !(firstRun && known.containsKey(b.aid)) : only.contains(b.aid)) && _wanted(b, known)) b.aid: (title: b.title, img: b.img),
+          if (!isLocalAid(b.aid) && (only == null ? _catOk(b) && !(firstRun && known.containsKey(b.aid)) : only.contains(b.aid)) && _wanted(b, known)) b.aid: (title: b.title, img: b.img),
       };
       final feed = UpdateStore.feed().map((e) => {'aid': e.aid, 'title': e.title, 'img': e.img, 'chapter': e.chapter, 'cid': e.cid, 'time': e.time.millisecondsSinceEpoch}).toList();
       final at = <String, int>{};
       final fresh = <Map>[];
-      var done = 0;
       var succeeded = 0;
+      var consecutiveErrors = 0;
+      var circuitBroken = false;
       Object? lastErr;
-      state = UpdateProgress(running: true, total: books.length);
-      // 请求的节奏由 Wenku8Client 统一管，这里每 4 本存一次进度；单本失败不影响其他
+      total = books.length;
+      state = UpdateProgress(running: true, total: total);
+      // 逐本检查（Wenku8Client 节流器本身单通道串行），每 4 本存一次基准进度；遇 CF/429 立即中止，连续 3 次网络错误自动熔断
       final entries = books.entries.toList();
-      for (var i = 0; i < entries.length; i += 4) {
-        final batch = entries.skip(i).take(4);
-        final results = await Future.wait(batch.map((e) async {
-          try {
-            final cat = await runInBackground(() => api.catalogue(e.key));
-            await Volumes.saveCatalogue(e.key, cat);
-            return cat.expand((v) => v.chapters).toList();
-          } catch (err) {
-            lastErr = err;
-            return null;
-          }
-        }));
-        for (final (j, e) in batch.indexed) {
-          final chapters = results[j];
-          if (chapters == null) continue;
+      for (final e in entries) {
+        if (!ref.mounted) return;
+        if (_cancelled || cancelToken.isCancelled) break;
+        try {
+          final cat = await runInBackground(() => api.catalogue(e.key, fresh: true, cancelToken: cancelToken));
+          if (!ref.mounted) return;
+          await Volumes.saveCatalogue(e.key, cat);
+          if (!ref.mounted) return;
+          final chapters = cat.expand((v) => v.chapters).toList();
+          consecutiveErrors = 0;
           succeeded++;
           final before = known[e.key];
           if (before != null && chapters.length > before) {
@@ -173,21 +216,63 @@ class UpdateController extends Notifier<UpdateProgress> {
             at[e.key] = now;
           }
           known[e.key] = chapters.length;
+        } catch (err) {
+          if (!ref.mounted) return;
+          if (_cancelled || (err is DioException && err.type == DioExceptionType.cancel)) break;
+          if (_shouldAbortImmediately(err)) {
+            if (firstRun && succeeded > 0) {
+              await UpdateStore.saveBaseline(known);
+              if (!ref.mounted) return;
+            }
+            rethrow;
+          }
+          lastErr = err;
+          consecutiveErrors++;
+          if (consecutiveErrors >= _maxConsecutiveErrors) {
+            done++;
+            circuitBroken = true;
+            break;
+          }
         }
-        if (firstRun && succeeded > 0) await UpdateStore.saveBaseline(known);
-        done += batch.length;
-        state = UpdateProgress(running: true, done: done, total: books.length);
+        done++;
+        if (firstRun && succeeded > 0 && (done % 4 == 0 || done == entries.length)) {
+          await UpdateStore.saveBaseline(known);
+          if (!ref.mounted) return;
+        }
+        state = UpdateProgress(running: true, done: done, total: total);
+      }
+
+      if (!ref.mounted) return;
+      if (_cancelled || cancelToken.isCancelled) {
+        if (firstRun && succeeded > 0) {
+          await UpdateStore.saveBaseline(known);
+          if (!ref.mounted) return;
+        }
+        state = UpdateProgress(done: done, total: total);
+        return;
+      }
+      if (circuitBroken) {
+        if (firstRun && succeeded > 0) {
+          await UpdateStore.saveBaseline(known);
+          if (!ref.mounted) return;
+        }
+        state = UpdateProgress(done: done, total: total, error: '连续多次网络错误，已中止检查：${friendlyError(lastErr!)}', errorObject: lastErr);
+        return;
       }
       if (books.isNotEmpty && succeeded == 0 && lastErr != null) {
-        state = UpdateProgress(done: done, total: books.length, error: '检查更新失败：${friendlyError(lastErr!)}');
+        state = UpdateProgress(done: done, total: total, error: '检查更新失败：${friendlyError(lastErr)}', errorObject: lastErr);
         return;
       }
       final inLibrary = all.map((b) => b.aid).toSet();
       known.removeWhere((aid, _) => !inLibrary.contains(aid)); // 被跳过的书留着基准，只去掉已不在书架的
       await UpdateStore.save(known, [...fresh.reversed, ...feed], at: at);
-      state = UpdateProgress(done: done, total: books.length);
+      if (!ref.mounted) return;
+      state = UpdateProgress(done: done, total: total);
     } catch (e) {
-      state = UpdateProgress(error: friendlyError(e));
+      if (!ref.mounted) return;
+      state = UpdateProgress(done: done, total: total, error: friendlyError(e), errorObject: e);
+    } finally {
+      if (identical(_cancelToken, cancelToken)) _cancelToken = null;
     }
   }
 }

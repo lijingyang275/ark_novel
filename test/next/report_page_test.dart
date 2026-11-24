@@ -8,12 +8,21 @@ import 'package:ark_novel/next/cache.dart';
 import 'package:ark_novel/next/pages/report_page.dart';
 
 void main() {
+  late Directory dir;
+
+  setUpAll(() async {
+    dir = Directory.systemTemp.createTempSync('ark_report_test');
+    Hive.init(dir.path);
+    await Hive.openBox('session');
+    await ChapterCache.open();
+  });
+
+  tearDownAll(() async {
+    await Hive.close();
+    if (dir.existsSync()) dir.deleteSync(recursive: true);
+  });
+
   testWidgets('阅读报告能正常排版（之前 stretch 在滚动区域里整页布局失败，只剩背景色）', (tester) async {
-    Hive.init(Directory.systemTemp.createTempSync('ark_report_test').path);
-    await tester.runAsync(() async {
-      await Hive.openBox('session');
-      await ChapterCache.open();
-    });
     await tester.pumpWidget(const ProviderScope(child: MaterialApp(home: ReportPage(aid: '1'))));
     await tester.pump();
     expect(tester.takeException(), isNull);

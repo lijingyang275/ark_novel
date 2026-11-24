@@ -8,7 +8,7 @@ import 'package:path/path.dart' as p;
 
 import '../cache.dart';
 import '../image_cache.dart';
-import '../router.dart';
+import '../routes.dart';
 import '../stats.dart';
 import '../widgets.dart';
 import '../x_list.dart';

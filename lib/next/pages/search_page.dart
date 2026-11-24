@@ -62,23 +62,26 @@ class _SearchPageState extends ConsumerState<SearchPage> {
           controller: _controller,
           autofocus: widget.author == null && !guest,
           textInputAction: TextInputAction.search,
-          onChanged: (_) => setState(() {}),
           decoration: InputDecoration(
             hint: Text(_byAuthor ? '搜索作者' : '搜索书名', maxLines: 1, overflow: TextOverflow.ellipsis),
             border: InputBorder.none,
             enabledBorder: InputBorder.none,
             focusedBorder: InputBorder.none,
             filled: false,
-            suffixIcon: _controller.text.isEmpty
-                ? null
-                : IconButton(
-                    tooltip: hz(context, '清空输入'),
-                    icon: const Icon(Icons.clear, size: 18),
-                    onPressed: () => setState(() {
-                      _controller.clear();
-                      _keyword = null;
-                    }),
-                  ),
+            suffixIconConstraints: const BoxConstraints(minWidth: 0, minHeight: 0),
+            suffixIcon: ValueListenableBuilder<TextEditingValue>(
+              valueListenable: _controller,
+              builder: (context, value, _) => value.text.isEmpty
+                  ? const SizedBox.shrink()
+                  : IconButton(
+                      tooltip: hz(context, '清空输入'),
+                      icon: const Icon(Icons.clear, size: 18),
+                      onPressed: () {
+                        _controller.clear();
+                        if (_keyword != null) setState(() => _keyword = null);
+                      },
+                    ),
+            ),
           ),
           onSubmitted: _search,
         ),

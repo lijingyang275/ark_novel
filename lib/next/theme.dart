@@ -83,6 +83,12 @@ SwitchThemeData appSwitchTheme(ColorScheme s) {
   );
 }
 
+Color _onColor(Color bg, {bool preferDark = false}) {
+  if (ThemeData.estimateBrightnessForColor(bg) == Brightness.light) return Colors.black;
+  if (preferDark && bg.computeLuminance() > 0.25) return Colors.black;
+  return Colors.white;
+}
+
 /// [pureBlack]：深色时底色用纯黑（AMOLED 屏黑色像素不发光），卡片和边框也压到接近黑。
 ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPalette('陶土', AppColors.terracotta, AppColors.terracottaLight, bgLight: AppColors.cream, cardLight: AppColors.creamDeep, lineLight: AppColors.line, bgDark: AppColors.night, cardDark: AppColors.nightRaised, lineDark: AppColors.lineDark), bool pureBlack = false]) {
   final dark = brightness == Brightness.dark;
@@ -91,21 +97,29 @@ ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPa
   final card = black ? const Color(0xFF111111) : palette.card(dark);
   final line = black ? const Color(0xFF262626) : palette.line(dark);
   final raised = dark ? card : Colors.white;
+  final primary = palette.accent(dark);
+  final secondary = palette.secondary ?? (dark ? AppColors.paperSoft : AppColors.inkSoft);
+  final onSurface = dark ? AppColors.paper : AppColors.ink;
+  final highest = Color.lerp(card, line, dark ? 0.65 : 0.55)!;
+  final tertiaryContainer = Color.alphaBlend((palette.secondary ?? primary).withValues(alpha: dark ? 0.22 : 0.16), card);
   final scheme = ColorScheme(
     brightness: brightness,
-    primary: palette.accent(dark),
-    onPrimary: dark && (palette.name == '石墨' || palette.scene) ? Colors.black : Colors.white,
-    secondary: palette.secondary ?? (dark ? AppColors.paperSoft : AppColors.inkSoft),
-    onSecondary: dark ? AppColors.night : AppColors.cream,
-    error: const Color(0xFFB3261E),
-    onError: Colors.white,
+    primary: primary,
+    onPrimary: _onColor(primary, preferDark: dark),
+    secondary: secondary,
+    onSecondary: _onColor(secondary, preferDark: true),
+    tertiaryContainer: tertiaryContainer,
+    onTertiaryContainer: onSurface,
+    error: dark ? const Color(0xFFF2B8B5) : const Color(0xFFB3261E),
+    onError: dark ? const Color(0xFF601410) : Colors.white,
     surface: bg,
-    onSurface: dark ? AppColors.paper : AppColors.ink,
+    onSurface: onSurface,
     onSurfaceVariant: dark ? AppColors.paperSoft : AppColors.inkSoft,
     surfaceContainerLowest: raised,
     surfaceContainerLow: card,
     surfaceContainer: card,
     surfaceContainerHigh: card,
+    surfaceContainerHighest: highest,
     outline: line,
     outlineVariant: line,
   );
@@ -141,14 +155,14 @@ ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPa
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
-        minimumSize: const Size.fromHeight(48),
+        minimumSize: const Size(64, 48),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(r)),
         textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
       ),
     ),
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(
-        minimumSize: const Size.fromHeight(48),
+        minimumSize: const Size(64, 48),
         foregroundColor: scheme.onSurface,
         side: BorderSide(color: scheme.outline),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(r)),

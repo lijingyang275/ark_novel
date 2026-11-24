@@ -9,10 +9,20 @@ import 'package:ark_novel/next/pages/stats_page.dart';
 import 'package:ark_novel/next/stats.dart';
 
 void main() {
+  late Directory tempDir;
+
   setUpAll(() async {
-    Hive.init(Directory.systemTemp.createTempSync('ark_overflow_test').path);
+    tempDir = Directory.systemTemp.createTempSync('ark_overflow_test');
+    Hive.init(tempDir.path);
     await Hive.openBox('session');
     await ChapterCache.open();
+  });
+
+  tearDownAll(() async {
+    try {
+      await Hive.close().timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
   });
 
   testWidgets('阅读时长柱状图：最高的那根柱子不溢出（之前多出 2 像素）', (tester) async {

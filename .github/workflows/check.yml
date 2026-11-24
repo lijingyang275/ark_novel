@@ -112,16 +112,49 @@ jobs:
       - if: matrix.platform == 'macos' && contains(needs.check.outputs.platforms, matrix.platform)
         run: flutter config --no-enable-swift-package-manager
 
+      - name: Cache CocoaPods
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        if: matrix.platform == 'macos' && contains(needs.check.outputs.platforms, matrix.platform)
+        with:
+          path: |
+            macos/Pods
+            ~/.cocoapods
+            ~/Library/Caches/CocoaPods
+          key: ${{ runner.os }}-pods-${{ hashFiles('macos/Podfile.lock', 'pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pods-
+
+      - name: Cache NuGet / WebView2
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        if: matrix.platform == 'windows' && contains(needs.check.outputs.platforms, matrix.platform)
+        with:
+          path: |
+            ~/.nuget/packages
+            ~/AppData/Local/NuGet/v3-cache
+            build/windows/x64/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('pubspec.lock', 'windows/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
       - name: Build
         if: matrix.platform != 'android' && contains(needs.check.outputs.platforms, matrix.platform)
         run: flutter build ${{ matrix.args }} -t lib/next/main.dart
 
-      # Gradle 和 Kotlin 编译器从 GitHub releases 下载，常遇到 504，一失败整个任务就结束；真正的编译错误也会多跑两次才报失败
+      # Gradle 和 Kotlin 编译器从 GitHub releases 下载，常遇到 504/网络抖动；仅命中网络/下载/超时错误时重试，真实编译错误立即失败
       - name: Build (android)
         if: matrix.platform == 'android' && contains(needs.check.outputs.platforms, matrix.platform)
         run: |
+          set -o pipefail
+          log=$(mktemp)
+          trap 'rm -f "$log"' EXIT
+          network_err='timed out|SocketTimeoutException|ConnectTimeoutException|UnknownHostException|SSLException|SSLHandshakeException|Connection reset|Connection refused|Connection closed|Remote host terminated|Premature EOF|Unexpected end of file|Could not resolve host|Temporary failure in name resolution|Could not (GET|HEAD|download)|Failed to download|Error downloading|(status code:? |HTTP )(429|50[0234])|502 Bad Gateway|503 Service Unavailable|504 Gateway|429 Too Many Requests'
           for attempt in 1 2 3; do
-            flutter build ${{ matrix.args }} -t lib/next/main.dart && exit 0
-            [ "$attempt" = 3 ] || sleep 120
+            if flutter build ${{ matrix.args }} -t lib/next/main.dart 2>&1 | tee "$log"; then
+              exit 0
+            fi
+            if [ "$attempt" = 3 ] || ! grep -qiE "$network_err" "$log"; then
+              exit 1
+            fi
+            echo "::warning::检测到网络/下载类错误，120 秒后进行第 $((attempt + 1)) 次重试"
+            sleep 120
           done
-          exit 1

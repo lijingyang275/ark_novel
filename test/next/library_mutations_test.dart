@@ -142,7 +142,7 @@ void main() {
     });
     api.books = [remote('2', 'current-bid')];
     login();
-    expect(await library().sync(details: false), isNull);
+    expect(await library().sync(details: false, shelfDelay: Duration.zero), isNull);
     final books = library().state.books;
     expect(books.keys.toSet(), {'1', '2'});
     expect(books['1']!.bid, isNull);
@@ -199,7 +199,7 @@ void main() {
     await library().remove(['1']);
     await library().add('2', 'two', '');
     expect(api.removes, isEmpty); // 对账前不推送
-    expect(await library().sync(details: false), isNull);
+    expect(await library().sync(details: false, shelfDelay: Duration.zero), isNull);
     expect(api.removes, ['current-bid']);
     expect(api.adds, ['2']);
     expect(library().state.books.keys, ['2']);
@@ -213,7 +213,7 @@ void main() {
     });
     api.books = [remote('2', 'bid2')];
     login();
-    expect(await library().sync(force: true, details: false), isNull);
+    expect(await library().sync(force: true, details: false, shelfDelay: Duration.zero), isNull);
     expect(library().state.books.keys, ['2']);
     expect((box.get('sync:tomb') as Map).containsKey('lib:1'), isTrue);
   });
@@ -226,7 +226,7 @@ void main() {
     api.books = [remote('2', 'bid2')];
     api.onShelf = () async => (container.read(sessionProvider.notifier) as _Session).set(const SessionLoggedOut());
     login();
-    expect(await library().sync(force: true, details: false), isNull);
+    expect(await library().sync(force: true, details: false, shelfDelay: Duration.zero), isNull);
     expect(api.shelves, [0]);
     expect((box.get('lib:books') as Map).keys, ['1']);
     expect(box.get('sync:tomb'), isNull);
@@ -243,7 +243,7 @@ void main() {
     api.books = [remote('1', 'bid1')];
     api.removeError = const Wenku8ActionRejectedException('请稍后再试');
     login();
-    expect(await library().sync(force: true, details: false), contains('请稍后再试'));
+    expect(await library().sync(force: true, details: false, shelfDelay: Duration.zero), contains('请稍后再试'));
     expect(library().state.books, isEmpty);
     expect((box.get('lib:ops') as Map)['1'], {'op': 'remove', 'bid': 'bid1'});
   });
@@ -258,10 +258,10 @@ void main() {
     });
     api.addError = const Wenku8UnexpectedPageException('登录已失效');
     login();
-    expect(await library().sync(force: true, details: false), contains('登录已失效'));
+    expect(await library().sync(force: true, details: false, shelfDelay: Duration.zero), contains('登录已失效'));
     expect((box.get('lib:ops') as Map)['1'], {'op': 'add'});
     api.addError = const Wenku8ActionRejectedException('书架已满');
-    expect(await library().sync(force: true, details: false), isNull);
+    expect(await library().sync(force: true, details: false, shelfDelay: Duration.zero), isNull);
     expect(box.get('lib:ops'), isEmpty);
     expect(library().state.books.keys, ['1']);
   });
@@ -269,7 +269,7 @@ void main() {
   test('游客的本地加入操作：首次登录仍推送到自己的书架', () async {
     await library().add('1', 'one', '');
     login();
-    expect(await library().sync(details: false), isNull);
+    expect(await library().sync(details: false, shelfDelay: Duration.zero), isNull);
     expect(api.adds, ['1']);
     expect(box.get('lib:ops'), isEmpty);
     expect(library().state.books.keys, ['1']);

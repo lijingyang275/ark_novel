@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert' show utf8;
 import 'dart:io' show File, gzip;
 import 'dart:typed_data';
@@ -6,12 +7,15 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
+import '../data/wenku8/wenku8_client.dart' show runInBackground;
 import '../models/cat_chapter.dart';
 import '../models/content.dart';
 import 'data.dart';
 import 'image_cache.dart';
 import 'library.dart';
+import 'local_books.dart' show isLocalAid;
 import 'read_state.dart';
+import 'session.dart' show friendlyError;
 import 'unlock.dart';
 
 /// 离线章节缓存。正文放在 LazyBox（只在读的时候才从磁盘取，不常驻内存），
@@ -47,18 +51,29 @@ class ChapterCache {
   static bool _isChapter(Object? k) => k is String && k.contains(':') && !k.startsWith('meta:') && !k.startsWith('pt|');
 
   static Future<void> open() async {
-    _text = await Hive.openLazyBox('chapters');
-    _index = await Hive.openBox('chapter_index');
-    PageStore._box = await Hive.openLazyBox('pages');
+    final boxes = await Future.wait<BoxBase>([
+      Hive.openLazyBox('chapters'),
+      Hive.openBox('chapter_index'),
+      Hive.openLazyBox('pages'),
+    ]);
+    _text = boxes[0] as LazyBox;
+    _index = boxes[1] as Box;
+    PageStore._box = boxes[2] as LazyBox;
     PageStore._stamp = _index;
-    PageStore._lastWrite = _index.keys.whereType<String>().where((k) => k.startsWith('pt|')).fold<int>(0, (last, k) {
-      final time = (_index.get(k) as int?) ?? 0;
-      return time > last ? time : last;
-    });
     await _migrate();
-    for (final k in _index.keys.where(_isChapter)) {
-      _tally((k as String).split(':').first, 1, (_index.get(k) as int?) ?? 0);
+    _counts.clear();
+    _charsOf.clear();
+    var lastWrite = 0;
+    for (final k in _index.keys) {
+      if (k is! String) continue;
+      if (k.startsWith('pt|')) {
+        final time = (_index.get(k) as int?) ?? 0;
+        if (time > lastWrite) lastWrite = time;
+      } else if (_isChapter(k)) {
+        _tally(k.split(':').first, 1, (_index.get(k) as int?) ?? 0);
+      }
     }
+    PageStore._lastWrite = lastWrite;
   }
 
   /// 旧版本把 meta 和正文放在同一个 Box 里、没有索引：一次性搬过来。
@@ -95,6 +110,7 @@ class ChapterCache {
 
   /// 写入一章。给了 [ticket] 且这期间这章（或整本）被删过时不写，返回 false。
   static Future<bool> put(String aid, String cid, Content c, {(int, int)? ticket}) async {
+    if (isLocalAid(aid)) return false;
     if (ticket != null && ticket != ChapterCache.ticket(aid, cid)) return false;
     await _text.put('$aid:$cid', _pack(c.text, c.images));
     if (ticket != null && ticket != ChapterCache.ticket(aid, cid)) {
@@ -182,7 +198,7 @@ class ChapterCache {
   static Future<int> clearRead() async {
     var n = 0;
     for (final aid in cachedBooks().toList()) {
-      final read = ReadState.read(aid);
+      final read = ReadState.readView(aid);
       final cids = [for (final k in _keys(aid)) k.substring(aid.length + 1)].where(read.contains).toList();
       if (cids.isEmpty) continue;
       n += cids.length;
@@ -263,6 +279,7 @@ class PageStore {
     final now = DateTime.now().millisecondsSinceEpoch;
     _lastWrite = now > _lastWrite ? now : _lastWrite + 1; // 同一毫秒内也有严格顺序，不让淘汰结果取决于 Hive 的键排序
     await _stamp.put('pt|$key', _lastWrite);
+    if (_box.length <= _cap) return;
     final loose = _box.keys.whereType<String>().where((k) => !_pinned(k)).toList();
     while (loose.length > _cap) {
       final oldest = loose.reduce((a, b) => _time(a) <= _time(b) ? a : b);
@@ -296,73 +313,137 @@ class DownloadState {
   final String? error;
 }
 
-/// 缓存下载：一本书一个任务，章节一章一章下载（放慢一点，避免被网站限流），可暂停。
-/// 正文和插图都下载，断网后插图也能显示。
+class _DownloadTask {
+  _DownloadTask({required this.aid, required this.chapters, required this.total, required this.run});
+
+  final String aid;
+  final List<CatChapter> chapters;
+  final int total;
+  final int run;
+  final done = Completer<void>();
+}
+
+/// 缓存下载：多书排队单任务串行执行，章节一章一章在后台低优先级队列下载（避免抢占前台与触发限流），可暂停。
+/// 正文和插图都下载（插图按小并发批量拉取），断网后插图也能显示。
 class DownloadController extends Notifier<Map<String, DownloadState>> {
   final _cancelled = <String>{};
   // 每本书第几次下载：删除缓存（[forget]）或重新开始后，旧的那次不再更新状态，不会把清掉的进度又加回来
   final _runs = <String, int>{};
+  final _queue = <String, _DownloadTask>{};
+  bool _pumping = false;
+  static const _imageBatchSize = 3;
 
   @override
   Map<String, DownloadState> build() => {};
 
-  void cancel(String aid) => _cancelled.add(aid);
+  void cancel(String aid) {
+    _cancelled.add(aid);
+    final pending = _queue.remove(aid);
+    if (pending != null) {
+      if (ref.mounted && _runs[aid] == pending.run) {
+        state = {...state, aid: DownloadState(done: ChapterCache.count(aid), total: pending.total, running: false)};
+      }
+      if (!pending.done.isCompleted) pending.done.complete();
+    }
+  }
 
   /// 删除缓存后把这本书的下载状态一起清掉（不重建整个 Notifier，免得打断别的书的下载）。
   void forget(String aid) {
     _cancelled.add(aid);
     _runs[aid] = (_runs[aid] ?? 0) + 1;
+    final pending = _queue.remove(aid);
+    if (pending != null && !pending.done.isCompleted) pending.done.complete();
     state = {...state}..remove(aid);
   }
 
   /// 下载 [chapters] 里还没缓存的章节；[total] 是全书章数，用来显示整本书的进度。
+  /// 多书同时触发时排入串行队列逐本下载。
   Future<void> start(String aid, String title, List<CatChapter> chapters, {int? total, String img = '', String firstCid = ''}) async {
-    if (state[aid]?.running ?? false) return;
-    final api = ref.read(apiProvider);
-    final images = ref.read(imageStoreProvider);
+    if (isLocalAid(aid) || (state[aid]?.running ?? false)) return;
     final all = total ?? chapters.length;
     _cancelled.remove(aid);
     final run = _runs[aid] = (_runs[aid] ?? 0) + 1;
+    if (ref.mounted) {
+      state = {...state, aid: DownloadState(done: ChapterCache.count(aid), total: all, running: true)};
+    }
+    await ChapterCache.setMeta(aid, title, all, img, firstCid.isEmpty && chapters.isNotEmpty ? chapters.first.cid : firstCid);
+    if (!ref.mounted || _runs[aid] != run || _cancelled.contains(aid)) {
+      if (ref.mounted && _runs[aid] == run) {
+        state = {...state, aid: DownloadState(done: ChapterCache.count(aid), total: all, running: false)};
+      }
+      return;
+    }
+    final task = _DownloadTask(aid: aid, chapters: List.of(chapters), total: all, run: run);
+    _queue[aid] = task;
+    unawaited(_pump());
+    return task.done.future;
+  }
+
+  Future<void> _pump() async {
+    if (_pumping) return;
+    _pumping = true;
+    try {
+      while (_queue.isNotEmpty && ref.mounted) {
+        final key = _queue.keys.first;
+        final task = _queue.remove(key)!;
+        await _runTask(task);
+      }
+    } finally {
+      _pumping = false;
+      if (_queue.isNotEmpty && ref.mounted) unawaited(_pump());
+    }
+  }
+
+  Future<void> _runTask(_DownloadTask task) async {
+    final aid = task.aid;
+    final all = task.total;
+    final run = task.run;
+    final api = ref.read(apiProvider);
+    final images = ref.read(imageStoreProvider);
     bool stale() => _runs[aid] != run;
     void emit({bool running = true, String? error}) {
       if (!ref.mounted || stale()) return;
       state = {...state, aid: DownloadState(done: ChapterCache.count(aid), total: all, running: running, error: error)};
     }
 
-    emit();
-    await ChapterCache.setMeta(aid, title, all, img, firstCid.isEmpty && chapters.isNotEmpty ? chapters.first.cid : firstCid);
     try {
-      for (final c in chapters) {
-        if (_cancelled.contains(aid) || stale()) break;
-        if (ChapterCache.has(aid, c.cid)) continue;
-        final ticket = ChapterCache.ticket(aid, c.cid);
-        final Content content;
-        try {
-          content = await api.chapter(aid, c.cid);
-        } on ChapterLockedException {
-          continue; // 受限书 TXT 里没有的章（插图），跳过
-        }
-        // 请求期间可能已经暂停或删除了缓存：此时不能再写回去
-        if (_cancelled.contains(aid)) break;
-        // 写不进去：整本被删了就停；只是这一章被删了（比如「清掉已读章节」）就跳过它接着下
-        if (!await ChapterCache.put(aid, c.cid, content, ticket: ticket)) {
-          if (ChapterCache.ticket(aid, c.cid).$1 != ticket.$1) break;
-          continue;
-        }
-        for (final url in content.images) {
+      await runInBackground(() async {
+        for (final c in task.chapters) {
+          if (_cancelled.contains(aid) || stale() || !ref.mounted) break;
+          if (ChapterCache.has(aid, c.cid)) continue;
+          final ticket = ChapterCache.ticket(aid, c.cid);
+          final Content content;
           try {
-            await images.load(url);
-          } catch (_) {}
+            content = await api.chapter(aid, c.cid);
+          } on ChapterLockedException {
+            continue; // 受限书 TXT 里没有的章（插图），跳过
+          }
+          // 请求期间可能已经暂停或删除了缓存：此时不能再写回去
+          if (_cancelled.contains(aid) || stale() || !ref.mounted) break;
+          // 写不进去：整本被删了就停；只是这一章被删了（比如「清掉已读章节」）就跳过它接着下
+          if (!await ChapterCache.put(aid, c.cid, content, ticket: ticket)) {
+            if (ChapterCache.ticket(aid, c.cid).$1 != ticket.$1) break;
+            continue;
+          }
+          for (var i = 0; i < content.images.length; i += _imageBatchSize) {
+            if (_cancelled.contains(aid) || stale() || !ref.mounted) break;
+            final end = (i + _imageBatchSize).clamp(0, content.images.length);
+            await Future.wait([
+              for (final url in content.images.sublist(i, end)) images.load(url).then<void>((_) {}, onError: (_) {}),
+            ]);
+          }
+          // 下插图这段时间缓存可能被删了：不再记插图（删除时已经把这条记录清掉了）
+          if (ChapterCache.ticket(aid, c.cid).$1 != ticket.$1) break;
+          await ChapterCache.addOfflineImages(aid, content.images);
+          emit();
+          await Future<void>.delayed(const Duration(milliseconds: 400));
         }
-        // 下插图这段时间缓存可能被删了：不再记插图（删除时已经把这条记录清掉了）
-        if (ChapterCache.ticket(aid, c.cid).$1 != ticket.$1) break;
-        await ChapterCache.addOfflineImages(aid, content.images);
-        emit();
-        await Future<void>.delayed(const Duration(milliseconds: 400));
-      }
+      });
       emit(running: false);
     } catch (e) {
-      emit(running: false, error: e.toString());
+      emit(running: false, error: friendlyError(e));
+    } finally {
+      if (!task.done.isCompleted) task.done.complete();
     }
   }
 }

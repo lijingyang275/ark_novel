@@ -7,9 +7,9 @@ import '../bookmarks.dart';
 import '../cache.dart';
 import '../library.dart' show LibraryStore;
 import '../reader/reader_page.dart' show bookmarkPage;
-import '../router.dart';
+import '../routes.dart';
 import '../stats.dart';
-import '../volumes.dart';
+import '../volume_covers.dart';
 import '../widgets.dart';
 import 'updates_page.dart';
 import '../text.dart';
@@ -64,7 +64,7 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
         color: scheme.error,
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: const Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.delete_outline, color: Colors.white), SizedBox(width: 6), Text('删除', style: TextStyle(color: Colors.white))]),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.delete_outline, color: scheme.onError), const SizedBox(width: 6), Text('删除', style: TextStyle(color: scheme.onError))]),
       ),
       child: InkWell(
         // 位置随路由参数传过去，不覆盖真正的阅读进度
@@ -115,58 +115,107 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
       ),
     );
 
+    final cardRadius = (theme.cardTheme.shape as RoundedRectangleBorder?)?.borderRadius ?? BorderRadius.circular(16);
+    final resolvedRadius = cardRadius.resolve(Directionality.of(context));
+    final topRadius = BorderRadius.only(topLeft: resolvedRadius.topLeft, topRight: resolvedRadius.topRight);
+    final bottomRadius = BorderRadius.only(bottomLeft: resolvedRadius.bottomLeft, bottomRight: resolvedRadius.bottomRight);
+    // 拍平书籍头 + 单条书签 + 底部提示，交由 ListView.builder 按视口懒构建，避免一次性触发全部书签页码排版
+    final rows = <_BmRow>[];
+    for (final e in books.entries) {
+      final img = ReadingStats.info(e.key).img;
+      final coverUrl = queue.bookCover(e.key, img.isNotEmpty ? img : Wenku8Parser.coverUrl(e.key));
+      rows.add(_BmHeaderRow(aid: e.key, book: LibraryStore.shown(e.key, e.value.first.book), count: e.value.length, coverUrl: coverUrl));
+      for (var i = 0; i < e.value.length; i++) {
+        rows.add(_BmEntryRow(bookmark: e.value[i], isLast: i == e.value.length - 1));
+      }
+    }
+    if (rows.isNotEmpty) rows.add(const _BmFooterRow());
+
     return Scaffold(
       appBar: AppBar(title: const Text('书签')),
       body: all.isEmpty
           ? const StatePanel(title: '还没有书签', detail: '阅读时在页面上往下拉、点底部栏的书签，或选中文字后点"加书签"。')
-          : contentWidth(ListView(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
-              children: [
-                for (final e in books.entries) ...[
-                  Material(
-                    color: scheme.surfaceContainerLowest,
-                    borderRadius: BorderRadius.circular(16),
-                    clipBehavior: Clip.antiAlias,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        InkWell(
-                          onTap: () => context.push(Routes.novel(e.key)),
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-                            child: Row(
-                              children: [
-                                SizedBox(
-                                  width: 36,
-                                  height: 50,
-                                  child: CoverImage(() {
-                                    final img = ReadingStats.info(e.key).img;
-                                    return queue.bookCover(e.key, img.isNotEmpty ? img : Wenku8Parser.coverUrl(e.key));
-                                  }()),
+          : contentWidth(
+              ListView.builder(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+                itemCount: rows.length,
+                itemBuilder: (context, i) => switch (rows[i]) {
+                  _BmHeaderRow(:final aid, :final book, :final count, :final coverUrl) => DecoratedBox(
+                    decoration: BoxDecoration(color: scheme.surfaceContainerLowest, borderRadius: topRadius),
+                    child: Material(
+                      color: scheme.surfaceContainerLowest,
+                      borderRadius: cardRadius,
+                      clipBehavior: Clip.antiAlias,
+                      child: InkWell(
+                        onTap: () => context.push(Routes.novel(aid)),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                width: 36,
+                                height: 50,
+                                child: CoverImage(coverUrl, aid: aid, thumbnail: true, decodeSize: const Size(36, 50)),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(book, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium),
+                                    Text('$count 个书签', style: muted),
+                                  ],
                                 ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(LibraryStore.shown(e.key, e.value.first.book), maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium),
-                                      Text('${e.value.length} 个书签', style: muted),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
+                              ),
+                            ],
                           ),
                         ),
-                        for (final b in e.value) ...[Divider(height: 0.5, thickness: 0.5, indent: 16, color: scheme.outline), mark(b)],
-                      ],
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 12),
-                ],
-                Text('左滑或点删除图标可移除书签', textAlign: TextAlign.center, style: muted),
-              ],
-            )),
+                  _BmEntryRow(:final bookmark, :final isLast) => Padding(
+                    padding: EdgeInsets.only(bottom: isLast ? 12 : 0),
+                    child: Material(
+                      color: scheme.surfaceContainerLowest,
+                      borderRadius: isLast ? bottomRadius : BorderRadius.zero,
+                      clipBehavior: Clip.antiAlias,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Divider(height: 0.5, thickness: 0.5, indent: 16, color: scheme.outline),
+                          mark(bookmark),
+                        ],
+                      ),
+                    ),
+                  ),
+                  _BmFooterRow() => Text('左滑或点删除图标可移除书签', textAlign: TextAlign.center, style: muted),
+                },
+              ),
+            ),
     );
   }
+}
+
+sealed class _BmRow {
+  const _BmRow();
+}
+
+final class _BmHeaderRow extends _BmRow {
+  const _BmHeaderRow({required this.aid, required this.book, required this.count, required this.coverUrl});
+
+  final String aid;
+  final String book;
+  final int count;
+  final String coverUrl;
+}
+
+final class _BmEntryRow extends _BmRow {
+  const _BmEntryRow({required this.bookmark, required this.isLast});
+
+  final Bookmark bookmark;
+  final bool isLast;
+}
+
+final class _BmFooterRow extends _BmRow {
+  const _BmFooterRow();
 }

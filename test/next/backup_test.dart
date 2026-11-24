@@ -207,4 +207,104 @@ void main() {
     expect(b.get('stats:chapters'), 5);
     expect((jsonDecode(b.get('sync:stats:dA') as String) as Map)['chapters'], 2);
   });
+
+  test('新导出排除设备私有键（sync:avatarFile、unlock:txt:*）及可再生缓存（bgm:*、ccolor）；旧备份导入向后兼容', () async {
+    final box = await Hive.openBox('session');
+    await box.putAll({
+      'palette': 2,
+      'sync:avatarFile': 'dA.avatar',
+      'unlock:txt:123': {'cid': '1'},
+      'bgm:123': {'id': 1},
+      'ccolor': {'https://img.example/1.jpg': 0xFF123456},
+    });
+    final exported = jsonDecode(Backup.make()) as Map<String, dynamic>;
+    final exportedBox = exported['box'] as Map<String, dynamic>;
+    expect(exportedBox['palette'], 2);
+    expect(exportedBox.containsKey('sync:avatarFile'), isFalse);
+    expect(exportedBox.containsKey('unlock:txt:123'), isFalse);
+    expect(exportedBox.containsKey('bgm:123'), isFalse);
+    expect(exportedBox.containsKey('ccolor'), isFalse);
+
+    // 恢复旧备份：包含旧版导出的 bgm:*、ccolor、sync:avatarFile、unlock:txt:*
+    await box.put('sync:avatarFile', 'local.avatar');
+    await box.put('unlock:txt:999', {'cid': 'local'});
+    await box.close();
+
+    await writeZip({
+      'data.json': jsonEncode({
+        'backup': 3,
+        'box': {
+          'palette': 5,
+          'sync:avatarFile': 'evil.avatar',
+          'unlock:txt:999': {'cid': 'evil'},
+          'unlock:txt:123': {'cid': 'old'},
+          'unlock:txt:456': {'cid': 'from-backup'},
+          'bgm:123': {'id': 42},
+          'ccolor': {'https://img.example/legacy.jpg': 0xFF654321},
+        },
+      }),
+    });
+    await Backup.unpack(zip, support);
+    await Backup.apply(support);
+
+    final restored = await Hive.openBox('session');
+    expect(restored.get('palette'), 5);
+    // 设备私有键保持本机原值，不被旧备份覆盖或注入
+    expect(restored.get('sync:avatarFile'), 'local.avatar');
+    expect(restored.get('unlock:txt:999'), {'cid': 'local'});
+    expect(restored.get('unlock:txt:123'), {'cid': '1'});
+    expect(restored.containsKey('unlock:txt:456'), isFalse);
+    // 旧备份里的可再生缓存仍向后兼容恢复，不报错
+    expect(restored.get('bgm:123'), {'id': 42});
+    expect(restored.get('ccolor'), {'https://img.example/legacy.jpg': 0xFF654321});
+  });
+
+  test('备份包含 reader_bg 目录时完整打包并修正恢复路径；旧版无 reader_bg 目录备份向后兼容', () async {
+    final box = await Hive.openBox('session');
+    await box.putAll({
+      'reader_bg:path': '/data/old_device/files/reader_bg/bg_001.jpg',
+      'r.bgTexture': 1,
+      'r.bgImageOpacity': 0.45,
+    });
+    await Directory(p.join(support, 'reader_bg')).create(recursive: true);
+    await File(p.join(support, 'reader_bg', 'bg_001.jpg')).writeAsString('bg-bytes');
+
+    await Backup.pack(zip, Backup.make(), support);
+
+    // zip 中包含 files/reader_bg/bg_001.jpg
+    final input = InputFileStream(zip);
+    final names = ZipDecoder().decodeStream(input).files.map((f) => f.name).toSet();
+    await input.close();
+    expect(names, {'data.json', 'files/reader_bg/bg_001.jpg'});
+
+    // 清空本机后恢复到新 supportDir
+    await box.clear();
+    await Directory(p.join(support, 'reader_bg')).delete(recursive: true);
+    await box.close();
+
+    await Backup.unpack(zip, support);
+    await Backup.apply(support);
+
+    final restored = await Hive.openBox('session');
+    expect(restored.get('reader_bg:path'), p.join(support, 'reader_bg', 'bg_001.jpg'));
+    expect(File(p.join(support, 'reader_bg', 'bg_001.jpg')).readAsStringSync(), 'bg-bytes');
+    expect(restored.get('r.bgTexture'), 1);
+    expect(restored.get('r.bgImageOpacity'), 0.45);
+    await restored.close();
+
+    // 旧版备份（zip 中没有 files/reader_bg/ 目录且无 reader_bg:path 键）可正常恢复并清掉旧本机残留背景图
+    await writeZip({
+      'data.json': jsonEncode({
+        'backup': 3,
+        'box': {'palette': 6},
+      }),
+    });
+    await Backup.unpack(zip, support);
+    await Backup.apply(support);
+
+    final legacyRestored = await Hive.openBox('session');
+    expect(legacyRestored.get('palette'), 6);
+    expect(legacyRestored.containsKey('reader_bg:path'), isFalse);
+    expect(Directory(p.join(support, 'reader_bg')).listSync(), isEmpty);
+  });
 }

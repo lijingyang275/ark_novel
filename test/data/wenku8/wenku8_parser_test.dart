@@ -56,6 +56,15 @@ void main() {
 
   test('用户信息：拿到登录页等其他页面时抛出异常（用于判断会话失效）', () {
     expect(() => Wenku8Parser.userInfo(fixture('error.html')), throwsA(isA<Wenku8UnexpectedPageException>()));
+    const loginHtml = '''
+      <div id="content"><form action="login.php?do=submit"><table><tbody>
+        <tr><td>用户登录</td><td>用户名或邮箱：</td></tr>
+        <tr><td>密码</td><td><input name="password" type="password"></td></tr>
+        <tr><td>有效期</td><td><select name="usecookie"><option>保存一年</option></select></td></tr>
+      </tbody></table></form></div>
+    ''';
+    expect(() => Wenku8Parser.userInfo(loginHtml), throwsA(isA<Wenku8LoginRequiredException>()));
+    expect(() => Wenku8Parser.recommend(loginHtml), throwsA(isA<Wenku8LoginRequiredException>()));
   });
 
   test('要求登录的页面：登录表单、提示登录的错误页算，维护页、其他错误页不算', () {

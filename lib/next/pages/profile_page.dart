@@ -8,7 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../avatar.dart';
 import '../env.dart';
 import '../incognito.dart';
-import '../router.dart';
+import '../routes.dart';
 import '../session.dart';
 import '../settings.dart';
 import '../app_prefs.dart';
@@ -104,9 +104,14 @@ class ProfilePage extends ConsumerWidget {
             ),
     );
 
-    final tappableAvatar = isWebPreview || user == null
+    final VoidCallback? onAvatarTap = user == null ? () => context.push(Routes.login) : (isWebPreview ? null : () => _avatarMenu(context, ref));
+    final tappableAvatar = onAvatarTap == null
         ? avatar
-        : MouseRegion(cursor: SystemMouseCursors.click, child: GestureDetector(onTap: () => _avatarMenu(context, ref), child: avatar));
+        : Semantics(
+            button: true,
+            label: hz(context, user == null ? '去登录' : '更换头像'),
+            child: MouseRegion(cursor: SystemMouseCursors.click, child: GestureDetector(onTap: onAvatarTap, child: avatar)),
+          );
     final info = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -145,7 +150,7 @@ class ProfilePage extends ConsumerWidget {
                     else
                       ClipRRect(
                         borderRadius: BorderRadius.circular(8),
-                        child: SizedBox(height: 132, width: double.infinity, child: RuinsScene(animate: AppPrefs.read(P.sceneMotion, true))),
+                        child: SizedBox(height: 132, width: double.infinity, child: RuinsScene(animate: ref.watch(appPref(P.sceneMotion, true)))),
                       ),
                     Positioned(
                       left: 12,

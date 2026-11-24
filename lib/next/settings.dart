@@ -63,7 +63,7 @@ void applyOrientation(int v) => SystemChrome.setPreferredOrientations(switch (v)
 
 /// 阅读器的外观和翻页方式。
 class ReaderPrefs {
-  const ReaderPrefs({this.fontSize = 18, this.lineHeight = 1.8, this.theme = 5, this.mode = 3, this.ttsRate = 0.5, this.margin = 22, this.font = 1, this.ttsPitch = 1.0, this.ttsVoice = '', this.ttsHighlight = true, this.ttsAutoNext = true, this.dual = true, this.dim = 0, this.volumeKeys = true, this.tapZone = 0, this.tapInvert = 0, this.keepScreenOn = true, this.fullscreen = true, this.showStatus = true, this.skipRead = false, this.chapterToast = false, this.warm = 0, this.grayscale = false, this.invert = false, this.customBrightness = false, this.brightness = 0.5, this.volumeInvert = false, this.pageAnim = true, this.prefetch = 2, this.prefetchWifi = false, this.prefetchBook = false, this.hant = false});
+  const ReaderPrefs({this.fontSize = 18, this.lineHeight = 1.8, this.theme = 5, this.mode = 3, this.ttsRate = 0.5, this.margin = 22, this.font = 1, this.ttsPitch = 1.0, this.ttsVoice = '', this.ttsHighlight = true, this.ttsAutoNext = true, this.dual = true, this.dim = 0, this.volumeKeys = true, this.tapZone = 0, this.tapInvert = 0, this.keepScreenOn = true, this.fullscreen = true, this.showStatus = true, this.skipRead = false, this.chapterToast = false, this.warm = 0, this.grayscale = false, this.invert = false, this.customBrightness = false, this.brightness = 0.5, this.volumeInvert = false, this.pageAnim = true, this.prefetch = 2, this.prefetchWifi = false, this.prefetchBook = false, this.hant = false, this.autoScrollSpeed = 60, this.autoTurnSeconds = 8, this.bgTexture = 0, this.bgImageOpacity = 0.35, this.headerLeft = 1, this.headerRight = 0, this.footerLeft = 3, this.footerRight = 4});
 
   final double fontSize;
   final double lineHeight;
@@ -150,7 +150,21 @@ class ReaderPrefs {
   /// 正文以繁体显示（显示时转换，缓存的仍是简体）
   final bool hant;
 
-  ReaderPrefs copyWith({double? fontSize, double? lineHeight, int? theme, int? mode, double? ttsRate, double? margin, int? font, double? ttsPitch, String? ttsVoice, bool? ttsHighlight, bool? ttsAutoNext, bool? dual, double? dim, bool? volumeKeys, int? tapZone, int? tapInvert, bool? keepScreenOn, bool? fullscreen, bool? showStatus, bool? skipRead, bool? chapterToast, double? warm, bool? grayscale, bool? invert, bool? customBrightness, double? brightness, bool? volumeInvert, bool? pageAnim, int? prefetch, bool? prefetchWifi, bool? prefetchBook, bool? hant}) => ReaderPrefs(
+  /// 自动滚屏速度（20~220 px/s）与自动翻页间隔（3~30 秒/页）
+  final double autoScrollSpeed;
+  final int autoTurnSeconds;
+
+  /// 内置纸张纹理（0 无纹理、1 宣纸、2 复古纸、3 笔记纸）与自定义背景图浓度（0.05~0.85）
+  final int bgTexture;
+  final double bgImageOpacity;
+
+  /// 页眉 / 页脚字段（0 留空、1 章节名、2 书名、3 时间与电量、4 页码/进度、5 本卷剩余时间、6 本卷进度）
+  final int headerLeft;
+  final int headerRight;
+  final int footerLeft;
+  final int footerRight;
+
+  ReaderPrefs copyWith({double? fontSize, double? lineHeight, int? theme, int? mode, double? ttsRate, double? margin, int? font, double? ttsPitch, String? ttsVoice, bool? ttsHighlight, bool? ttsAutoNext, bool? dual, double? dim, bool? volumeKeys, int? tapZone, int? tapInvert, bool? keepScreenOn, bool? fullscreen, bool? showStatus, bool? skipRead, bool? chapterToast, double? warm, bool? grayscale, bool? invert, bool? customBrightness, double? brightness, bool? volumeInvert, bool? pageAnim, int? prefetch, bool? prefetchWifi, bool? prefetchBook, bool? hant, double? autoScrollSpeed, int? autoTurnSeconds, int? bgTexture, double? bgImageOpacity, int? headerLeft, int? headerRight, int? footerLeft, int? footerRight}) => ReaderPrefs(
     fontSize: fontSize ?? this.fontSize,
     lineHeight: lineHeight ?? this.lineHeight,
     theme: theme ?? this.theme,
@@ -183,6 +197,14 @@ class ReaderPrefs {
     prefetchWifi: prefetchWifi ?? this.prefetchWifi,
     prefetchBook: prefetchBook ?? this.prefetchBook,
     hant: hant ?? this.hant,
+    autoScrollSpeed: autoScrollSpeed ?? this.autoScrollSpeed,
+    autoTurnSeconds: autoTurnSeconds ?? this.autoTurnSeconds,
+    bgTexture: bgTexture ?? this.bgTexture,
+    bgImageOpacity: bgImageOpacity ?? this.bgImageOpacity,
+    headerLeft: headerLeft ?? this.headerLeft,
+    headerRight: headerRight ?? this.headerRight,
+    footerLeft: footerLeft ?? this.footerLeft,
+    footerRight: footerRight ?? this.footerRight,
   );
 
   @override
@@ -220,13 +242,22 @@ class ReaderPrefs {
           prefetch == other.prefetch &&
           prefetchWifi == other.prefetchWifi &&
           prefetchBook == other.prefetchBook &&
-          hant == other.hant;
+          hant == other.hant &&
+          autoScrollSpeed == other.autoScrollSpeed &&
+          autoTurnSeconds == other.autoTurnSeconds &&
+          bgTexture == other.bgTexture &&
+          bgImageOpacity == other.bgImageOpacity &&
+          headerLeft == other.headerLeft &&
+          headerRight == other.headerRight &&
+          footerLeft == other.footerLeft &&
+          footerRight == other.footerRight;
 
   @override
   int get hashCode => Object.hashAll([
     fontSize, lineHeight, theme, mode, ttsRate, margin, font, ttsPitch, ttsVoice, ttsHighlight, ttsAutoNext,
     dual, dim, volumeKeys, tapZone, tapInvert, keepScreenOn, fullscreen, showStatus, skipRead, chapterToast,
     warm, grayscale, invert, customBrightness, brightness, volumeInvert, pageAnim, prefetch, prefetchWifi, prefetchBook, hant,
+    autoScrollSpeed, autoTurnSeconds, bgTexture, bgImageOpacity, headerLeft, headerRight, footerLeft, footerRight,
   ]);
 }
 
@@ -265,10 +296,18 @@ class ReaderPrefsController extends Notifier<ReaderPrefs> {
     prefetchWifi: (_box.get('r.prefetchWifi') as bool?) ?? false,
     prefetchBook: (_box.get('r.prefetchBook') as bool?) ?? false,
     hant: (_box.get('r.hant') as bool?) ?? false,
+    autoScrollSpeed: ((_box.get('r.autoScrollSpeed') as num?)?.toDouble() ?? 60).clamp(20, 220),
+    autoTurnSeconds: ((_box.get('r.autoTurnSeconds') as int?) ?? 8).clamp(3, 30),
+    bgTexture: ((_box.get('r.bgTexture') as int?) ?? 0).clamp(0, 3),
+    bgImageOpacity: ((_box.get('r.bgImageOpacity') as num?)?.toDouble() ?? 0.35).clamp(0.05, 0.85),
+    headerLeft: ((_box.get('r.headerLeft') as int?) ?? 1).clamp(0, 6),
+    headerRight: ((_box.get('r.headerRight') as int?) ?? 0).clamp(0, 6),
+    footerLeft: ((_box.get('r.footerLeft') as int?) ?? 3).clamp(0, 6),
+    footerRight: ((_box.get('r.footerRight') as int?) ?? 4).clamp(0, 6),
   );
 
   void update(ReaderPrefs next) {
-    _box.putAll({'r.fontSize': next.fontSize, 'r.lineHeight': next.lineHeight, 'r.theme': next.theme, 'r.mode': next.mode, 'r.ttsRate': next.ttsRate, 'r.margin': next.margin, 'r.font': next.font, 'r.ttsPitch': next.ttsPitch, 'r.ttsVoice': next.ttsVoice, 'r.ttsHighlight': next.ttsHighlight, 'r.ttsAutoNext': next.ttsAutoNext, 'r.dual': next.dual, 'r.dim': next.dim, 'r.volumeKeys': next.volumeKeys, 'r.tapZone': next.tapZone, 'r.tapInvert': next.tapInvert, 'r.keepScreenOn': next.keepScreenOn, 'r.fullscreen': next.fullscreen, 'r.showStatus': next.showStatus, 'r.skipRead': next.skipRead, 'r.chapterToast': next.chapterToast, 'r.warm': next.warm, 'r.grayscale': next.grayscale, 'r.invert': next.invert, 'r.customBrightness': next.customBrightness, 'r.brightness': next.brightness, 'r.volumeInvert': next.volumeInvert, 'r.pageAnim': next.pageAnim, 'r.prefetch': next.prefetch, 'r.prefetchWifi': next.prefetchWifi, 'r.prefetchBook': next.prefetchBook, 'r.hant': next.hant, 'sync:readerTs': DateTime.now().millisecondsSinceEpoch});
+    _box.putAll({'r.fontSize': next.fontSize, 'r.lineHeight': next.lineHeight, 'r.theme': next.theme, 'r.mode': next.mode, 'r.ttsRate': next.ttsRate, 'r.margin': next.margin, 'r.font': next.font, 'r.ttsPitch': next.ttsPitch, 'r.ttsVoice': next.ttsVoice, 'r.ttsHighlight': next.ttsHighlight, 'r.ttsAutoNext': next.ttsAutoNext, 'r.dual': next.dual, 'r.dim': next.dim, 'r.volumeKeys': next.volumeKeys, 'r.tapZone': next.tapZone, 'r.tapInvert': next.tapInvert, 'r.keepScreenOn': next.keepScreenOn, 'r.fullscreen': next.fullscreen, 'r.showStatus': next.showStatus, 'r.skipRead': next.skipRead, 'r.chapterToast': next.chapterToast, 'r.warm': next.warm, 'r.grayscale': next.grayscale, 'r.invert': next.invert, 'r.customBrightness': next.customBrightness, 'r.brightness': next.brightness, 'r.volumeInvert': next.volumeInvert, 'r.pageAnim': next.pageAnim, 'r.prefetch': next.prefetch, 'r.prefetchWifi': next.prefetchWifi, 'r.prefetchBook': next.prefetchBook, 'r.hant': next.hant, 'r.autoScrollSpeed': next.autoScrollSpeed, 'r.autoTurnSeconds': next.autoTurnSeconds, 'r.bgTexture': next.bgTexture, 'r.bgImageOpacity': next.bgImageOpacity, 'r.headerLeft': next.headerLeft, 'r.headerRight': next.headerRight, 'r.footerLeft': next.footerLeft, 'r.footerRight': next.footerRight, 'sync:readerTs': DateTime.now().millisecondsSinceEpoch});
     state = next;
   }
 }

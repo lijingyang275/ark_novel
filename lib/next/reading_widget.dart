@@ -10,9 +10,9 @@ import 'package:path_provider/path_provider.dart';
 
 import 'history.dart';
 import 'image_cache.dart';
-import 'router.dart';
+import 'routes.dart';
 import 'theme.dart';
-import 'volumes.dart';
+import 'volume_covers.dart';
 
 /// 安卓桌面小组件「继续阅读」（原生部分是 android/.../ReadingWidget.kt）：最近读的 4 本封面，颜色跟着 App 的配色。
 /// 小组件自己不跑 Dart，App 里数据变了就把要显示的写一份给它。

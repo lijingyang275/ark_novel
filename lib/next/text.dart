@@ -90,15 +90,30 @@ class Text extends StatelessWidget {
 /// 把一段 TextSpan 里的文字都转成繁体；WidgetSpan 原样保留（里面的 Text 自己会转）。
 InlineSpan hantSpan(InlineSpan span, Hant h) {
   if (span is! TextSpan) return span;
+  final text = span.text == null ? null : h.convert(span.text!);
+  final label = span.semanticsLabel == null ? null : h.convert(span.semanticsLabel!);
+  List<InlineSpan>? children;
+  var childChanged = false;
+  if (span.children != null) {
+    children = [
+      for (final c in span.children!)
+        () {
+          final next = hantSpan(c, h);
+          if (!identical(next, c)) childChanged = true;
+          return next;
+        }(),
+    ];
+  }
+  if (text == span.text && label == span.semanticsLabel && !childChanged) return span;
   return TextSpan(
-    text: span.text == null ? null : h.convert(span.text!),
-    children: span.children?.map((c) => hantSpan(c, h)).toList(),
+    text: text,
+    children: children,
     style: span.style,
     recognizer: span.recognizer,
     mouseCursor: span.mouseCursor,
     onEnter: span.onEnter,
     onExit: span.onExit,
-    semanticsLabel: span.semanticsLabel == null ? null : h.convert(span.semanticsLabel!),
+    semanticsLabel: label,
     semanticsIdentifier: span.semanticsIdentifier,
     locale: span.locale,
     spellOut: span.spellOut,

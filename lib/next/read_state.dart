@@ -13,22 +13,26 @@ class ReadState {
   static final _sets = <String, (List, Set<String>)>{};
 
   /// 读过的章节。返回的是副本，改了不影响缓存。
-  static Set<String> read(String aid) => {..._readView(aid)};
+  static Set<String> read(String aid) => {...readView(aid)};
 
-  static Set<String> _readView(String aid) {
+  /// 读过的章节（只读视图，不复制 Set，适合书架角标、卷完成度等高频只读查询）。
+  static Set<String> readView(String aid) {
     final list = _box.get('read:$aid') as List?;
-    if (list == null) return const {};
+    if (list == null) {
+      _sets.remove(aid);
+      return const {};
+    }
     final hit = _sets[aid];
     if (hit != null && identical(hit.$1, list)) return hit.$2;
-    final set = list.cast<String>().toSet();
+    final set = Set<String>.unmodifiable(list.cast<String>());
     _sets[aid] = (list, set);
     return set;
   }
 
   /// 读过几章（书架算未读数用，不复制）
-  static int readCount(String aid) => _readView(aid).length;
+  static int readCount(String aid) => readView(aid).length;
 
-  static bool isRead(String aid, String cid) => _readView(aid).contains(cid);
+  static bool isRead(String aid, String cid) => readView(aid).contains(cid);
 
 
   /// 标记已读；第一次标记时把字数计入这本书的"已读字数"。

@@ -1,10 +1,14 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show ProviderListenable;
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 /// 书架、自动更新、安全这几组零散的设置，都记在本地 `p.<名字>` 里。
-/// 界面里 `ref.watch(appPrefsProvider)` 之后用 [AppPrefs.get] 读，用 `ref.read(appPrefsProvider.notifier).set` 写；
+/// 界面里按需用 `ref.watch(appPref(P.xxx, fallback))` / `ref.watch(appPrefList(P.xxx))` / `ref.watch(appPrefProvider(P.xxx))` 细粒度监听，
+/// 或 `ref.watch(appPrefsProvider)` 之后用 [AppPrefs.get] 读；写统一用 `ref.read(appPrefsProvider.notifier).set`；
 /// 不经 Riverpod 的地方（自动更新、启动清理）用静态的 [AppPrefs.read]。
 class AppPrefs extends Notifier<int> {
+  static int _rev = 0;
+
   static Box get _box => Hive.box('session');
 
   static T read<T>(String key, T fallback) {
@@ -18,26 +22,76 @@ class AppPrefs extends Notifier<int> {
   static Future<void> write(String key, Object? value) => _box.putAll({'p.$key': value, ?_syncGroup(key): DateTime.now().millisecondsSinceEpoch});
 
   @override
-  int build() => 0;
+  int build() => ++_rev;
 
   T get<T>(String key, T fallback) => read(key, fallback);
 
   void set(String key, Object? value) {
     write(key, value);
-    state++;
+    state = ++_rev;
   }
 
   /// 这个设置属于哪组可选同步（改了就更新那组的时间）；不跨设备同步的返回 null。
   static String? _syncGroup(String key) => switch (key) {
     P.colsPortrait || P.colsLandscape || P.lastTab => null,
     P.volumeDone => 'sync:readerTs',
-    _ when key.startsWith('shelf.') || key.startsWith('upd.') => 'sync:prefsTs',
+    _ when key.startsWith('shelf.') || key.startsWith('upd.') || key.startsWith('stats.') => 'sync:prefsTs',
     _ when key.startsWith('ui.') => 'sync:appearanceTs',
     _ => null,
   };
 }
 
 final appPrefsProvider = NotifierProvider<AppPrefs, int>(AppPrefs.new);
+
+class _AppPrefNotifier extends Notifier<Object?> {
+  _AppPrefNotifier(this.key);
+
+  final String key;
+
+  @override
+  Object? build() {
+    ref.watch(appPrefsProvider);
+    return _snapshot(AppPrefs._box.get('p.$key'));
+  }
+
+  @override
+  bool updateShouldNotify(Object? previous, Object? next) => !_prefEquals(previous, next);
+}
+
+Object? _snapshot(Object? v) => switch (v) {
+  List l => List<Object?>.unmodifiable(l.map(_snapshot)),
+  Map m => Map<Object?, Object?>.unmodifiable({for (final e in m.entries) e.key: _snapshot(e.value)}),
+  _ => v,
+};
+
+bool _prefEquals(Object? a, Object? b) {
+  if (identical(a, b)) return true;
+  if (a is List && b is List) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!_prefEquals(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  if (a is Map && b is Map) {
+    if (a.length != b.length) return false;
+    for (final e in a.entries) {
+      if (!b.containsKey(e.key) || !_prefEquals(e.value, b[e.key])) return false;
+    }
+    return true;
+  }
+  return a == b;
+}
+
+/// 按 key 细粒度监听单个偏好（原始值不可变快照，List/Map 按内容深比较）；仅在该 key 实际变化时通知下游。
+final appPrefProvider = NotifierProvider.autoDispose.family<_AppPrefNotifier, Object?, String>(_AppPrefNotifier.new);
+
+/// 按 key 细粒度监听带类型回退的偏好值（例：`ref.watch(appPref(P.resumeBar, true))`）。
+ProviderListenable<T> appPref<T>(String key, T fallback) => appPrefProvider(key).select((v) => v is T ? v : fallback);
+
+/// 按 key 细粒度监听字符串列表偏好（例：`ref.watch(appPrefList(P.hiddenTabs))`）。
+ProviderListenable<List<String>> appPrefList(String key) =>
+    appPrefProvider(key).select((v) => v is List ? List<String>.unmodifiable(v.cast<String>()) : const <String>[]);
 
 /// 设置名（集中放一处，免得拼错）
 class P {
@@ -81,6 +135,10 @@ class P {
 
   // 阅读
   static const volumeDone = 'reader.volumeDone'; // bool 读完一卷时弹庆祝卡片
+
+  // 阅读目标与统计
+  static const statsDailyGoal = 'stats.dailyGoal'; // int 每日阅读目标分钟数（0 未开启）
+  static const statsYearlyVolGoal = 'stats.yearlyVolGoal'; // int 年度目标读完卷数（0 未开启）
 
   // 数据
   static const autoClear = 'data.autoClear'; // bool 每次打开 App 自动清理读过时缓存的章节

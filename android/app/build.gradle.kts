@@ -78,11 +78,12 @@ android {
 }
 
 // 按 --target-platform 过滤第三方 AAR 自带的原生库（--target-platform 本身只管 Flutter .so）；
-// 不传时默认保留 arm64-v8a / armeabi-v7a / x86_64 全架构通用打包。
+// 显式传入 target-platform 时，debug / profile / release 均按对应 ABI 过滤（加速本地 flutter run 打包与安装）；
+// 未传时 debug 保持不变，release 默认保留 arm64-v8a / armeabi-v7a / x86_64 全架构通用打包。
 val targets = project.findProperty("target-platform")?.toString()
 val isSplit = project.findProperty("split-per-abi")?.toString()?.toBoolean() == true
 if (!isSplit) {
-    val keepAbis = targets
+    val explicitAbis = targets
         ?.split(",")
         ?.mapNotNull {
             when (it.trim()) {
@@ -95,13 +96,14 @@ if (!isSplit) {
         }
         ?.toSet()
         ?.takeIf { it.isNotEmpty() }
-        ?: setOf("arm64-v8a", "armeabi-v7a", "x86_64")
+    val keepAbis = explicitAbis ?: setOf("arm64-v8a", "armeabi-v7a", "x86_64")
     val excludedAbis = listOf("armeabi-v7a", "arm64-v8a", "x86_64", "x86")
         .filter { it !in keepAbis }
         .map { "lib/$it/**" }
     if (excludedAbis.isNotEmpty()) {
         androidComponents {
-            onVariants(selector().withBuildType("release")) { variant ->
+            val variantSelector = if (explicitAbis != null) selector().all() else selector().withBuildType("release")
+            onVariants(variantSelector) { variant ->
                 variant.packaging.jniLibs.excludes.addAll(excludedAbis)
             }
         }

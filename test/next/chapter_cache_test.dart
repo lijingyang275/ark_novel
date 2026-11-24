@@ -1,19 +1,57 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
+import 'package:ark_novel/data/wenku8/wenku8_exceptions.dart';
+import 'package:ark_novel/models/cat_chapter.dart';
 import 'package:ark_novel/models/content.dart';
 import 'package:ark_novel/next/cache.dart';
+import 'package:ark_novel/next/data.dart';
+import 'package:ark_novel/next/image_cache.dart';
 import 'package:ark_novel/next/pages/library_pages.dart';
 import 'package:ark_novel/next/read_state.dart';
 import 'package:ark_novel/next/session.dart';
 import 'package:ark_novel/next/widgets.dart';
 
+class _FakeApi implements Api {
+  _FakeApi(this.handler);
+  final Future<Content> Function(String aid, String cid) handler;
+
+  @override
+  Future<Content> chapter(String aid, String cid) => handler(aid, cid);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeImages implements ImageStore {
+  int inflight = 0;
+  int maxConcurrent = 0;
+  final loaded = <String>[];
+
+  @override
+  Future<Uint8List> load(String rawUrl) async {
+    inflight++;
+    if (inflight > maxConcurrent) maxConcurrent = inflight;
+    loaded.add(rawUrl);
+    await Future<void>.delayed(const Duration(milliseconds: 25));
+    inflight--;
+    return Uint8List(0);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 void main() {
+  late Directory tmp;
+
   setUpAll(() async {
-    Hive.init(Directory.systemTemp.createTempSync('ark_chapter_test').path);
+    tmp = Directory.systemTemp.createTempSync('ark_chapter_test');
+    Hive.init(tmp.path);
     await Hive.openBox('session');
     // 旧格式的原文：打开后照样能读，压一遍之后变成 gzip
     final old = await Hive.openLazyBox('chapters');
@@ -21,6 +59,11 @@ void main() {
     final index = await Hive.openBox('chapter_index');
     await index.putAll({'migrated': true, '9:1': 4, 'pt|https://www.wenku8.net/a': 1});
     await ChapterCache.open();
+  });
+
+  tearDownAll(() async {
+    await Hive.close();
+    if (tmp.existsSync()) tmp.deleteSync(recursive: true);
   });
 
   test('压缩存储：新旧格式都能读，旧数据压一遍后内容不变', () async {
@@ -128,5 +171,66 @@ void main() {
     expect(find.text('测试书 11'), findsNothing);
     expect(find.text('还没有缓存'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  test('DownloadController 多书串行排队下载、章节插图并发加载、错误走 friendlyError', () async {
+    final events = <String>[];
+    final images = _FakeImages();
+    final api = _FakeApi((aid, cid) async {
+      events.add('start:$aid:$cid');
+      if (aid == 'errBook') throw const Wenku8HttpException(429);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      events.add('end:$aid:$cid');
+      return Content(text: '正文$aid$cid', images: aid == 'bookA' ? ['u1', 'u2', 'u3', 'u4'] : const []);
+    });
+    final c = ProviderContainer(
+      overrides: [
+        apiProvider.overrideWithValue(api),
+        imageStoreProvider.overrideWithValue(images),
+      ],
+    );
+    addTearDown(c.dispose);
+
+    final ctrl = c.read(downloadProvider.notifier);
+    await Future.wait([
+      ctrl.start('bookA', 'A', [CatChapter(title: '1', cid: 'c1')]),
+      ctrl.start('bookB', 'B', [CatChapter(title: '1', cid: 'c1')]),
+      ctrl.start('errBook', 'E', [CatChapter(title: '1', cid: 'c1')]),
+    ]);
+
+    // 严格串行：bookA 结束后才开始 bookB，bookB 结束后才开始 errBook
+    expect(events, ['start:bookA:c1', 'end:bookA:c1', 'start:bookB:c1', 'end:bookB:c1', 'start:errBook:c1']);
+    // 章节内插图按小并发（3 并发）批量加载
+    expect(images.loaded, ['u1', 'u2', 'u3', 'u4']);
+    expect(images.maxConcurrent, 3);
+    // 错误文案通过 friendlyError 转换
+    expect(c.read(downloadProvider)['errBook']?.error, '请求太频繁了（HTTP 429），请等一会儿再试');
+  });
+
+  test('图片魔数校验拒绝无效字节，识别 JPEG/PNG/GIF/WebP', () {
+    expect(isValidImageBytes([0xFF, 0xD8, 0xFF, 0xE0]), isTrue); // JPEG
+    expect(isValidImageBytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), isTrue); // PNG
+    expect(isValidImageBytes([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]), isTrue); // GIF89a
+    expect(isValidImageBytes([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]), isTrue); // WebP
+    expect(isValidImageBytes('{"error":"blocked"}'.codeUnits), isFalse);
+    expect(isValidImageBytes([0x00, 0x01, 0x02]), isFalse);
+  });
+
+  test('ImageStore 按 URL 粒度超分通知器支持局部刷新、全局模式切换通知与自动释放', () {
+    final c = ProviderContainer();
+    final store = c.read(imageStoreProvider);
+    final a = store.srNotifierFor('https://img.example/a.jpg#crop=0,0,1,1');
+    final b = store.srNotifierFor('https://img.example/b.jpg');
+    expect(identical(a, store.srNotifierFor('http://img.example/a.jpg')), isTrue);
+    expect(a.value, 0);
+    expect(b.value, 0);
+
+    // 全局模式切换（notifySrModeChanged）同步刷新所有已订阅 URL
+    store.notifySrModeChanged();
+    expect(a.value, 1);
+    expect(b.value, 1);
+
+    // Provider 销毁时触发 store.dispose 不抛错
+    c.dispose();
   });
 }

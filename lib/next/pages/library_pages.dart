@@ -1,14 +1,17 @@
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../../data/wenku8/wenku8_parser.dart';
 import '../cache.dart';
 import '../history.dart';
 import '../progress.dart';
 import '../library.dart';
-import '../router.dart';
-import '../volumes.dart';
+import '../routes.dart';
+import '../theme_doodle.dart';
+import '../volume_covers.dart';
+import '../volumes.dart' show volumeChangesProvider;
 import '../widgets.dart';
 import 'updates_page.dart';
 import '../text.dart';
@@ -22,50 +25,58 @@ class HistoryPage extends ConsumerStatefulWidget {
 }
 
 class _HistoryPageState extends ConsumerState<HistoryPage> {
+  Future<void> _restoreOne(HistoryEntry e, Object? prevTomb) async {
+    final box = Hive.box('session');
+    final tomb = Map<String, dynamic>.from((box.get('sync:tomb') as Map?) ?? const {});
+    if (prevTomb == null) {
+      tomb.remove('h:${e.aid}');
+    } else {
+      tomb['h:${e.aid}'] = prevTomb;
+    }
+    await box.put('sync:tomb', tomb);
+    final rest = ((box.get('history2') as List?) ?? const []).cast<Map>().where((m) => m['aid'] != e.aid).toList();
+    rest.add({'aid': e.aid, 'title': e.title, 'img': e.img, 'cid': e.cid, 'chapter': e.chapter, 'time': e.time.millisecondsSinceEpoch});
+    rest.sort((a, b) => (b['time'] as int).compareTo(a['time'] as int));
+    await box.put('history2', rest.take(300).toList());
+  }
+
   Future<void> _deleteOne(HistoryEntry e) async {
+    final prevTomb = (Hive.box('session').get('sync:tomb') as Map?)?['h:${e.aid}'];
     await ReadingHistory.remove(e.aid);
     if (!mounted) return;
     setState(() {});
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text('已删除《${LibraryStore.shown(e.aid, e.title)}》的历史记录')));
+      ..showSnackBar(
+        SnackBar(
+          content: Text('已删除《${LibraryStore.shown(e.aid, e.title)}》的历史记录'),
+          action: SnackBarAction(
+            label: hz(context, '撤销'),
+            onPressed: () async {
+              await _restoreOne(e, prevTomb);
+              if (mounted) setState(() {});
+            },
+          ),
+        ),
+      );
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     ref.watch(volumeChangesProvider);
     final covers = ref.read(volumeCoverQueueProvider);
     final items = ReadingHistory.all();
-    final rows = <Widget>[];
+    final rows = <_HistoryRow>[];
     String? day;
     for (final e in items) {
       final label = dayLabel(e.time);
       if (label != day) {
         day = label;
-        rows.add(Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(label, style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.primary))));
+        rows.add(_HistoryDayRow(label));
       }
-      rows.add(
-        Dismissible(
-          key: ValueKey(e.aid),
-          direction: DismissDirection.endToStart,
-          background: Container(alignment: Alignment.centerRight, padding: const EdgeInsets.only(right: 20), child: const Icon(Icons.delete_outline)),
-          onDismissed: (_) => _deleteOne(e),
-          child: ListTile(
-            leading: SizedBox(width: 40, height: 54, child: CoverImage(covers.bookCover(e.aid, e.img), aid: e.aid)),
-            title: Text(LibraryStore.shown(e.aid, e.title), maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: Text('${e.chapter} · ${hhmm(e.time)}', maxLines: 1, overflow: TextOverflow.ellipsis),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                IconButton(icon: const Icon(Icons.info_outline, size: 20), tooltip: hz(context, '详情'), onPressed: () => context.push(Routes.novel(e.aid))),
-                IconButton(icon: const Icon(Icons.close, size: 18), tooltip: hz(context, '删除记录'), onPressed: () => _deleteOne(e)),
-              ],
-            ),
-            onTap: () => context.push(Routes.reader(e.aid, e.cid)),
-          ),
-        ),
-      );
+      rows.add(_HistoryEntryRow(e));
     }
     return Scaffold(
       appBar: AppBar(
@@ -94,9 +105,65 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
             ),
         ],
       ),
-      body: contentWidth(items.isEmpty ? const StatePanel(title: '还没有阅读记录') : ListView(children: rows)),
+      body: contentWidth(
+        items.isEmpty
+            ? const StatePanel(title: '还没有阅读记录')
+            : ListView.builder(
+                itemCount: rows.length,
+                itemBuilder: (context, i) => switch (rows[i]) {
+                  _HistoryDayRow(:final label) => Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(label, style: theme.textTheme.titleSmall?.copyWith(color: scheme.primary))),
+                  _HistoryEntryRow(entry: final e) => Dismissible(
+                    key: ValueKey(e.aid),
+                    direction: DismissDirection.endToStart,
+                    background: Container(
+                      color: scheme.error,
+                      alignment: Alignment.centerRight,
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.delete_outline, color: scheme.onError),
+                          const SizedBox(width: 6),
+                          Text('删除', style: TextStyle(color: scheme.onError)),
+                        ],
+                      ),
+                    ),
+                    onDismissed: (_) => _deleteOne(e),
+                    child: ListTile(
+                      leading: SizedBox(width: 40, height: 54, child: CoverImage(covers.bookCover(e.aid, e.img), aid: e.aid, thumbnail: true, decodeSize: const Size(40, 54))),
+                      title: Text(LibraryStore.shown(e.aid, e.title), maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text('${e.chapter} · ${hhmm(e.time)}', maxLines: 1, overflow: TextOverflow.ellipsis),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(icon: const Icon(Icons.info_outline, size: 20), tooltip: hz(context, '详情'), onPressed: () => context.push(Routes.novel(e.aid))),
+                          IconButton(icon: const Icon(Icons.close, size: 18), tooltip: hz(context, '删除记录'), onPressed: () => _deleteOne(e)),
+                        ],
+                      ),
+                      onTap: () => context.push(Routes.reader(e.aid, e.cid)),
+                    ),
+                  ),
+                },
+              ),
+      ),
     );
   }
+}
+
+sealed class _HistoryRow {
+  const _HistoryRow();
+}
+
+final class _HistoryDayRow extends _HistoryRow {
+  const _HistoryDayRow(this.label);
+
+  final String label;
+}
+
+final class _HistoryEntryRow extends _HistoryRow {
+  const _HistoryEntryRow(this.entry);
+
+  final HistoryEntry entry;
 }
 
 /// 离线缓存：每本书一个进度条，点进去按章节管理；这里可以整本删除。
@@ -111,6 +178,7 @@ class CachePage extends ConsumerWidget {
     final books = ChapterCache.books().entries.toList();
     final offlineBytes = books.fold<int>(0, (sum, e) => sum + ChapterCache.bytesOf(e.key));
     final autoCachedBooks = ChapterCache.cachedBooks().where((aid) => !ChapterCache.offline(aid)).length;
+    final art = CharacterArt.of(context);
     return Scaffold(
       appBar: AppBar(
         title: Text(books.isEmpty ? '离线缓存' : '离线缓存 · ${sizeText(offlineBytes)}'),
@@ -123,7 +191,10 @@ class CachePage extends ConsumerWidget {
             ? ListView(
                 padding: const EdgeInsets.all(32),
                 children: [
-                  const SizedBox(height: 64),
+                  if (art != null)
+                    Padding(padding: const EdgeInsets.only(top: 24, bottom: 12), child: Image.asset(art.empty, height: 140))
+                  else
+                    const SizedBox(height: 64),
                   Text('还没有缓存', textAlign: TextAlign.center, style: Theme.of(context).textTheme.titleLarge),
                   const SizedBox(height: 8),
                   Text(
@@ -157,7 +228,7 @@ class CachePage extends ConsumerWidget {
                         final total = b.value.$2;
                         return ListTile(
                           // 和书架一样的封面（第一卷的高清封面）；以前导入时没记下封面地址的按书号拼
-                          leading: SizedBox(width: 44, height: 59, child: CoverImage(ref.read(volumeCoverQueueProvider).bookCover(b.key, b.value.$3.isNotEmpty ? b.value.$3 : Wenku8Parser.coverUrl(b.key)), aid: b.key)),
+                          leading: SizedBox(width: 44, height: 59, child: CoverImage(ref.read(volumeCoverQueueProvider).bookCover(b.key, b.value.$3.isNotEmpty ? b.value.$3 : Wenku8Parser.coverUrl(b.key)), aid: b.key, thumbnail: true, decodeSize: const Size(44, 59))),
                           title: Text(LibraryStore.shown(b.key, b.value.$1)),
                           subtitle: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -181,6 +252,19 @@ class CachePage extends ConsumerWidget {
                                     if (v == 'manage') {
                                       context.push(Routes.cacheBook(b.key));
                                     } else {
+                                      final title = LibraryStore.shown(b.key, b.value.$1);
+                                      final ok = await showDialog<bool>(
+                                        context: context,
+                                        builder: (ctx) => AlertDialog(
+                                          title: const Text('删除离线缓存？'),
+                                          content: Text('将删除《$title》已下载的整本离线缓存（${ChapterCache.sizeLabel(b.key)}），不影响书架和阅读进度。'),
+                                          actions: [
+                                            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+                                            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('删除')),
+                                          ],
+                                        ),
+                                      );
+                                      if (ok != true) return;
                                       // 先停掉这本书的下载，再删；不重建整个下载管理器，别的书的下载不受影响
                                       ref.read(downloadProvider.notifier).forget(b.key);
                                       await ChapterCache.remove(b.key);

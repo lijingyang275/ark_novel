@@ -1,13 +1,13 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/material.dart' as material show Text;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../env.dart';
 import '../image_cache.dart';
@@ -18,6 +18,8 @@ import '../widgets.dart';
 import 'page_curl.dart';
 import 'page_physics.dart';
 import 'paginator.dart';
+import 'reader_chrome.dart';
+import 'reader_image_viewer.dart';
 
 /// 章节：正文（已套用替换规则、统一缩进）、插图地址、高亮位置。
 class Chapter {
@@ -104,12 +106,34 @@ class ReaderNav {
   /// 滚动模式：按像素滚动；翻页模式不用
   void Function(double)? scrollBy;
 
+  /// 滚动模式：自动滚屏每帧直接步进像素，返回 true 正在滚 / false 已到底 / null 未就绪
+  bool? Function(double)? autoScrollStep;
+
   /// 翻页模式：当前第几屏（从 0 起）、共几屏，底部进度条用；滚动模式不用
   final page = ValueNotifier<(int, int)>((0, 0));
 
   /// 翻页模式跳到第几屏；滚动模式跳到本章的某个比例（0~1）
   void Function(int)? toPage;
   void Function(double)? toFraction;
+}
+
+/// 按浅色/深色背景自动校正高亮字色，避免浅黄、浅黄绿在浅色纸面发虚，或深紫、深蓝在暗色背景看不清。
+Color readableHighlightColor(Color raw, {required bool darkSurface}) {
+  final hsl = HSLColor.fromColor(raw);
+  if (!darkSurface) {
+    // 黄色～绿青色段（40°~175°）视觉明度更高，需要更深一点才锐利清晰
+    final hue = hsl.hue;
+    final maxLight = (hue >= 38 && hue <= 175) ? 0.34 : 0.42;
+    if (hsl.lightness > maxLight) {
+      return hsl.withLightness(maxLight).withSaturation(math.min(1.0, hsl.saturation * 1.05)).toColor();
+    }
+    return raw;
+  }
+  const minLight = 0.68;
+  if (hsl.lightness < minLight) {
+    return hsl.withLightness(minLight).withSaturation(math.min(0.85, hsl.saturation)).toColor();
+  }
+  return raw;
 }
 
 /// 取出 [from, to) 这一段正文，高亮的地方染色（有备注的加虚线下划线），[hl] 是朗读正在读的那一句。颜色、底色和下划线不改变字形宽度，不影响分页。
@@ -126,6 +150,7 @@ InlineSpan buildSpan(Chapter c, int from, int to, TextStyle base, Set<String> no
     }
   }
   final pts = cuts.toList()..sort();
+  final darkSurface = (base.color?.computeLuminance() ?? 0) > 0.45;
   final children = <InlineSpan>[];
   var j = 0;
   for (var i = 0; i + 1 < pts.length; i++) {
@@ -137,10 +162,17 @@ InlineSpan buildSpan(Chapter c, int from, int to, TextStyle base, Set<String> no
     final reading = hl != null && a >= hl.$1 && b <= hl.$2;
     TextStyle? style;
     if (m != null) {
-      final color = Color(m.rule.color);
+      final rawColor = Color(m.rule.color);
+      final fg = readableHighlightColor(rawColor, darkSurface: darkSurface);
       style = m.rule.kind == RuleKind.color
-          ? TextStyle(color: color)
-          : TextStyle(color: color, backgroundColor: color.withValues(alpha: 0.13), decoration: noted.contains(m.rule.id) ? TextDecoration.underline : null, decorationStyle: TextDecorationStyle.dotted, decorationColor: color);
+          ? TextStyle(color: fg)
+          : TextStyle(
+              color: fg,
+              backgroundColor: rawColor.withValues(alpha: darkSurface ? 0.18 : 0.11),
+              decoration: noted.contains(m.rule.id) ? TextDecoration.underline : null,
+              decorationStyle: TextDecorationStyle.dotted,
+              decorationColor: fg,
+            );
     }
     if (reading) style = (style ?? const TextStyle()).copyWith(backgroundColor: (hlColor ?? Colors.amber).withValues(alpha: 0.35));
     children.add(TextSpan(text: c.text.substring(a, b), style: style));
@@ -148,12 +180,12 @@ InlineSpan buildSpan(Chapter c, int from, int to, TextStyle base, Set<String> no
   return TextSpan(style: base, children: children);
 }
 
-/// 每章开头的章节标题，高度固定成 [headingHeight] 算的值（分页按这个高度给第一页留位置）。
+/// 每章开头的章节标题，高度固定成 [headingHeight] 算的值（分页按这个高度给第一页留位置；调用方已算好时直接传 [height] 避免重复排版）。
 /// [accent]：标题染色，并在标题下面的留白里画一条装饰线（「晴空」背景的三角旗、角色主题的蜡笔线；不占额外高度，不影响分页）
-Widget chapterHeading(String title, TextStyle body, double width, {(Color, Widget Function(double width))? accent}) {
-  final text = Text(title, style: headingStyle(body).copyWith(color: accent?.$1), textScaler: TextScaler.noScaling);
+Widget chapterHeading(String title, TextStyle body, double width, {double? height, (Color, Widget Function(double width))? accent}) {
+  final text = material.Text(title, style: headingStyle(body).copyWith(color: accent?.$1), textScaler: TextScaler.noScaling);
   return SizedBox(
-    height: headingHeight(title, body, width),
+    height: height ?? headingHeight(title, body, width),
     child: Align(
       alignment: Alignment.topLeft,
       child: accent == null
@@ -363,62 +395,20 @@ Mark? markAt(Chapter c, GlobalKey key, int base, Offset global) {
   return null;
 }
 
-Widget _readerImageWidget(String url, Color? color) => _ReaderIllustration(url: url, color: color);
+Widget _readerImageWidget(String url, Color? color, {List<String>? gallery, int index = 0}) =>
+    _ReaderIllustration(url: url, color: color, gallery: gallery, index: index);
 
 class _ReaderIllustration extends ConsumerWidget {
-  const _ReaderIllustration({required this.url, this.color});
+  const _ReaderIllustration({required this.url, this.color, this.gallery, this.index = 0});
 
   final String url;
   final Color? color;
+  final List<String>? gallery;
+  final int index;
 
-  void _openViewer(BuildContext context, WidgetRef ref) {
-    showDialog<void>(
-      context: context,
-      barrierColor: Colors.black87,
-      builder: (ctx) => Dialog.fullscreen(
-        backgroundColor: Colors.black,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            InteractiveViewer(
-              minScale: 0.8,
-              maxScale: 5.0,
-              child: Center(child: NetImage(url, fit: BoxFit.contain, full: true)),
-            ),
-            Positioned(
-              top: MediaQuery.paddingOf(ctx).top + 8,
-              right: 12,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (!isWebPreview)
-                    IconButton.filledTonal(
-                      tooltip: hz(ctx, '保存或分享图片'),
-                      style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
-                      icon: const Icon(Icons.ios_share, size: 20),
-                      onPressed: () async {
-                        try {
-                          final filePath = await ref.read(imageStoreProvider).path(url);
-                          await SharePlus.instance.share(ShareParams(files: [XFile(filePath)]));
-                        } catch (e) {
-                          if (ctx.mounted) ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('导出图片失败：$e')));
-                        }
-                      },
-                    ),
-                  const SizedBox(width: 8),
-                  IconButton.filledTonal(
-                    tooltip: hz(ctx, '关闭'),
-                    style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
-                    icon: const Icon(Icons.close, size: 20),
-                    onPressed: () => Navigator.pop(ctx),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+  void _openViewer(BuildContext context) {
+    final urls = (gallery != null && gallery!.isNotEmpty) ? gallery! : [url];
+    showReaderImageViewer(context, urls: urls, initialIndex: index);
   }
 
   @override
@@ -458,25 +448,36 @@ class _ReaderIllustration extends ConsumerWidget {
     );
     if (!loaded) return img;
     return GestureDetector(
-      onLongPress: () => _openViewer(context, ref),
+      onLongPress: () => _openViewer(context),
       child: Stack(
         alignment: Alignment.center,
         children: [
-          img,
+          ConstrainedBox(constraints: const BoxConstraints(minHeight: 52), child: img),
           Positioned(
-            right: 8,
-            bottom: 8,
+            right: 4,
+            bottom: 4,
             child: Listener(
               onPointerUp: (_) => _retryTap = true,
-              child: Material(
-                color: Colors.black45,
-                borderRadius: BorderRadius.circular(16),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(16),
-                  onTap: () => _openViewer(context, ref),
-                  child: const Padding(
-                    padding: EdgeInsets.all(6),
-                    child: Icon(Icons.zoom_out_map_rounded, size: 16, color: Colors.white70),
+              child: Tooltip(
+                message: hz(context, '全屏查看插图'),
+                child: Material(
+                  type: MaterialType.transparency,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(22),
+                    onTap: () => _openViewer(context),
+                    child: SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: Center(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(16)),
+                          child: const Padding(
+                            padding: EdgeInsets.all(6),
+                            child: Icon(Icons.zoom_out_map_rounded, size: 16, color: Colors.white70),
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -494,6 +495,8 @@ class ScrollBody extends StatefulWidget {
     super.key,
     required this.chapter,
     required this.spanOf,
+    this.spanOfHighlight,
+    this.highlight,
     required this.style,
     required this.margin,
     this.title = '',
@@ -514,6 +517,8 @@ class ScrollBody extends StatefulWidget {
     this.tapInvert = 0,
     this.onPullDown,
     this.marked,
+    this.onUserInteract,
+    this.showHeader = false,
   });
 
   final int tapZone;
@@ -522,8 +527,12 @@ class ScrollBody extends StatefulWidget {
   /// 在章首继续往下拉：加 / 取消书签；[marked] 是当前位置有没有书签
   final VoidCallback? onPullDown;
   final bool Function()? marked;
+  final VoidCallback? onUserInteract;
+  final bool showHeader;
   final Chapter chapter;
   final SpanOf spanOf;
+  final InlineSpan Function(int from, int to, (int, int)? hl)? spanOfHighlight;
+  final ValueListenable<(int, int)?>? highlight;
   final TextStyle style;
   final double margin;
 
@@ -561,14 +570,54 @@ class _ScrollBodyState extends State<ScrollBody> {
   final _controller = ScrollController();
   final _textKey = GlobalKey();
   double _padTop = 0; // 正文第一行到滚动内容顶部的距离（含章节标题）
+  DateTime _lastAutoReport = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void _followOffset(int f) {
+    if (!mounted || !_controller.hasClients) return;
+    final ro = _textKey.currentContext?.findRenderObject();
+    if (ro is! RenderParagraph) return;
+    final y = _padTop + ro.getOffsetForCaret(TextPosition(offset: math.min(f, widget.chapter.text.length)), Rect.zero).dy;
+    final view = _controller.position;
+    if (y < view.pixels || y > view.pixels + view.viewportDimension - 120) {
+      _controller.animateTo((y - 80).clamp(0.0, view.maxScrollExtent), duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+    }
+  }
+
+  void _onHighlight() {
+    final hl = widget.highlight?.value;
+    if (hl != null) _followOffset(hl.$1);
+  }
+
+  bool? _autoStep(double dy) {
+    if (!mounted || !_controller.hasClients) return null;
+    final pos = _controller.position;
+    if (pos.maxScrollExtent <= 0 || pos.pixels >= pos.maxScrollExtent - 1.5) {
+      widget.onEnd();
+      return false;
+    }
+    final next = (pos.pixels + dy).clamp(0.0, pos.maxScrollExtent);
+    _controller.jumpTo(next);
+    final now = DateTime.now();
+    if (now.difference(_lastAutoReport) >= const Duration(milliseconds: 500) || next >= pos.maxScrollExtent - 1.5) {
+      _lastAutoReport = now;
+      widget.onOffset(_charAtTop());
+    }
+    if (next >= pos.maxScrollExtent - 1.5) {
+      widget.onEnd();
+      return false;
+    }
+    return true;
+  }
 
   @override
   void initState() {
     super.initState();
+    widget.highlight?.addListener(_onHighlight);
     widget.nav
       ?..next = (() => _page(1))
       ..prev = (() => _page(-1))
       ..scrollBy = _nudge
+      ..autoScrollStep = _autoStep
       ..toPage = null
       ..toFraction = ((f) {
         if (_controller.hasClients) _controller.jumpTo(f.clamp(0.0, 1.0) * _controller.position.maxScrollExtent);
@@ -579,19 +628,17 @@ class _ScrollBodyState extends State<ScrollBody> {
   @override
   void didUpdateWidget(ScrollBody old) {
     super.didUpdateWidget(old);
-    final f = widget.follow;
-    if (f == null || f == old.follow || !_controller.hasClients) return;
-    final ro = _textKey.currentContext?.findRenderObject();
-    if (ro is! RenderParagraph) return;
-    final y = _padTop + ro.getOffsetForCaret(TextPosition(offset: math.min(f, widget.chapter.text.length)), Rect.zero).dy;
-    final view = _controller.position;
-    if (y < view.pixels || y > view.pixels + view.viewportDimension - 120) {
-      _controller.animateTo((y - 80).clamp(0.0, view.maxScrollExtent), duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+    if (widget.highlight != old.highlight) {
+      old.highlight?.removeListener(_onHighlight);
+      widget.highlight?.addListener(_onHighlight);
     }
+    final f = widget.follow;
+    if (f != null && f != old.follow) _followOffset(f);
   }
 
   @override
   void dispose() {
+    widget.highlight?.removeListener(_onHighlight);
     _controller.dispose();
     super.dispose();
   }
@@ -651,12 +698,16 @@ class _ScrollBodyState extends State<ScrollBody> {
     final hasText = c.text.trim().isNotEmpty;
     final width = MediaQuery.sizeOf(context).width - widget.margin * 2;
     final head = hasText ? headingHeight(widget.title, widget.style, width) : 0.0;
-    final padTop = MediaQuery.viewPaddingOf(context).top + 24;
+    final padTop = MediaQuery.viewPaddingOf(context).top + (widget.showHeader ? 36 : 24);
     _padTop = padTop + head;
-    return NotificationListener<ScrollEndNotification>(
+    return NotificationListener<ScrollNotification>(
       onNotification: (n) {
-        widget.onOffset(_charAtTop());
-        if (n.metrics.maxScrollExtent <= 0 || n.metrics.pixels >= n.metrics.maxScrollExtent - 40) widget.onEnd();
+        if (n is ScrollStartNotification && n.dragDetails != null) {
+          widget.onUserInteract?.call();
+        } else if (n is ScrollEndNotification) {
+          widget.onOffset(_charAtTop());
+          if (n.metrics.maxScrollExtent <= 0 || n.metrics.pixels >= n.metrics.maxScrollExtent - 40) widget.onEnd();
+        }
         return false;
       },
       child: TapDetector(
@@ -673,8 +724,10 @@ class _ScrollBodyState extends State<ScrollBody> {
           }
           switch (tapActionAt(widget.tapZone, widget.tapInvert, local, size, paged: false)) {
             case TapAction.prev:
+              widget.onUserInteract?.call();
               _page(-1);
             case TapAction.next:
+              widget.onUserInteract?.call();
               _page(1);
             case TapAction.menu:
               widget.onTapZone();
@@ -694,9 +747,15 @@ class _ScrollBodyState extends State<ScrollBody> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (head > 0) chapterHeading(widget.title, widget.style, width, accent: widget.headingAccent),
-                Text.rich(widget.spanOf(0, c.text.length), key: _textKey, textScaler: TextScaler.noScaling, strutStyle: readerStrut(widget.style)),
-                for (final url in c.images) Padding(padding: const EdgeInsets.only(top: 16), child: _readerImageWidget(url, widget.style.color)),
+                if (head > 0) chapterHeading(widget.title, widget.style, width, height: head, accent: widget.headingAccent),
+                if (widget.highlight != null && widget.spanOfHighlight != null)
+                  ValueListenableBuilder<(int, int)?>(
+                    valueListenable: widget.highlight!,
+                    builder: (_, hl, _) => material.Text.rich(widget.spanOfHighlight!(0, c.text.length, hl), key: _textKey, textScaler: TextScaler.noScaling, strutStyle: readerStrut(widget.style)),
+                  )
+                else
+                  material.Text.rich(widget.spanOf(0, c.text.length), key: _textKey, textScaler: TextScaler.noScaling, strutStyle: readerStrut(widget.style)),
+                for (var idx = 0; idx < c.images.length; idx++) Padding(padding: const EdgeInsets.only(top: 16), child: _readerImageWidget(c.images[idx], widget.style.color, gallery: c.images, index: idx)),
                 if (widget.onNext != null) Padding(padding: const EdgeInsets.only(top: 32), child: OutlinedButton(onPressed: widget.onNext, child: Text(widget.nextLabel))),
               ],
             ),
@@ -834,6 +893,8 @@ class PagedBody extends StatefulWidget {
     super.key,
     required this.chapter,
     required this.spanOf,
+    this.spanOfHighlight,
+    this.highlight,
     required this.style,
     required this.margin,
     required this.title,
@@ -869,7 +930,16 @@ class PagedBody extends StatefulWidget {
     this.lead = 0,
     this.arrivedBack = false,
     this.onTurn,
+    this.pageBackground,
+    this.backgroundKey,
+    this.chromeConfig,
+    this.onUserInteract,
   });
+
+  final Widget? pageBackground;
+  final Object? backgroundKey;
+  final ReaderChromeConfig? chromeConfig;
+  final VoidCallback? onUserInteract;
 
   /// 相邻章节已经加载好时传进来：翻到头时接着翻过去，不用另外的换章动画，双页时还用来补空着的半边
   final ChapterPeek? prevChapter;
@@ -907,6 +977,8 @@ class PagedBody extends StatefulWidget {
 
   final Chapter chapter;
   final SpanOf spanOf;
+  final InlineSpan Function(int from, int to, (int, int)? hl)? spanOfHighlight;
+  final ValueListenable<(int, int)?>? highlight;
   final TextStyle style;
   final double margin;
   final String title;
@@ -961,28 +1033,15 @@ class _PagedBodyState extends State<PagedBody> {
   double _head = 0; // 第一页开头章节标题的高度
   double _width = 0;
   Size _imgBox = Size.zero; // 插图页的大小（整页，双页时一半），按它提前解码
+  Size _layoutSize = Size.zero;
   Chapter? _fetched; // 已经开始在后台下载整章插图的那一章
   FlowPages? _prev, _next;
   int _base = 0; // 滑动翻页时 PageView 的第 0 项是不是上一章（是的话为 1）
+  bool _peekScheduled = false;
+  bool _scrolling = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _cur = widget.startOffset;
-    _anchor = widget.startOffset;
-    widget.nav
-      ?..next = (() => _step(1))
-      ..prev = (() => _step(-1))
-      ..toFraction = null
-      ..toPage = _jump;
-  }
-
-  @override
-  void didUpdateWidget(PagedBody old) {
-    super.didUpdateWidget(old);
-    _meCache = null; // spanOf、volumeProgress 是阅读页每次 build 新建的闭包
-    final f = widget.follow;
-    if (f == null || f == old.follow || _total == 0) return;
+  void _followOffset(int f) {
+    if (!mounted || _total == 0) return;
     final p = _pageOf(f);
     if (p == _page) return;
     if (widget.curl) {
@@ -992,8 +1051,40 @@ class _PagedBodyState extends State<PagedBody> {
     }
   }
 
+  void _onHighlight() {
+    final hl = widget.highlight?.value;
+    if (hl != null) _followOffset(hl.$1);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _cur = widget.startOffset;
+    _anchor = widget.startOffset;
+    widget.highlight?.addListener(_onHighlight);
+    widget.nav
+      ?..next = (() => _step(1))
+      ..prev = (() => _step(-1))
+      ..autoScrollStep = null
+      ..toFraction = null
+      ..toPage = _jump;
+  }
+
+  @override
+  void didUpdateWidget(PagedBody old) {
+    super.didUpdateWidget(old);
+    _meCache = null; // spanOf、volumeProgress 是阅读页每次 build 新建的闭包
+    if (widget.highlight != old.highlight) {
+      old.highlight?.removeListener(_onHighlight);
+      widget.highlight?.addListener(_onHighlight);
+    }
+    final f = widget.follow;
+    if (f != null && f != old.follow) _followOffset(f);
+  }
+
   @override
   void dispose() {
+    widget.highlight?.removeListener(_onHighlight);
     _controller?.dispose();
     super.dispose();
   }
@@ -1049,6 +1140,19 @@ class _PagedBodyState extends State<PagedBody> {
   final _peekLayout = <(Chapter, String), (double, List<int>)>{};
   (String?, String?)? _covers; // 上次提前解码过的相邻章节卷封面
 
+  bool get _wantPrev => widget.prevChapter != null && (_page <= 1 || (_cols == 2 && _lead > 0 && _page == 0));
+  bool get _wantNext => widget.nextChapter != null && (_page >= _units - 2 || (_cols == 2 && _trailing && _page >= _units - 1));
+  bool get _needPrevSync => _cols == 2 && _lead > 0 && _page == 0;
+  bool get _needNextSync => _cols == 2 && _trailing && _page >= _units - 1;
+
+  FlowPages? _flowIfCached(ChapterPeek? p) {
+    if (p == null) return null;
+    final layout = _peekLayout[(p.chapter, p.title)];
+    if (layout == null) return null;
+    final (head, starts) = layout;
+    return FlowPages(chapter: p.chapter, title: p.title, spanOf: p.spanOf, starts: starts, head: head, cover: _cols == 2 ? p.cover : null, volumeProgress: p.volumeProgress);
+  }
+
   FlowPages? _flowOf(ChapterPeek? p, Size size) {
     if (p == null) return null;
     final key = (p.chapter, p.title);
@@ -1061,6 +1165,29 @@ class _PagedBodyState extends State<PagedBody> {
     }
     final (head, starts) = layout;
     return FlowPages(chapter: p.chapter, title: p.title, spanOf: p.spanOf, starts: starts, head: head, cover: _cols == 2 ? p.cover : null, volumeProgress: p.volumeProgress);
+  }
+
+  /// 将相邻章节分页推迟到帧后且仅在翻近章首/章末时执行，避免切章/改字号/转屏时同帧 3 倍排版峰值。
+  void _schedulePeek() {
+    if (_peekScheduled || _scrolling || _layoutSize.isEmpty) return;
+    final needPrev = _wantPrev && _flowIfCached(widget.prevChapter) == null;
+    final needNext = _wantNext && _flowIfCached(widget.nextChapter) == null;
+    if (!needPrev && !needNext) return;
+    _peekScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _peekScheduled = false;
+      if (!mounted || _scrolling || _layoutSize.isEmpty) return;
+      var changed = false;
+      if (_wantPrev && _flowIfCached(widget.prevChapter) == null) {
+        _prev = _flowOf(widget.prevChapter, _layoutSize);
+        changed = true;
+      }
+      if (_wantNext && _flowIfCached(widget.nextChapter) == null) {
+        _next = _flowOf(widget.nextChapter, _layoutSize);
+        changed = true;
+      }
+      if (changed) setState(() {});
+    });
   }
 
   List<int> _paged(Chapter c, String title, Size size, double head) {
@@ -1117,6 +1244,7 @@ class _PagedBodyState extends State<PagedBody> {
     widget.onOffset(_cur);
     if (page >= _units - 1) widget.onEnd();
     _prefetch();
+    if (widget.curl || !_scrolling) _schedulePeek();
   }
 
   /// 本章和相邻章节的卷封面（只在双页时有）提前解码
@@ -1179,7 +1307,7 @@ class _PagedBodyState extends State<PagedBody> {
     return i >= f.covers && i - f.covers < f.textPages;
   }
 
-  Widget _readerImage(String url) => _readerImageWidget(url, widget.style.color);
+  Widget _readerImage(String url, {List<String>? gallery, int index = 0}) => _readerImageWidget(url, widget.style.color, gallery: gallery, index: index);
 
   /// 排在第 [slot] 个位置的页：前面、后面排不下的是相邻章节的页，还没加载好就空着。
   Widget _slot(BuildContext context, int slot, bool live, EdgeInsets pad, {_Chrome chrome = _Chrome.full}) {
@@ -1192,21 +1320,80 @@ class _PagedBodyState extends State<PagedBody> {
 
   Widget _single(BuildContext context, FlowPages f, int i, bool live, EdgeInsets pad, _Chrome chrome) {
     final c = f.chapter;
-    if (i >= f.textPages) return Center(child: _readerImage(c.images[i - f.textPages]));
+    if (i >= f.textPages) {
+      final imgIdx = i - f.textPages;
+      return Center(child: _readerImage(c.images[imgIdx], gallery: c.images, index: imgIdx));
+    }
     final end = i + 1 < f.starts.length ? f.starts[i + 1] : c.text.length;
     final faint = TextStyle(fontSize: 11, color: widget.color.withValues(alpha: 0.5));
     final view = MediaQuery.viewPaddingOf(context);
-    final progress = chrome == _Chrome.left ? '' : '${i + 1}/${f.total} · ${((f.volumeProgress?.call((i + 1) / f.total) ?? (i + 1) / f.total) * 100).floor()}%';
+    final cfg = widget.chromeConfig ?? const ReaderChromeConfig();
+    final frac = f.total > 0 ? (i + 1) / f.total : 1.0;
+    final volProg = f.volumeProgress?.call(frac) ?? frac;
+    final pageProgress = '${i + 1}/${f.total} · ${(volProg * 100).floor()}%';
+    final volProgressText = '本卷 ${(volProg * 100).floor()}%';
+    final needEta = cfg.headerLeft == ReaderChromeField.volumeEta ||
+        cfg.headerRight == ReaderChromeField.volumeEta ||
+        cfg.footerLeft == ReaderChromeField.volumeEta ||
+        cfg.footerRight == ReaderChromeField.volumeEta;
+    final etaText = needEta ? (cfg.volumeEta?.call(frac) ?? volProgressText) : '';
+    var hLeft = chrome == _Chrome.right ? ReaderChromeField.empty : cfg.headerLeft;
+    var hRight = chrome == _Chrome.left ? ReaderChromeField.empty : cfg.headerRight;
+    // 首屏已展示大号章节标题时，页眉不再重复显示章节名
+    if (i == 0 && f.head > 0) {
+      if (hLeft == ReaderChromeField.chapterTitle) hLeft = ReaderChromeField.empty;
+      if (hRight == ReaderChromeField.chapterTitle) hRight = ReaderChromeField.empty;
+    }
+    final fLeft = chrome == _Chrome.right ? ReaderChromeField.empty : cfg.footerLeft;
+    final fRight = chrome == _Chrome.left ? ReaderChromeField.empty : cfg.footerRight;
+    final useLiveHighlight = live && identical(c, _c) && widget.highlight != null && widget.spanOfHighlight != null;
     return Stack(
       children: [
         // 页尾的换行会多出一个空行超出页面，所以不用 Column：标题单独放，正文往下让出标题的高度
-        if (i == 0 && f.head > 0) Positioned(top: pad.top, left: pad.left, right: pad.right, child: chapterHeading(f.title, widget.style, _width, accent: widget.headingAccent)),
+        if (i == 0 && f.head > 0) Positioned(top: pad.top, left: pad.left, right: pad.right, child: chapterHeading(f.title, widget.style, _width, height: f.head, accent: widget.headingAccent)),
         Padding(
           padding: i == 0 ? pad.copyWith(top: pad.top + f.head) : pad,
-          child: Text.rich(f.spanOf(f.starts[i], end), key: live ? _keyFor(i) : null, textScaler: TextScaler.noScaling, strutStyle: readerStrut(widget.style)),
+          child: useLiveHighlight
+              ? ValueListenableBuilder<(int, int)?>(
+                  valueListenable: widget.highlight!,
+                  builder: (_, hl, _) => material.Text.rich(widget.spanOfHighlight!(f.starts[i], end, hl), key: _keyFor(i), textScaler: TextScaler.noScaling, strutStyle: readerStrut(widget.style)),
+                )
+              : material.Text.rich(f.spanOf(f.starts[i], end), key: live ? _keyFor(i) : null, textScaler: TextScaler.noScaling, strutStyle: readerStrut(widget.style)),
         ),
-        if ((i > 0 || f.head == 0) && chrome != _Chrome.right) Positioned(top: view.top + 10, left: widget.margin, right: widget.margin, child: Text(f.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: faint)),
-        if (widget.showFooter) Positioned(bottom: view.bottom + 10, left: widget.margin, right: widget.margin, child: ReaderFooter(status: chrome == _Chrome.right ? null : widget.status, right: progress, style: faint)),
+        if (hLeft != ReaderChromeField.empty || hRight != ReaderChromeField.empty)
+          Positioned(
+            top: view.top + 10,
+            left: widget.margin,
+            right: widget.margin,
+            child: ReaderChromeRow(
+              leftField: hLeft,
+              rightField: hRight,
+              style: faint,
+              chapterTitle: f.title,
+              bookTitle: cfg.bookTitle,
+              status: widget.status,
+              pageProgress: pageProgress,
+              volumeEta: etaText,
+              volumeProgressText: volProgressText,
+            ),
+          ),
+        if (widget.showFooter && (fLeft != ReaderChromeField.empty || fRight != ReaderChromeField.empty))
+          Positioned(
+            bottom: view.bottom + 10,
+            left: widget.margin,
+            right: widget.margin,
+            child: ReaderChromeRow(
+              leftField: fLeft,
+              rightField: fRight,
+              style: faint,
+              chapterTitle: f.title,
+              bookTitle: cfg.bookTitle,
+              status: widget.status,
+              pageProgress: pageProgress,
+              volumeEta: etaText,
+              volumeProgressText: volProgressText,
+            ),
+          ),
       ],
     );
   }
@@ -1226,8 +1413,10 @@ class _PagedBodyState extends State<PagedBody> {
     }
     switch (tapActionAt(widget.tapZone, widget.tapInvert, local, size, paged: true)) {
       case TapAction.prev:
+        widget.onUserInteract?.call();
         _step(-1);
       case TapAction.next:
+        widget.onUserInteract?.call();
         _step(1);
       case TapAction.menu:
         widget.onTapZone();
@@ -1264,6 +1453,7 @@ class _PagedBodyState extends State<PagedBody> {
       builder: (context, box) {
         final cols = widget.dual && box.maxWidth >= 900 ? 2 : 1;
         final size = Size(box.maxWidth / cols - pad.horizontal, box.maxHeight - pad.vertical);
+        _layoutSize = size;
         PagedBody.lastLayout = (size, cols);
         // 同样的版面（大小、样式、正文）不重复分页；开关菜单栏、拖滑块这类重建不会触发全文排版
         final sig = Object.hash(size, cols, widget.style, _c.text.length, _c.text.hashCode, widget.title, widget.volumeCover != null);
@@ -1294,8 +1484,10 @@ class _PagedBodyState extends State<PagedBody> {
             _prefetch();
           });
         }
-        _prev = _flowOf(widget.prevChapter, size);
-        _next = _flowOf(widget.nextChapter, size);
+        // 双页拼接屏立即可见时才同步排可见邻章，其余情况延后到帧后且靠近章首/章末再排
+        _prev = _needPrevSync ? _flowOf(widget.prevChapter, size) : _flowIfCached(widget.prevChapter);
+        _next = _needNextSync ? _flowOf(widget.nextChapter, size) : _flowIfCached(widget.nextChapter);
+        _schedulePeek();
         // 相邻章节后来才加载好（预加载完成）时也要提前解码它们的卷封面，不然翻到那一屏时封面要现解码
         final covers = (_prev?.cover, _next?.cover);
         if (covers != _covers) {
@@ -1315,10 +1507,14 @@ class _PagedBodyState extends State<PagedBody> {
             firstIndex: _canTurnPrev ? -1 : 0,
             initialIndex: _page,
             background: widget.background,
+            pageBackground: widget.pageBackground,
+            cacheKey: Object.hash(sig, widget.background, widget.backgroundKey, widget.chromeConfig?.layoutSignature, widget.color, widget.showFooter, widget.headingAccent?.$1, _prev?.starts.length, _next?.starts.length, _c.marks.length),
+            cacheInvalidator: widget.status,
             pageBuilder: (context, i, live) => _pageContent(context, i, live, pad),
             onIndexChanged: _changed,
             onReachStart: _reachStart,
             onReachEnd: _reachEnd,
+            onUserDragStart: widget.onUserInteract,
           );
         } else {
           final base = _canTurnPrev ? 1 : 0;
@@ -1329,10 +1525,15 @@ class _PagedBodyState extends State<PagedBody> {
           _controller ??= PageController(initialPage: _page + _base);
           pages = NotificationListener<ScrollNotification>(
             onNotification: (n) {
-              if (n is ScrollStartNotification) _dragFrom = n.dragDetails == null ? null : _controller?.page;
+              if (n is ScrollStartNotification) {
+                _scrolling = true;
+                _dragFrom = n.dragDetails == null ? null : _controller?.page;
+                if (n.dragDetails != null) widget.onUserInteract?.call();
+              }
               // 第一页往前滑、最后一页往后滑：松手后切到上一章 / 下一章
               if (n is OverscrollNotification) _overscroll = n.overscroll;
               if (n is ScrollEndNotification) {
+                _scrolling = false;
                 _dragFrom = null;
                 final at = _controller?.page ?? 0;
                 final unit = at.round() - _base;
@@ -1344,6 +1545,7 @@ class _PagedBodyState extends State<PagedBody> {
                   if (_overscroll < 0) _reachStart();
                 }
                 _overscroll = 0;
+                _schedulePeek();
               }
               return false;
             },

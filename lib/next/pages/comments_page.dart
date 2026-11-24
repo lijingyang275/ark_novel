@@ -5,7 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../models/comment_item.dart';
 import '../../models/reply_item.dart';
 import '../data.dart';
-import '../router.dart';
+import '../routes.dart';
 import '../session.dart';
 import '../widgets.dart';
 import '../text.dart';

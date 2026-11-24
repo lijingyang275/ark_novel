@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart' show TargetPlatform, defaultTargetPlatform, kIsWeb;
+import 'package:flutter/foundation.dart' show TargetPlatform, defaultTargetPlatform, kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -26,9 +26,18 @@ Future<bool> authenticate(String reason) async {
 /// 包在整个 App 外面：开了"生物识别锁"时，冷启动、或者离开超过设定时间再回来，先盖一层锁屏要验证；
 /// 同时按"防截屏"设置通知安卓开关 FLAG_SECURE（截不了屏、最近任务里不显示内容）。
 class AppGuard extends ConsumerStatefulWidget {
-  const AppGuard({super.key, required this.child});
+  const AppGuard({
+    super.key,
+    required this.child,
+    @visibleForTesting this.canAuth,
+    @visibleForTesting this.onAuthenticate,
+    @visibleForTesting this.now,
+  });
 
   final Widget child;
+  final Future<bool> Function()? canAuth;
+  final Future<bool> Function(String reason)? onAuthenticate;
+  final DateTime Function()? now;
 
   @override
   ConsumerState<AppGuard> createState() => _AppGuardState();
@@ -72,10 +81,10 @@ class _AppGuardState extends ConsumerState<AppGuard> with WidgetsBindingObserver
     if (!lockSupported || !AppPrefs.read(P.lock, false) || _asking) return;
     final desktop = defaultTargetPlatform == TargetPlatform.macOS || defaultTargetPlatform == TargetPlatform.windows;
     if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden || (desktop && state == AppLifecycleState.inactive)) {
-      _pausedAt ??= DateTime.now();
+      _pausedAt ??= (widget.now ?? DateTime.now)();
       if (!_locked && AppPrefs.read(P.lockAfter, 0) == 0) setState(() => _locked = true);
     } else if (state == AppLifecycleState.resumed && _pausedAt != null) {
-      final away = DateTime.now().difference(_pausedAt!);
+      final away = (widget.now ?? DateTime.now)().difference(_pausedAt!);
       _pausedAt = null;
       if (_locked || away.inSeconds >= AppPrefs.read(P.lockAfter, 0) * 60) {
         if (!_locked) setState(() => _locked = true);
@@ -90,7 +99,9 @@ class _AppGuardState extends ConsumerState<AppGuard> with WidgetsBindingObserver
     final bool ok;
     try {
       // 开锁之后系统里关掉了锁屏密码：没法验证了，直接放行，不然再也进不了 App
-      ok = !await _canAuthenticate() || await authenticate('解锁 Ark Novel');
+      final canAuth = widget.canAuth ?? _canAuthenticate;
+      final auth = widget.onAuthenticate ?? authenticate;
+      ok = !await canAuth() || await auth('解锁 Ark Novel');
     } finally {
       _asking = false;
       _pausedAt = null;
@@ -108,7 +119,7 @@ class _AppGuardState extends ConsumerState<AppGuard> with WidgetsBindingObserver
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(appPrefsProvider, (_, _) => _syncSecure());
+    ref.listen(appPrefProvider(P.secure), (_, _) => _syncSecure());
     ref.listen(incognitoProvider, (_, _) => _syncSecure());
     return PopScope(
       canPop: !_locked,
@@ -126,15 +137,24 @@ class _AppGuardState extends ConsumerState<AppGuard> with WidgetsBindingObserver
               child: Material(
                 color: Theme.of(context).colorScheme.surface,
                 child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.lock_outline, size: 56),
-                      const SizedBox(height: 16),
-                      const Text('Ark Novel 已锁定'),
-                      const SizedBox(height: 16),
-                      FilledButton(onPressed: _unlock, child: const Text('解锁')),
-                    ],
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 32),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 280),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.lock_outline, size: 56),
+                          const SizedBox(height: 16),
+                          const Text('Ark Novel 已锁定'),
+                          const SizedBox(height: 24),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton(onPressed: _unlock, child: const Text('解锁')),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ),

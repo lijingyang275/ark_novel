@@ -103,12 +103,19 @@ Map<String, dynamic> _sampleAddonJson({bool withApi = true, bool withFullText = 
 };
 
 void main() {
+  late Directory tempDir;
   late ProviderContainer c;
 
   setUpAll(() async {
-    Hive.init(Directory.systemTemp.createTempSync('ark_unlock_runtime_test').path);
+    tempDir = Directory.systemTemp.createTempSync('ark_unlock_runtime_test');
+    Hive.init(tempDir.path);
     await Hive.openBox('session');
     await ChapterCache.open();
+  });
+
+  tearDownAll(() async {
+    await Hive.close();
+    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
   });
 
   setUp(() async {
@@ -280,6 +287,68 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('从文件导入'), findsOneWidget);
   });
+
+  test('UnlockFullTextRule.fromJson 校验 http/https scheme 并拒绝非法协议', () {
+    for (final bad in ['file:///etc/passwd', 'javascript:alert(1)', 'ftp://dl.example.invalid/{{aid}}.txt', '{{scheme}}://dl.example.invalid/{{aid}}.txt', 'not-a-url']) {
+      expect(
+        () => UnlockAddonConfig.fromJson({
+          'schema': 1,
+          'name': 'bad-scheme',
+          'match': {'equalsIgnoreCase': ['null']},
+          'fullText': {'urlTemplates': [bad]},
+        }),
+        throwsFormatException,
+        reason: '应拒绝非法协议/地址：$bad',
+      );
+    }
+
+    final ok = UnlockAddonConfig.fromJson({
+      'schema': 1,
+      'name': 'ok-scheme',
+      'match': {'equalsIgnoreCase': ['null']},
+      'fullText': {
+        'urlTemplates': ['https://dl{{node}}.example.invalid/{{aid_div_1000}}/{{aid}}.txt', 'http://mirror.example.invalid/{{aid}}.txt'],
+      },
+    });
+    expect(ok.fullText?.urlTemplates.length, 2);
+  });
+
+  test('UnlockService 复用持久化 Dio 实例并在 dispose() 时统一关闭', () async {
+    await c.read(unlockAddonProvider.notifier).importText(UnlockAddonCodec.encodeToken(_sampleAddonJson()));
+
+    var buildCount = 0;
+    var closeCount = 0;
+    final adapter = _CloseTrackingAdapter(
+      onClose: () => closeCount++,
+      handler: (options, _) async => ResponseBody.fromString('正文内容\n第二段', 200),
+    );
+    final service = UnlockService(
+      c.read(unlockServiceProviderRefProbeProvider),
+      apiDioBuilder: () {
+        buildCount++;
+        return Dio()..httpClientAdapter = adapter;
+      },
+    );
+
+    final c1 = await service.chapter('10', '1', () async => const []);
+    final c2 = await service.chapter('10', '2', () async => const []);
+    expect(c1.text, contains('正文内容'));
+    expect(c2.text, contains('正文内容'));
+    expect(buildCount, 1);
+    expect(closeCount, 0);
+
+    service.dispose();
+    expect(closeCount, 1);
+  });
+}
+
+class _CloseTrackingAdapter extends _MockAdapter {
+  _CloseTrackingAdapter({required this.onClose, required Future<ResponseBody> Function(RequestOptions, String) handler}) : super(handler);
+
+  final void Function() onClose;
+
+  @override
+  void close({bool force = false}) => onClose();
 }
 
 final unlockServiceProviderRefProbeProvider = Provider<Ref>((ref) => ref);

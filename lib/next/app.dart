@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'app_prefs.dart';
@@ -29,7 +30,12 @@ class NextApp extends ConsumerWidget {
       routerConfig: ref.watch(routerProvider),
       scrollBehavior: const _MouseDragBehavior(),
       builder: (context, child) {
-        Widget w = UiHant(hant: hant, child: AppGuard(child: child ?? const SizedBox.shrink()));
+        final dark = Theme.of(context).brightness == Brightness.dark;
+        final overlay = (dark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark).copyWith(statusBarColor: Colors.transparent);
+        Widget w = AnnotatedRegion<SystemUiOverlayStyle>(
+          value: overlay,
+          child: UiHant(hant: hant, child: AppGuard(child: child ?? const SizedBox.shrink())),
+        );
         if (!kIsWeb && defaultTargetPlatform == TargetPlatform.macOS) {
           final mq = MediaQuery.of(context);
           final top = math.max(mq.padding.top, 28.0);
