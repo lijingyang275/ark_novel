@@ -12,7 +12,6 @@ import '../cache.dart';
 import '../cover_trim.dart';
 import '../data.dart';
 import '../image_cache.dart';
-import '../local_books.dart' show LocalBooks, isLocalAid;
 import '../unlock.dart';
 import '../volumes.dart' show Vol, Volumes;
 import '../widgets.dart';
@@ -40,13 +39,12 @@ class _PickerPage extends ConsumerStatefulWidget {
 
 class _PickerPageState extends ConsumerState<_PickerPage> {
   late Future<List<String>> _images = _load();
-  late Future<BgmSeries?> _bgm = isLocalAid(widget.aid) ? Future.value(null) : ref.read(bangumiProvider).series(widget.aid);
+  late Future<BgmSeries?> _bgm = ref.read(bangumiProvider).series(widget.aid);
 
   /// 插图章节缓存过就直接用（若缓存里没有图则重新联网取），没缓存就联网取一次并存下；受限书取不到插图，只能从 Bangumi 挑
   Future<List<String>> _load() async {
     final cid = widget.vol.illus;
     if (cid == null) return const [];
-    if (isLocalAid(widget.aid)) return (await LocalBooks.loadChapter(widget.aid, cid)).images;
     var content = await ChapterCache.get(widget.aid, cid);
     if (content != null && content.images.isEmpty) content = null;
     if (content == null) {
@@ -92,44 +90,49 @@ class _PickerPageState extends ConsumerState<_PickerPage> {
     Widget grid(List<String> urls, {List<String>? labels, String? mark}) => SliverPadding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
       sliver: SliverLayoutBuilder(
-        builder: (context, c) => SliverGrid.builder(
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: (c.crossAxisExtent / 130).floor().clamp(3, 6),
-            mainAxisSpacing: 8,
-            crossAxisSpacing: 8,
-            childAspectRatio: kCoverAspect,
-          ),
-          itemCount: urls.length,
-          itemBuilder: (context, i) => InkWell(
-            borderRadius: BorderRadius.circular(8),
-            onTap: () => _pick(urls[i]),
-            child: Container(
-              decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainer,
-                borderRadius: BorderRadius.circular(8),
-                border: urls[i] == current
-                    ? Border.all(color: theme.colorScheme.primary, width: 3)
-                    : (urls[i] == mark ? Border.all(color: theme.colorScheme.outline, width: 2) : null),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  NetImage(urls[i], fit: BoxFit.contain),
-                  if (labels != null && labels[i].isNotEmpty)
-                    Positioned(
-                      left: 4,
-                      bottom: 4,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(4)),
-                        child: Padding(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), child: Text(labels[i], style: const TextStyle(color: Colors.white, fontSize: 11))),
+        builder: (context, c) {
+          final cols = (c.crossAxisExtent / 130).floor().clamp(3, 6);
+          final itemW = ((c.crossAxisExtent - 8 * (cols - 1)) / cols).clamp(1.0, double.infinity);
+          final decodeSize = Size(itemW, itemW / kCoverAspect);
+          return SliverGrid.builder(
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: cols,
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 8,
+              childAspectRatio: kCoverAspect,
+            ),
+            itemCount: urls.length,
+            itemBuilder: (context, i) => InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => _pick(urls[i]),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceContainer,
+                  borderRadius: BorderRadius.circular(8),
+                  border: urls[i] == current
+                      ? Border.all(color: theme.colorScheme.primary, width: 3)
+                      : (urls[i] == mark ? Border.all(color: theme.colorScheme.outline, width: 2) : null),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    NetImage(urls[i], fit: BoxFit.contain, thumbnail: true, decodeSize: decodeSize, maxDecodeWidth: 480),
+                    if (labels != null && labels[i].isNotEmpty)
+                      Positioned(
+                        left: 4,
+                        bottom: 4,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(4)),
+                          child: Padding(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), child: Text(labels[i], style: const TextStyle(color: Colors.white, fontSize: 11))),
+                        ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
 
@@ -204,16 +207,21 @@ class _CropPage extends ConsumerStatefulWidget {
 
 class _CropPageState extends ConsumerState<_CropPage> {
   final _tc = TransformationController();
-  late final Future<(Uint8List, ui.Size, CoverPixels)> _image = () async {
+  late final Future<(Uint8List, ui.Size)> _image = () async {
     final bytes = await ref.read(imageStoreProvider).load(widget.url);
-    return (bytes, await imageSize(bytes), await CoverPixels.decode(bytes));
+    return (bytes, await imageSize(bytes));
   }();
+  Future<CoverPixels>? _pixelsFuture;
   Size? _laidOut; // 按哪个框的大小摆过初始位置
   bool _trimOn = AppPrefs.read(P.coverTrim, false);
   bool _srOn = false; // 提升清晰度（Real-ESRGAN 放大），选了的封面地址带 #sr
+  bool _finishing = false;
   Rect? _inner; // 去掉白边后留下的那块（框里的坐标），没有白边或正在拖时为 null
-  (CoverPixels, ui.Size, Size)? _geom; // 现在的图和框
+  (Uint8List, ui.Size, Size)? _geom; // 现在的图和框
   Timer? _settle;
+  int _retrimGen = 0;
+
+  Future<CoverPixels> _ensurePixels(Uint8List bytes) => _pixelsFuture ??= CoverPixels.decode(bytes);
 
   @override
   void initState() {
@@ -221,37 +229,47 @@ class _CropPageState extends ConsumerState<_CropPage> {
     // 停下来一会儿（松手后的惯性也滑完了）再找白边
     _tc.addListener(() {
       _settle?.cancel();
+      if (!_trimOn) return;
       _settle = Timer(const Duration(milliseconds: 180), () {
-        if (_geom case (final px, final img, final frame)) _retrim(px, img, frame);
+        if (_geom case (final bytes, final img, final frame)) unawaited(_retrim(bytes, img, frame));
       });
     });
   }
 
   /// 框里的这块要收掉白边的话，收完是图片的哪一块（0~1 比例）
-  Rect _kept(CoverPixels px, ui.Size img, Size frame) {
+  Future<Rect> _keptAsync(Uint8List bytes, ui.Size img, Size frame) async {
     final v = _visible(img, frame);
-    return _trimOn ? px.trim(v) : v;
+    if (!_trimOn) return v;
+    final px = await _ensurePixels(bytes);
+    return px.trimAsync(v);
   }
 
-  /// 拖完、缩放完重新找一次白边，在框里标出来
-  void _retrim(CoverPixels px, ui.Size img, Size frame) {
-    if (!mounted) return;
+  /// 拖完、缩放完在后台 Isolate 重新找一次白边，在框里标出来（按代数丢弃过期结果）
+  Future<void> _retrim(Uint8List bytes, ui.Size img, Size frame) async {
+    final gen = ++_retrimGen;
+    if (!_trimOn) {
+      if (mounted && _inner != null) setState(() => _inner = null);
+      return;
+    }
     final v = _visible(img, frame);
-    final k = _kept(px, img, frame);
-    setState(
-      () => _inner = k == v
-          ? null
-          : Rect.fromLTRB(
-              (k.left - v.left) / v.width * frame.width,
-              (k.top - v.top) / v.height * frame.height,
-              (k.right - v.left) / v.width * frame.width,
-              (k.bottom - v.top) / v.height * frame.height,
-            ),
-    );
+    final px = await _ensurePixels(bytes);
+    if (!mounted || gen != _retrimGen || !_trimOn) return;
+    final k = await px.trimAsync(v);
+    if (!mounted || gen != _retrimGen || !_trimOn) return;
+    final next = k == v
+        ? null
+        : Rect.fromLTRB(
+            (k.left - v.left) / v.width * frame.width,
+            (k.top - v.top) / v.height * frame.height,
+            (k.right - v.left) / v.width * frame.width,
+            (k.bottom - v.top) / v.height * frame.height,
+          );
+    setState(() => _inner = next);
   }
 
   @override
   void dispose() {
+    _retrimGen++;
     _settle?.cancel();
     _tc.dispose();
     super.dispose();
@@ -286,28 +304,35 @@ class _CropPageState extends ConsumerState<_CropPage> {
         actions: [
           TextButton(
             // 整张也去掉四周的白边（开着自动去白边时）
-            onPressed: () async {
-              const full = Rect.fromLTWH(0, 0, 1, 1);
-              final px = _trimOn ? (await _image).$3 : null;
-              final r = px?.trim(full) ?? full;
-              if (context.mounted) Navigator.pop(context, withSr(r == full ? widget.url : withCrop(widget.url, r), _srOn));
-            },
+            onPressed: _finishing
+                ? null
+                : () async {
+                    setState(() => _finishing = true);
+                    try {
+                      const full = Rect.fromLTWH(0, 0, 1, 1);
+                      final r = _trimOn ? await (await _ensurePixels((await _image).$1)).trimAsync(full) : full;
+                      if (context.mounted) Navigator.pop(context, withSr(r == full ? widget.url : withCrop(widget.url, r), _srOn));
+                    } finally {
+                      if (mounted) setState(() => _finishing = false);
+                    }
+                  },
             child: const Text('用整张'),
           ),
         ],
       ),
-      body: FutureBuilder<(Uint8List, ui.Size, CoverPixels)>(
+      body: FutureBuilder<(Uint8List, ui.Size)>(
         future: _image,
         builder: (context, snap) {
           if (snap.hasError) return const StatePanel(title: '图片加载失败', detail: '检查网络后再试一次。');
           if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-          final (bytes, img, px) = snap.data!;
+          final (bytes, img) = snap.data!;
+          final previewCacheW = math.min(img.width.round(), 1600);
           return LayoutBuilder(
             builder: (context, c) {
               final w = math.min(c.maxWidth - 48, (c.maxHeight - (ImageStore.srSupported ? 244 : 196)) * kCoverAspect); // 下面留出开关和按钮几行
               final frame = Size(w, w / kCoverAspect);
               final child = _fill(img, frame);
-              _geom = (px, img, frame);
+              _geom = (bytes, img, frame);
               if (_laidOut != frame) {
                 _laidOut = frame;
                 // 横版展开图（封底 + 书脊 + 封面）的封面在右边，一开始就对准右边；竖图居中
@@ -329,10 +354,13 @@ class _CropPageState extends ConsumerState<_CropPage> {
                               minScale: 1,
                               maxScale: 6,
                               clipBehavior: Clip.none,
-                              onInteractionStart: (_) => setState(() => _inner = null),
+                              onInteractionStart: (_) {
+                                _retrimGen++;
+                                if (_inner != null) setState(() => _inner = null);
+                              },
                               child: SizedBox.fromSize(
                                 size: child,
-                                child: Image.memory(bytes, fit: BoxFit.fill),
+                                child: Image.memory(bytes, fit: BoxFit.fill, cacheWidth: previewCacheW > 0 ? previewCacheW : null),
                               ),
                             ),
                             // 框外压暗，框线
@@ -353,8 +381,11 @@ class _CropPageState extends ConsumerState<_CropPage> {
                           value: _trimOn,
                           onChanged: (v) {
                             ref.read(appPrefsProvider.notifier).set(P.coverTrim, v);
-                            _trimOn = v;
-                            _retrim(px, img, frame);
+                            setState(() {
+                              _trimOn = v;
+                              if (!v) _inner = null;
+                            });
+                            unawaited(_retrim(bytes, img, frame));
                           },
                         ),
                         const SizedBox(width: 8),
@@ -392,7 +423,7 @@ class _CropPageState extends ConsumerState<_CropPage> {
                             final f = math.max(1.0, cur / 1.2) / cur;
                             final cx = frame.width / 2, cy = frame.height / 2;
                             _tc.value = (Matrix4.translationValues(cx, cy, 0)..multiply(Matrix4.diagonal3Values(f, f, 1))..multiply(Matrix4.translationValues(-cx, -cy, 0)))..multiply(_tc.value);
-                            _retrim(px, img, frame);
+                            unawaited(_retrim(bytes, img, frame));
                           },
                         ),
                         IconButton(
@@ -405,7 +436,7 @@ class _CropPageState extends ConsumerState<_CropPage> {
                             final f = math.min(6.0, cur * 1.2) / cur;
                             final cx = frame.width / 2, cy = frame.height / 2;
                             _tc.value = (Matrix4.translationValues(cx, cy, 0)..multiply(Matrix4.diagonal3Values(f, f, 1))..multiply(Matrix4.translationValues(-cx, -cy, 0)))..multiply(_tc.value);
-                            _retrim(px, img, frame);
+                            unawaited(_retrim(bytes, img, frame));
                           },
                         ),
                         const SizedBox(width: 4),
@@ -414,10 +445,17 @@ class _CropPageState extends ConsumerState<_CropPage> {
                         ),
                         FilledButton(
                           style: FilledButton.styleFrom(minimumSize: const Size(88, 44)), // 主题默认按钮占满整行，这里要和文字并排
-                          onPressed: () {
-                            final r = _kept(px, img, frame);
-                            Navigator.pop(context, withSr(r.width > 0.995 && r.height > 0.995 ? widget.url : withCrop(widget.url, r), _srOn));
-                          },
+                          onPressed: _finishing
+                              ? null
+                              : () async {
+                                  setState(() => _finishing = true);
+                                  try {
+                                    final r = await _keptAsync(bytes, img, frame);
+                                    if (context.mounted) Navigator.pop(context, withSr(r.width > 0.995 && r.height > 0.995 ? widget.url : withCrop(widget.url, r), _srOn));
+                                  } finally {
+                                    if (mounted) setState(() => _finishing = false);
+                                  }
+                                },
                           child: const Text('完成'),
                         ),
                       ],

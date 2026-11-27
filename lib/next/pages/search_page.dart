@@ -4,6 +4,7 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../data.dart';
 import '../env.dart';
+import '../motion.dart';
 import '../session.dart';
 import '../widgets.dart';
 import '../text.dart';
@@ -54,6 +55,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
   @override
   Widget build(BuildContext context) {
     final api = ref.watch(apiProvider);
+    final node = ref.watch(nodeProvider);
     final guest = !isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut;
     final theme = Theme.of(context);
     return Scaffold(
@@ -71,16 +73,21 @@ class _SearchPageState extends ConsumerState<SearchPage> {
             suffixIconConstraints: const BoxConstraints(minWidth: 0, minHeight: 0),
             suffixIcon: ValueListenableBuilder<TextEditingValue>(
               valueListenable: _controller,
-              builder: (context, value, _) => value.text.isEmpty
-                  ? const SizedBox.shrink()
-                  : IconButton(
-                      tooltip: hz(context, '清空输入'),
-                      icon: const Icon(Icons.clear, size: 18),
-                      onPressed: () {
-                        _controller.clear();
-                        if (_keyword != null) setState(() => _keyword = null);
-                      },
-                    ),
+              builder: (context, value, _) => AppReveal(
+                visible: value.text.isNotEmpty,
+                offset: Offset.zero,
+                beginScale: 0.72,
+                duration: AppMotion.fast,
+                reverseDuration: AppMotion.instant,
+                child: IconButton(
+                  tooltip: hz(context, '清空输入'),
+                  icon: const Icon(Icons.clear, size: 18),
+                  onPressed: () {
+                    _controller.clear();
+                    if (_keyword != null) setState(() => _keyword = null);
+                  },
+                ),
+              ),
             ),
           ),
           onSubmitted: _search,
@@ -105,41 +112,51 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                   ),
                 ),
                 Expanded(
-                  child: _keyword == null
-                      ? contentWidth(
-                          ListView(
-                            children: [
-                              Padding(
-                                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                                child: Text('文库限制两次搜索至少间隔 5 秒，连续搜索会自动排队等待。', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-                              ),
-                              if (_history.isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
-                                  child: Row(
-                                    children: [
-                                      Expanded(child: Text('搜索历史', style: theme.textTheme.titleSmall)),
-                                      TextButton(onPressed: () => setState(() => _box.delete('searchHistory')), child: const Text('清空')),
-                                    ],
+                  child: AppCrossfade(
+                    fill: true,
+                    duration: AppMotion.fast,
+                    child: _keyword == null
+                        ? KeyedSubtree(
+                            key: const ValueKey('search-history'),
+                            child: contentWidth(
+                              ListView(
+                                children: [
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                                    child: Text('文库限制两次搜索至少间隔 5 秒，连续搜索会自动排队等待。', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                                   ),
-                                ),
-                              for (final h in _history)
-                                ListTile(
-                                  leading: const Icon(Icons.history),
-                                  title: Text(h),
-                                  trailing: IconButton(tooltip: hz(context, '删除'), icon: const Icon(Icons.close), onPressed: () => setState(() => _box.put('searchHistory', _history.where((e) => e != h).toList()))),
-                                  onTap: () => _search(h),
-                                ),
-                            ],
+                                  if (_history.isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
+                                      child: Row(
+                                        children: [
+                                          Expanded(child: Text('搜索历史', style: theme.textTheme.titleSmall)),
+                                          TextButton(onPressed: () => setState(() => _box.delete('searchHistory')), child: const Text('清空')),
+                                        ],
+                                      ),
+                                    ),
+                                  for (final h in _history)
+                                    ListTile(
+                                      leading: const Icon(Icons.history),
+                                      title: Text(h),
+                                      trailing: IconButton(tooltip: hz(context, '删除'), icon: const Icon(Icons.close), onPressed: () => setState(() => _box.put('searchHistory', _history.where((e) => e != h).toList()))),
+                                      onTap: () => _search(h),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          )
+                        : KeyedSubtree(
+                            key: const ValueKey('search-results'),
+                            child: PagedNovelGrid(
+                              key: ValueKey((node, _keyword, _byAuthor)),
+                              emptyTitle: '没有找到相关小说',
+                              emptyDetail: '换个关键词试试，或切换上方的「书名 / 作者」',
+                              sourceHtml: () => lastFailedHtml,
+                              fetchWithCancel: (page, cancelToken) => api.search(_keyword!, byAuthor: _byAuthor, page: page, cancelToken: cancelToken),
+                            ),
                           ),
-                        )
-                      : PagedNovelGrid(
-                          key: ValueKey((_keyword, _byAuthor)),
-                          emptyTitle: '没有找到相关小说',
-                          emptyDetail: '换个关键词试试，或切换上方的「书名 / 作者」',
-                          sourceHtml: () => lastFailedHtml,
-                          fetch: (page) => api.search(_keyword!, byAuthor: _byAuthor, page: page),
-                        ),
+                  ),
                 ),
               ],
             ),

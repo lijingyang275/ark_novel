@@ -10,6 +10,8 @@ import 'package:ark_novel/next/bookmarks.dart';
 import 'package:ark_novel/next/cache.dart';
 import 'package:ark_novel/next/data.dart';
 import 'package:ark_novel/next/history.dart';
+import 'package:ark_novel/next/image_cache.dart';
+import 'package:ark_novel/next/library.dart';
 import 'package:ark_novel/next/pages/bookmarks_page.dart';
 import 'package:ark_novel/next/pages/discover_page.dart';
 import 'package:ark_novel/next/pages/library_pages.dart';
@@ -25,6 +27,8 @@ import 'package:ark_novel/next/pages/wall_page.dart';
 import 'package:ark_novel/next/read_state.dart';
 import 'package:ark_novel/next/routes.dart';
 import 'package:ark_novel/next/session.dart';
+import 'package:ark_novel/next/settings.dart';
+import 'package:ark_novel/next/shelf_tabs.dart';
 import 'package:ark_novel/next/stats.dart';
 import 'package:ark_novel/next/sync.dart';
 import 'package:ark_novel/next/theme.dart';
@@ -515,12 +519,23 @@ void main() {
     final todayCard = tester.widget<Material>(find.ancestor(of: find.text('今天'), matching: find.byType(Material)).first);
     expect(todayCard.borderRadius, equals(BorderRadius.circular(6)));
 
-    final todayLabel = '${now.year}年${now.month}月${now.day}日，30 分钟';
-    final cell = find.byTooltip(todayLabel);
-    await tester.scrollUntilVisible(cell, 300, scrollable: find.byType(Scrollable).first);
-    await tester.tap(cell);
-    await tester.pump();
-    expect(find.textContaining('${now.year}年${now.month}月${now.day}日 · 30 分钟'), findsOneWidget);
+    final semantics = tester.ensureSemantics();
+    try {
+      final todayLabel = '${now.year}年${now.month}月${now.day}日，30 分钟';
+      final heatmap = find.byKey(const ValueKey('stats-heatmap'));
+      await tester.scrollUntilVisible(heatmap, 300, scrollable: find.byType(Scrollable).first);
+      await tester.pump();
+      expect(find.semantics.byLabel(todayLabel), findsOneWidget);
+      final hmTopLeft = tester.getTopLeft(heatmap);
+      final hmSize = tester.getSize(heatmap);
+      final weeks = ((hmSize.width + 3) / 16).round();
+      final todayCell = hmTopLeft + Offset((weeks - 1) * 16.0 + 6.5, (now.weekday - 1) * 16.0 + 6.5);
+      await tester.tapAt(todayCell);
+      await tester.pump();
+      expect(find.textContaining('${now.year}年${now.month}月${now.day}日 · 30 分钟'), findsOneWidget);
+    } finally {
+      semantics.dispose();
+    }
   });
 
   testWidgets('ReportPage：AnnotatedRegion<SystemUiOverlayStyle> 浅色状态栏 + 五星热区 ≥44dp 且带 Semantics', (tester) async {
@@ -551,4 +566,137 @@ void main() {
     expect(ReadState.rating('60'), 3);
     expect(find.text('还不错'), findsOneWidget);
   });
+
+  test('shelf_tabs：Set 加速 shelfBooksIn 与秩映射排序 allShelfTabs / shelfTabs', () async {
+    final box = Hive.box('session');
+    await box.clear();
+    await box.put('shelfTabOrder', ['c2', doneShelfTab, '']);
+
+    final lib = LibraryState(
+      const {
+        '1': LibBook(aid: '1', title: '连载书', img: '', done: false),
+        '2': LibBook(aid: '2', title: '完结书', img: '', done: true),
+        '3': LibBook(aid: '3', title: '手动归完结', img: '', done: false, cats: ['cat_done']),
+        '4': LibBook(aid: '4', title: '手动归连载', img: '', done: true, cats: ['cat_ongoing']),
+        '5': LibBook(aid: '5', title: '自定义分类', img: '', done: false, cats: ['c2']),
+      },
+      const [
+        LibCategory('cat_done', '完结'),
+        LibCategory('cat_ongoing', '连载'),
+        LibCategory('c1', '轻改'),
+        LibCategory('c2', '推理'),
+      ],
+    );
+
+    expect(shelfBooksIn(lib, '').map((b) => b.aid).toSet(), {'1', '2', '3', '4', '5'});
+    expect(shelfBooksIn(lib, ongoingShelfTab).map((b) => b.aid).toSet(), {'1', '4', '5'});
+    expect(shelfBooksIn(lib, doneShelfTab).map((b) => b.aid).toSet(), {'2', '3', '4'});
+    expect(shelfBooksIn(lib, 'c2').map((b) => b.aid).toSet(), {'5'});
+
+    final ordered = allShelfTabs(lib.cats).map((c) => c.id).toList();
+    expect(ordered, ['c2', doneShelfTab, '', ongoingShelfTab, 'c1']);
+
+    final shown = shelfTabs(lib.cats, hidden: ['c2', 'c1']).map((c) => c.id).toList();
+    expect(shown, [doneShelfTab, '', ongoingShelfTab]);
+  });
+
+  testWidgets('SettingsSectionPage：数据页缓存 diskBytes 不重复扫盘；阅读滑块本地预览且松手落盘', (tester) async {
+    await resetBox(tester);
+    var diskBytesCalls = 0;
+    final fakeStore = _CountingImageStore(onDiskBytes: () async {
+      diskBytesCalls++;
+      return 2 * 1024 * 1024;
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          sessionStoreProvider.overrideWithValue(store),
+          imageStoreProvider.overrideWithValue(fakeStore),
+        ],
+        child: const MaterialApp(home: SettingsSectionPage(section: SettingsSection.data)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(diskBytesCalls, 1);
+    expect(find.textContaining('2.0 MB'), findsOneWidget);
+
+    // 切换本页无关开关触发 rebuild，不应再次调用 diskBytes()
+    await tester.runAsync(() async {
+      await tester.tap(find.text('启动时自动清理章节缓存'));
+      await Hive.box('session').flush();
+    });
+    await tester.pumpAndSettle();
+    expect(diskBytesCalls, 1);
+
+    // 切到阅读页，测试字号滑块 onChanged 仅更新本地预览，onChangeEnd 才写 readerPrefsProvider
+    final container = ProviderContainer(overrides: [sessionStoreProvider.overrideWithValue(store)]);
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(home: SettingsSectionPage(section: SettingsSection.reading)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final beforeFont = container.read(readerPrefsProvider).fontSize;
+    final fontSliderFinder = find.byType(Slider).first;
+    await tester.scrollUntilVisible(fontSliderFinder, 300, scrollable: find.byType(Scrollable).first);
+    await tester.pumpAndSettle();
+    final slider = tester.widget<Slider>(fontSliderFinder);
+    slider.onChanged?.call(24);
+    await tester.pump();
+    expect(container.read(readerPrefsProvider).fontSize, beforeFont);
+    expect(find.text('24'), findsOneWidget);
+    await tester.runAsync(() async {
+      slider.onChangeEnd?.call(24);
+      await Hive.box('session').flush();
+    });
+    await tester.pump();
+    expect(container.read(readerPrefsProvider).fontSize, 24);
+  });
+
+  testWidgets('AccountAvatar：自定义本地头像使用 ResizeImage 限制解码尺寸', (tester) async {
+    await resetBox(tester);
+    const png1x1 = <int>[
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+      0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+      0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+      0x42, 0x60, 0x82,
+    ];
+    final dummyFile = File('${dir.path}/avatar_dummy.png')..writeAsBytesSync(png1x1);
+    await tester.runAsync(() async {
+      await Hive.box('session').put('avatar', dummyFile.path);
+      await Hive.box('session').flush();
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [sessionStoreProvider.overrideWithValue(store)],
+        child: const MaterialApp(home: Scaffold(body: AccountAvatar(radius: 28))),
+      ),
+    );
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+    await tester.pump();
+    final avatar = tester.widget<CircleAvatar>(find.byType(CircleAvatar));
+    expect(avatar.foregroundImage, isA<ResizeImage>());
+    final resized = avatar.foregroundImage! as ResizeImage;
+    expect(resized.width, inInclusiveRange(64, 512));
+    await tester.pumpWidget(const SizedBox());
+  });
+}
+
+class _CountingImageStore implements ImageStore {
+  _CountingImageStore({required this.onDiskBytes});
+
+  final Future<int> Function() onDiskBytes;
+
+  @override
+  Future<int> diskBytes() => onDiskBytes();
+
+  @override
+  Future<void> clearDisk() async {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

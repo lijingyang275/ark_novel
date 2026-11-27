@@ -4,7 +4,6 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../models/cat_volume.dart';
 import 'cache.dart';
-import 'local_books.dart' show LocalBooks, isLocalAid;
 import 'progress.dart';
 import 'read_state.dart';
 import 'stats.dart';
@@ -37,8 +36,12 @@ class Volumes {
 
   static Box get _box => Hive.box('session');
 
-  /// 卷封面、读完状态变了：书架、书籍墙、报告页据此刷新
+  /// 卷封面、读完状态或评分变了：书架、书籍墙、报告页据此刷新（向后兼容全量通知）
   static final changes = ValueNotifier<int>(0);
+
+  /// 仅完读状态或评分变了（不含后台封面补齐），供统计/个人页等不关心封面变化的视图按需订阅
+  static final metaChanges = ValueNotifier<int>(0);
+
   static final _aidNotifiers = <String, _AidVolumeNotifier>{};
   static bool _inSingleNotify = false;
   static bool _globalBridgeAttached = false;
@@ -70,7 +73,7 @@ class Volumes {
     }
   }
 
-  /// 通知单本书的卷数据（封面、读完、评分等）发生变化：只刷新该书局部订阅者并同步递增全局 [changes]。
+  /// 通知单本书的卷封面等数据发生变化：只刷新该书局部订阅者并同步递增全局 [changes]（不触发 [metaChanges]）。
   static void notifyAid(String aid) {
     _aidNotifiers[aid]?.value++;
     _inSingleNotify = true;
@@ -81,10 +84,30 @@ class Volumes {
     }
   }
 
-  // 参照 ReadState._sets：Hive 底层对象未换（identical）时复用只读视图，避免书架/3D/翻页高频重复反序列化。
+  /// 通知单本书的完读状态或评分发生变化：同时刷新该书局部订阅者、[metaChanges] 与兼容全局 [changes]。
+  static void notifyMetaAid(String aid) {
+    _aidNotifiers[aid]?.value++;
+    metaChanges.value++;
+    _inSingleNotify = true;
+    try {
+      changes.value++;
+    } finally {
+      _inSingleNotify = false;
+    }
+  }
+
+  // 参照 ReadState._sets：Hive 底层对象未换（identical）时复用只读视图，LRU 上限 128 防止长会话无限增长。
+  static const _cacheCap = 128;
   static final _volsCache = <String, (List, List<Vol>)>{};
   static final _coversCache = <String, (Map, Map<String, String>)>{};
   static final _doneCache = <String, (Map, Map<String, int>)>{};
+
+  /// 释放卷列表、卷封面与完读状态的内存缓存。
+  static void evictMemory() {
+    _volsCache.clear();
+    _coversCache.clear();
+    _doneCache.clear();
+  }
 
   static List<Vol> of(String aid) {
     final raw = _box.get('vols:$aid') as List?;
@@ -92,12 +115,18 @@ class Volumes {
       _volsCache.remove(aid);
       return const [];
     }
-    final hit = _volsCache[aid];
-    if (hit != null && identical(hit.$1, raw)) return hit.$2;
+    final hit = _volsCache.remove(aid);
+    if (hit != null && identical(hit.$1, raw)) {
+      _volsCache[aid] = hit;
+      return hit.$2;
+    }
     final list = List<Vol>.unmodifiable([
       for (final m in raw.cast<Map>()) Vol(m['t'] as String, List<String>.unmodifiable((m['c'] as List).cast<String>()), m['i'] as String?),
     ]);
     _volsCache[aid] = (raw, list);
+    while (_volsCache.length > _cacheCap) {
+      _volsCache.remove(_volsCache.keys.first);
+    }
     return list;
   }
 
@@ -158,10 +187,16 @@ class Volumes {
       _coversCache.remove(aid);
       return const {};
     }
-    final hit = _coversCache[aid];
-    if (hit != null && identical(hit.$1, raw)) return hit.$2;
+    final hit = _coversCache.remove(aid);
+    if (hit != null && identical(hit.$1, raw)) {
+      _coversCache[aid] = hit;
+      return hit.$2;
+    }
     final map = Map<String, String>.unmodifiable({for (final e in raw.entries) e.key as String: e.value as String});
     _coversCache[aid] = (raw, map);
+    while (_coversCache.length > _cacheCap) {
+      _coversCache.remove(_coversCache.keys.first);
+    }
     return map;
   }
 
@@ -226,10 +261,16 @@ class Volumes {
       _doneCache.remove(aid);
       return const {};
     }
-    final hit = _doneCache[aid];
-    if (hit != null && identical(hit.$1, raw)) return hit.$2;
+    final hit = _doneCache.remove(aid);
+    if (hit != null && identical(hit.$1, raw)) {
+      _doneCache[aid] = hit;
+      return hit.$2;
+    }
     final map = Map<String, int>.unmodifiable({for (final e in raw.entries) e.key as String: e.value as int});
     _doneCache[aid] = (raw, map);
+    while (_doneCache.length > _cacheCap) {
+      _doneCache.remove(_doneCache.keys.first);
+    }
     return map;
   }
 
@@ -249,7 +290,7 @@ class Volumes {
     };
     if (first || !mapEquals(old, next)) {
       await _box.put('vdone:$aid', next);
-      notifyAid(aid);
+      notifyMetaAid(aid);
     }
   }
 
@@ -259,9 +300,14 @@ class Volumes {
     for (final k in _box.keys.whereType<String>().where((k) => k.startsWith('vdone:'))) {
       final aid = k.substring(6);
       final vols = of(aid);
+      if (vols.isEmpty) continue;
+      final indexByTitle = <String, int>{};
+      for (var i = 0; i < vols.length; i++) {
+        indexByTitle.putIfAbsent(vols[i].title, () => i);
+      }
       for (final e in done(aid).entries) {
-        final i = vols.indexWhere((v) => v.title == e.key);
-        if (i >= 0) out.add((aid, i, vols[i], e.value));
+        final i = indexByTitle[e.key];
+        if (i != null) out.add((aid, i, vols[i], e.value));
       }
     }
     return out..sort((a, b) => b.$4.compareTo(a.$4));
@@ -276,7 +322,7 @@ class Volumes {
       'vrate:$aid': {...((_box.get('vrate:$aid') as Map?) ?? const {}), title: stars},
       'vrateTs:$aid': {...((_box.get('vrateTs:$aid') as Map?) ?? const {}), title: DateTime.now().millisecondsSinceEpoch},
     });
-    notifyAid(aid);
+    notifyMetaAid(aid);
   }
 
   // ---- 统计 ----
@@ -298,8 +344,7 @@ class Volumes {
   /// 这卷读过的字数：读过、而且缓存过（读过的章节都会自动缓存）的章节字数之和。
   static int readChars(String aid, Vol v) {
     final read = ReadState.readView(aid);
-    final local = isLocalAid(aid);
-    return v.cids.where(read.contains).fold(0, (a, c) => a + ((local ? LocalBooks.chapterLength(aid, c) : ChapterCache.length(aid, c)) ?? 0));
+    return v.cids.where(read.contains).fold(0, (a, c) => a + (ChapterCache.length(aid, c) ?? 0));
   }
 }
 
@@ -309,12 +354,20 @@ class _AidVolumeNotifier extends ValueNotifier<int> {
   bool get active => hasListeners;
 }
 
-/// 卷数据变了就重建（书籍墙、统计等全局视图）
+/// 卷数据变了就重建（书籍墙、统计等全局视图，兼容旧调用）
 final volumeChangesProvider = Provider<int>((ref) {
   void listener() => ref.invalidateSelf();
   Volumes.changes.addListener(listener);
   ref.onDispose(() => Volumes.changes.removeListener(listener));
   return Volumes.changes.value;
+});
+
+/// 仅订阅完读状态/评分变更（不受后台卷封面补齐干扰）
+final volumeMetaChangesProvider = Provider<int>((ref) {
+  void listener() => ref.invalidateSelf();
+  Volumes.metaChanges.addListener(listener);
+  ref.onDispose(() => Volumes.metaChanges.removeListener(listener));
+  return Volumes.metaChanges.value;
 });
 
 /// 按书号细粒度订阅卷数据变化（封面、读完状态等）：单本书变更只刷新对应书卡片，不重建整个书架。

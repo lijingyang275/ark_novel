@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -17,11 +19,16 @@ import 'package:ark_novel/next/session.dart';
 import 'package:ark_novel/next/widgets.dart';
 
 class _FakeApi implements Api {
-  _FakeApi(this.handler);
+  _FakeApi(this.handler, {this.cancellableHandler});
   final Future<Content> Function(String aid, String cid) handler;
+  final Future<Content> Function(String aid, String cid, CancelToken? cancelToken)? cancellableHandler;
 
   @override
   Future<Content> chapter(String aid, String cid) => handler(aid, cid);
+
+  @override
+  Future<Content> fetchChapter(String aid, String cid, {CancelToken? cancelToken}) =>
+      cancellableHandler != null ? cancellableHandler!(aid, cid, cancelToken) : handler(aid, cid);
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -232,5 +239,68 @@ void main() {
 
     // Provider 销毁时触发 store.dispose 不抛错
     c.dispose();
+  });
+
+  test('ChapterCache 异步刷新 totalBytes、O(1) metaOf、putBatch 批量写入与 pt| 事件过滤', () async {
+    await ChapterCache.putBatch('batchBook', {
+      'c1': (length: 5, images: const <String>[], gzipped: null, text: '第一章正文'),
+      'c2': (length: 5, images: const <String>[], gzipped: null, text: '第二章正文'),
+    });
+    expect(ChapterCache.count('batchBook'), 2);
+    expect((await ChapterCache.get('batchBook', 'c1'))?.text, '第一章正文');
+    expect((await ChapterCache.get('batchBook', 'c2'))?.text, '第二章正文');
+
+    await ChapterCache.setMeta('batchBook', '批量测试书', 2, 'https://img.example/b.jpg', 'c1');
+    expect(ChapterCache.metaOf('batchBook'), ('批量测试书', 2, 'https://img.example/b.jpg', 'c1'));
+    expect(ChapterCache.metaOf('not_exists'), isNull);
+
+    final refreshed = await ChapterCache.refreshTotalBytes();
+    expect(refreshed, greaterThan(0));
+    expect(ChapterCache.totalBytes(), refreshed);
+    expect(ChapterCache.bytesOf('batchBook'), greaterThan(0));
+
+    // chapterCacheChangesProvider 过滤掉 pt| 网页备份时间戳事件
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+    final events = <Object?>[];
+    final sub = c.listen(chapterCacheChangesProvider, (_, next) {
+      next.whenData((e) => events.add(e.key));
+    });
+    await PageStore.put('https://www.wenku8.net/book/filter_test.htm', '<html>ok</html>');
+    await ChapterCache.put('batchBook', 'c3', Content(text: '第三章', images: const []));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(events, isNot(contains('pt|https://www.wenku8.net/book/filter_test.htm')));
+    expect(events, contains('batchBook:c3'));
+    sub.close();
+  });
+
+  test('DownloadController.cancel 立即触发在途请求的 CancelToken', () async {
+    final started = Completer<void>();
+    var cancelled = false;
+    final api = _FakeApi(
+      (_, _) async => Content(text: '', images: const []),
+      cancellableHandler: (aid, cid, cancelToken) async {
+        started.complete();
+        await cancelToken!.whenCancel;
+        cancelled = true;
+        throw cancelToken.cancelError!;
+      },
+    );
+    final c = ProviderContainer(
+      overrides: [
+        apiProvider.overrideWithValue(api),
+        imageStoreProvider.overrideWithValue(_FakeImages()),
+      ],
+    );
+    addTearDown(c.dispose);
+
+    final ctrl = c.read(downloadProvider.notifier);
+    final running = ctrl.start('cancelBook', 'Cancel', [CatChapter(title: '1', cid: 'c1')]);
+    await started.future;
+    ctrl.cancel('cancelBook');
+    await running;
+    expect(cancelled, isTrue);
+    expect(c.read(downloadProvider)['cancelBook']?.running, isFalse);
+    expect(c.read(downloadProvider)['cancelBook']?.error, isNull);
   });
 }

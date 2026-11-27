@@ -10,11 +10,12 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../data/wenku8/wenku8_parser.dart';
 import '../cover_color.dart';
+import '../motion.dart';
 import '../read_state.dart';
 import '../stats.dart';
 import '../theme.dart';
 import '../volume_covers.dart';
-import '../volumes.dart' show Volumes, volumeChangesProvider;
+import '../volumes.dart' show Volumes, volumeChangeForProvider;
 import '../widgets.dart';
 import 'cover_picker_page.dart';
 import '../text.dart';
@@ -58,7 +59,12 @@ class _ReportPageState extends ConsumerState<ReportPage> {
       await WidgetsBinding.instance.endOfFrame;
       final boundary = _shot.currentContext!.findRenderObject() as RenderRepaintBoundary;
       final image = await boundary.toImage(pixelRatio: 3);
-      final bytes = (await image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+      final Uint8List bytes;
+      try {
+        bytes = (await image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+      } finally {
+        image.dispose();
+      }
       final file = File('${(await getTemporaryDirectory()).path}/report_${widget.aid}_$_page.png');
       await file.writeAsBytes(bytes);
       await SharePlus.instance.share(ShareParams(files: [XFile(file.path)], text: '《$title》阅读报告'));
@@ -71,8 +77,8 @@ class _ReportPageState extends ConsumerState<ReportPage> {
 
   @override
   Widget build(BuildContext context) {
-    ref.watch(volumeChangesProvider);
     final aid = widget.aid;
+    ref.watch(volumeChangeForProvider(aid));
     final info = ReadingStats.info(aid);
     final vols = Volumes.of(aid);
     final queue = ref.read(volumeCoverQueueProvider);
@@ -92,10 +98,22 @@ class _ReportPageState extends ConsumerState<ReportPage> {
     final width = MediaQuery.sizeOf(context).width.clamp(0.0, 600.0);
     final bookWidth = width * 0.52;
 
-    void rate(int stars) {
-      final next = rating == stars ? 0 : stars; // 再点一次当前星数就取消评分
+    void setRating(int next) {
       v == null ? ReadState.setRating(aid, next) : Volumes.setRating(aid, v.title, next);
       setState(() {});
+    }
+
+    Widget swap(Object keyVal, Widget child, {AlignmentGeometry alignment = Alignment.centerLeft}) =>
+        _capturing ? child : AppCrossfade(duration: AppMotion.fast, alignment: alignment, child: KeyedSubtree(key: ValueKey(keyVal), child: child));
+
+    void turnPage(int delta) {
+      final target = (page + delta).clamp(0, vols.length);
+      if (target == page) return;
+      if (AppMotion.reduce(context)) {
+        _pager.jumpToPage(target);
+      } else {
+        _pager.animateToPage(target, duration: AppMotion.standard, curve: AppMotion.curve);
+      }
     }
 
     const white70 = TextStyle(color: Colors.white70, fontSize: 13);
@@ -133,7 +151,7 @@ class _ReportPageState extends ConsumerState<ReportPage> {
                   color: Colors.white70,
                   disabledColor: Colors.white24,
                   icon: const Icon(Icons.chevron_left, size: 20),
-                  onPressed: page > 0 ? () => _pager.previousPage(duration: const Duration(milliseconds: 240), curve: Curves.easeOutCubic) : null,
+                  onPressed: page > 0 ? () => turnPage(-1) : null,
                 ),
                 _Indicator(count: vols.length + 1, index: page),
                 IconButton(
@@ -142,7 +160,7 @@ class _ReportPageState extends ConsumerState<ReportPage> {
                   color: Colors.white70,
                   disabledColor: Colors.white24,
                   icon: const Icon(Icons.chevron_right, size: 20),
-                  onPressed: page < vols.length ? () => _pager.nextPage(duration: const Duration(milliseconds: 240), curve: Curves.easeOutCubic) : null,
+                  onPressed: page < vols.length ? () => turnPage(1) : null,
                 ),
               ],
             ),
@@ -155,10 +173,14 @@ class _ReportPageState extends ConsumerState<ReportPage> {
           const SizedBox(height: 16),
           Text(info.title, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.w700, fontFamilyFallback: kSerifFallback)),
           const SizedBox(height: 6),
-          Text(
-            v == null ? [if (info.author.isNotEmpty) info.author, if (vols.isNotEmpty) '全书 · 共 ${vols.length} 卷'].join(' · ') : [v.title, if (doneAt != null) '${_dayOf(doneAt)} 读完'].join(' · '),
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.white70, fontSize: 15, fontFamilyFallback: kSerifFallback),
+          swap(
+            'sub:$page',
+            Text(
+              v == null ? [if (info.author.isNotEmpty) info.author, if (vols.isNotEmpty) '全书 · 共 ${vols.length} 卷'].join(' · ') : [v.title, if (doneAt != null) '${_dayOf(doneAt)} 读完'].join(' · '),
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70, fontSize: 15, fontFamilyFallback: kSerifFallback),
+            ),
+            alignment: Alignment.center,
           ),
           const SizedBox(height: 26),
           SizedBox(
@@ -168,33 +190,18 @@ class _ReportPageState extends ConsumerState<ReportPage> {
                 children: [
                   Transform.flip(flipX: true, child: const Icon(Icons.spa, size: 14, color: _gold)),
                   const SizedBox(width: 4),
-                  Text(_ratingLabels[rating], style: const TextStyle(color: _gold, fontSize: 14, fontWeight: FontWeight.w700)),
+                  swap('rate:$rating', Text(_ratingLabels[rating], style: const TextStyle(color: _gold, fontSize: 14, fontWeight: FontWeight.w700))),
                   const SizedBox(width: 4),
                   const Icon(Icons.spa, size: 14, color: _gold),
                 ],
               ),
-              value: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (var i = 1; i <= 5; i++)
-                    Semantics(
-                      button: true,
-                      selected: i <= rating,
-                      label: '$i 星，${_ratingLabels[i]}',
-                      child: MouseRegion(
-                        cursor: SystemMouseCursors.click,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: () => rate(i),
-                          child: SizedBox(
-                            width: 44,
-                            height: 44,
-                            child: Center(child: Icon(i <= rating ? Icons.star_rounded : Icons.star_outline_rounded, color: _gold, size: 28)),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
+              value: AnimatedStarRating(
+                rating: rating,
+                starSize: 28,
+                itemSize: 44,
+                color: _gold,
+                labelBuilder: (i) => '$i 星，${_ratingLabels[i]}',
+                onChanged: setRating,
               ),
             ),
           ),
@@ -203,9 +210,9 @@ class _ReportPageState extends ConsumerState<ReportPage> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(child: _Tile(header: header(Icons.hourglass_bottom, '阅读时间'), value: _amount(_duration(time.seconds)))),
+                Expanded(child: _Tile(header: header(Icons.hourglass_bottom, '阅读时间'), value: swap('dur:$page:${time.seconds}', _amount(_duration(time.seconds))))),
                 const SizedBox(width: 10),
-                Expanded(child: _Tile(header: header(Icons.text_fields, '已读字数'), value: _amount(chars >= 10000 ? [((chars / 10000).toStringAsFixed(1), '万')] : [('$chars', '字')]))),
+                Expanded(child: _Tile(header: header(Icons.text_fields, '已读字数'), value: swap('chr:$page:$chars', _amount(chars >= 10000 ? [((chars / 10000).toStringAsFixed(1), '万')] : [('$chars', '字')])))),
               ],
             ),
           ),
@@ -214,9 +221,9 @@ class _ReportPageState extends ConsumerState<ReportPage> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(flex: 2, child: _Tile(header: header(Icons.calendar_today_outlined, '已读天数'), value: _amount([('${time.days.length}', '天')]))),
+                Expanded(flex: 2, child: _Tile(header: header(Icons.calendar_today_outlined, '已读天数'), value: swap('day:$page:${time.days.length}', _amount([('${time.days.length}', '天')])))),
                 const SizedBox(width: 10),
-                Expanded(flex: 3, child: _Tile(header: header(Icons.schedule, '阅读日期（开始 / 结束）'), value: Text(dates, style: _big))),
+                Expanded(flex: 3, child: _Tile(header: header(Icons.schedule, '阅读日期（开始 / 结束）'), value: swap('dt:$page:$dates', Text(dates, style: _big)))),
               ],
             ),
           ),
@@ -227,6 +234,29 @@ class _ReportPageState extends ConsumerState<ReportPage> {
           const SizedBox(height: 28),
           const Text('该报告由 Ark Novel 统计生成', style: TextStyle(color: Colors.white38, fontSize: 12)),
         ],
+      ),
+    );
+
+    final blurHeight = bookWidth * 4 / 3 + 260;
+    // 顶部模糊底图降采样并用 RepaintBoundary 移出颜色过渡重绘范围，避免切卷渐变期间每帧重算高斯模糊
+    final blurredBg = Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      height: blurHeight,
+      child: ClipRect(
+        child: RepaintBoundary(
+          child: AnimatedSwitcher(
+            duration: _capturing ? Duration.zero : AppMotion.dur(context, AppMotion.ambient),
+            switchInCurve: AppMotion.curve,
+            switchOutCurve: AppMotion.exit,
+            child: ImageFiltered(
+              key: ValueKey(cover),
+              imageFilter: ui.ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+              child: Opacity(opacity: 0.6, child: NetImage(cover, thumbnail: true, maxDecodeWidth: 160)),
+            ),
+          ),
+        ),
       ),
     );
 
@@ -252,34 +282,20 @@ class _ReportPageState extends ConsumerState<ReportPage> {
                 key: _shot,
                 child: TweenAnimationBuilder<Color?>(
                   tween: ColorTween(end: base),
-                  duration: const Duration(milliseconds: 400),
+                  duration: _capturing ? Duration.zero : AppMotion.dur(context, AppMotion.ambient),
+                  curve: AppMotion.curve,
                   builder: (context, color, child) => Stack(
                     children: [
                       Positioned.fill(child: ColoredBox(color: color!)),
-                      // 顶部：放大模糊的封面，往下渐变到背景色
+                      blurredBg,
                       Positioned(
                         top: 0,
                         left: 0,
                         right: 0,
-                        height: bookWidth * 4 / 3 + 260,
-                        child: ClipRect(
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              AnimatedSwitcher(
-                                duration: const Duration(milliseconds: 400),
-                                child: ImageFiltered(
-                                  key: ValueKey(cover),
-                                  imageFilter: ui.ImageFilter.blur(sigmaX: 30, sigmaY: 30),
-                                  child: Opacity(opacity: 0.6, child: NetImage(cover)),
-                                ),
-                              ),
-                              DecoratedBox(
-                                decoration: BoxDecoration(
-                                  gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [color.withValues(alpha: 0.15), color.withValues(alpha: 0.6), color]),
-                                ),
-                              ),
-                            ],
+                        height: blurHeight,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [color.withValues(alpha: 0.15), color.withValues(alpha: 0.6), color]),
                           ),
                         ),
                       ),
@@ -297,7 +313,7 @@ class _ReportPageState extends ConsumerState<ReportPage> {
   }
 }
 
-const _big = TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w700);
+const _big = TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w700, fontFeatures: [FontFeature.tabularFigures()]);
 
 List<(String, String)> _duration(int s) {
   if (s <= 0) return [('—', '')];
@@ -393,7 +409,8 @@ class _Indicator extends StatelessWidget {
             children: [
               for (var i = 0; i < count; i++)
                 AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
+                  duration: AppMotion.dur(context, AppMotion.fast),
+                  curve: AppMotion.snappy,
                   margin: const EdgeInsets.symmetric(horizontal: 3),
                   width: i == index ? 16 : 6,
                   height: 6,

@@ -2,9 +2,12 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:ark_novel/next/color_picker.dart';
+import 'package:ark_novel/next/pages/splash_page.dart';
 import 'package:ark_novel/next/routes.dart';
 import 'package:ark_novel/next/rules.dart';
 import 'package:ark_novel/next/theme.dart';
+import 'package:ark_novel/next/theme_art.dart';
+import 'package:ark_novel/next/theme_doodle.dart';
 import 'package:ark_novel/next/theme_squire.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -158,5 +161,65 @@ void main() {
     expect(Routes.reader('1', '2', offset: 42), '/reader/1/2?offset=42');
     expect(Routes.report('7', vol: 3), '/report/7?v=3');
     expect(Routes.settingsSection('appearance', highlight: '深色'), '/settings/appearance?q=%E6%B7%B1%E8%89%B2');
+  });
+
+  testWidgets('RuinsScene 拆分静动态 RepaintBoundary，PennantBadge/PennantRule/DoodleRule 均带 RepaintBoundary', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(Brightness.light, appPalettes.last),
+        home: const Scaffold(
+          body: Column(
+            children: [
+              SizedBox(width: 300, height: 140, child: RuinsScene(animate: true, ceiling: 0)),
+              SizedBox(width: 300, height: 100, child: RuinsScene(animate: false, ceiling: 0.5)),
+              PennantBadge('3', color: Colors.amber, textColor: Colors.black),
+              PennantRule(line: Colors.brown, flag: Colors.amber),
+              DoodleRule(motif: Motif.bubbles, line: Colors.blue, accent: Colors.orange),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 80));
+
+    final scenes = find.byType(RuinsScene);
+    // ceiling == 0 含静态天空、动态云、静态遗迹、动态旗 4 个独立 RepaintBoundary
+    expect(find.descendant(of: scenes.at(0), matching: find.byType(RepaintBoundary)), findsNWidgets(4));
+    // ceiling > 0 无旗帜层，3 个独立 RepaintBoundary
+    expect(find.descendant(of: scenes.at(1), matching: find.byType(RepaintBoundary)), findsNWidgets(3));
+
+    expect(find.descendant(of: find.byType(PennantBadge), matching: find.byType(RepaintBoundary)), findsOneWidget);
+    expect(find.descendant(of: find.byType(PennantRule), matching: find.byType(RepaintBoundary)), findsOneWidget);
+    expect(find.descendant(of: find.byType(DoodleRule), matching: find.byType(RepaintBoundary)), findsOneWidget);
+  });
+
+  testWidgets('SplashPage 与主题插画 Image.asset 均传入 ResizeImage cacheWidth/cacheHeight', (tester) async {
+    tester.view.devicePixelRatio = 2.0;
+    addTearDown(tester.view.reset);
+
+    final annaPalette = appPalettes.firstWhere((p) => p.art == 'anna');
+    final art = characterArtOf(annaPalette)!;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(Brightness.light, annaPalette),
+        home: Scaffold(
+          body: Column(
+            children: [
+              const Expanded(child: SplashPage()),
+              DoodleBanner(art: art, height: 120),
+              ThemeArt.navIcon(annaPalette, 0, selected: true)!,
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final images = tester.widgetList<Image>(find.byType(Image)).toList();
+    expect(images.length, greaterThanOrEqualTo(3));
+    for (final img in images) {
+      expect(img.image, isA<ResizeImage>(), reason: 'Image.asset 应设置 cacheWidth/cacheHeight 限制纹理尺寸');
+    }
   });
 }

@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart' hide Text;
+import 'package:flutter/physics.dart' show SpringSimulation;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import 'bookmarks.dart';
 import 'cache.dart';
+import 'motion.dart';
 import 'read_state.dart';
 import 'text.dart';
 
@@ -81,6 +83,7 @@ class _ChapterSwipeState extends ConsumerState<ChapterSwipe> with SingleTickerPr
   double _drag = 0; // 手指实际拖了多远：越过触发点后行跟得慢一点，有阻力感
   bool _armed = false; // 已经越过触发点，松手就执行
   int _side = 0; // 这次拖动往哪边：1 右、-1 左、0 还没定；定了就不会滑到另一边
+  int _springGen = 0;
   // 拖动开始时两边的样子：松手执行后弹回的那一下，图标不要变成反过来的动作
   (IconData, String, Color)? _rightLook, _leftLook;
 
@@ -125,6 +128,7 @@ class _ChapterSwipeState extends ConsumerState<ChapterSwipe> with SingleTickerPr
   static double _resist(double d) => d.abs() <= _kTrigger ? d : d.sign * (_kTrigger + (d.abs() - _kTrigger) * 0.4);
 
   void _start(SwipeAct right, SwipeAct left, ColorScheme scheme) {
+    _springGen++;
     _dx.stop();
     // 上一下还没弹回去就又拖：离原位还远就接着原来那边，快回到原位了就重新定方向
     _drag = _dx.value.abs() < _kDecide ? 0 : _dx.value;
@@ -153,26 +157,42 @@ class _ChapterSwipeState extends ConsumerState<ChapterSwipe> with SingleTickerPr
     }
   }
 
-  void _end(SwipeAct right, SwipeAct left) {
+  void _end(SwipeAct right, SwipeAct left, [double velocity = 0]) {
     final act = _armed ? (_drag > 0 ? right : left) : null;
     _armed = false;
     _drag = 0;
     _side = 0;
-    _dx.animateTo(0, duration: const Duration(milliseconds: 220), curve: Curves.easeOutCubic);
+    if (AppMotion.reduce(context)) {
+      _springGen++;
+      _dx.value = 0;
+    } else {
+      // 用临界阻尼弹簧承接松手速度自然弹回原位，中途再次拖动可无缝打断
+      final gen = ++_springGen;
+      final v = velocity.clamp(-1400.0, 1400.0);
+      _dx.animateWith(SpringSimulation(AppMotion.smoothSpring, _dx.value, 0, v, tolerance: AppMotion.pixelTolerance)).then((_) {
+        if (mounted && gen == _springGen && _dx.value != 0) _dx.value = 0;
+      });
+    }
     if (act != null) _run(act);
   }
 
   Widget _bg((IconData, String, Color) look, Alignment align) {
     final (icon, label, color) = look;
-    return Container(
-      color: _armed ? color : color.withValues(alpha: 0.45),
+    final d = AppMotion.dur(context, AppMotion.instant);
+    return AnimatedContainer(
+      duration: d,
+      curve: AppMotion.curve,
+      color: _armed ? color : color.withValues(alpha: 0.42),
       alignment: align,
       padding: const EdgeInsets.symmetric(horizontal: 20),
       child: AnimatedScale(
-        scale: _armed ? 1 : 0.85,
-        duration: const Duration(milliseconds: 120),
-        child: Opacity(
+        scale: _armed ? 1.06 : 0.85,
+        duration: d,
+        curve: AppMotion.snappy,
+        child: AnimatedOpacity(
           opacity: _armed ? 1 : 0.7,
+          duration: d,
+          curve: AppMotion.curve,
           child: Icon(icon, color: Colors.white, semanticLabel: label),
         ),
       ),
@@ -192,7 +212,7 @@ class _ChapterSwipeState extends ConsumerState<ChapterSwipe> with SingleTickerPr
       behavior: HitTestBehavior.translucent,
       onHorizontalDragStart: (_) => _start(right, left, scheme),
       onHorizontalDragUpdate: (d) => _update(d.primaryDelta ?? 0, right, left),
-      onHorizontalDragEnd: (_) => _end(right, left),
+      onHorizontalDragEnd: (d) => _end(right, left, d.velocity.pixelsPerSecond.dx),
       onHorizontalDragCancel: () => _end(SwipeAct.off, SwipeAct.off),
       child: AnimatedBuilder(
         animation: _dx,

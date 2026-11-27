@@ -1,10 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart' show Color, ThemeMode;
-import 'package:flutter/services.dart' show rootBundle;
-import 'package:home_widget/home_widget.dart';
+import 'package:flutter/services.dart' show MethodChannel, MissingPluginException, rootBundle;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -19,29 +19,76 @@ import 'volume_covers.dart';
 class ReadingWidget {
   ReadingWidget._();
 
-  static bool get supported => !kIsWeb && Platform.isAndroid;
+  static const _channel = MethodChannel('ark/widget');
+  static StreamController<Uri>? _clickController;
+  static bool _handlerRegistered = false;
+
+  @visibleForTesting
+  static bool? supportedOverride;
+
+  static bool get supported => supportedOverride ?? (!kIsWeb && Platform.isAndroid);
 
   static Future<void> push(VolumeCoverQueue covers, ImageStore images, AppPalette palette, ThemeMode mode) async {
     if (!supported) return;
     try {
       final books = [
-        for (final h in ReadingHistory.all().take(4))
+        for (final h in ReadingHistory.latest(limit: 4))
           if (splitCrop(covers.bookCover(h.aid, h.img)) case (:final url, :final crop)) // 和书架上同一张封面，手动裁过的按裁剪框裁
             {'aid': h.aid, 'cid': h.cid, 'cover': await _coverPath(images, url), if (crop != null) 'crop': [crop.left, crop.top, crop.width, crop.height]},
       ];
-      await Future.wait([
-        HomeWidget.saveWidgetData('books', jsonEncode(books)),
-        HomeWidget.saveWidgetData('mode', switch (mode) { ThemeMode.light => 'light', ThemeMode.dark => 'dark', ThemeMode.system => 'system' }),
-        HomeWidget.saveWidgetData('bgLight', _hex(palette.cardLight)),
-        HomeWidget.saveWidgetData('bgDark', _hex(palette.cardDark)),
-        HomeWidget.saveWidgetData('accentLight', _hex(palette.accentLight)),
-        HomeWidget.saveWidgetData('accentDark', _hex(palette.accentDark)),
-        HomeWidget.saveWidgetData('subLight', _hex(AppColors.inkSoft)),
-        HomeWidget.saveWidgetData('subDark', _hex(AppColors.paperSoft)),
-        HomeWidget.saveWidgetData('icon', palette.art == null ? null : await _icon(palette.art!)),
-      ]);
-      await HomeWidget.updateWidget(qualifiedAndroidName: 'io.github.chenshi221.ark_novel.ReadingWidget');
+      await _channel.invokeMethod<void>('saveAll', <String, String?>{
+        'books': jsonEncode(books),
+        'mode': switch (mode) {
+          ThemeMode.light => 'light',
+          ThemeMode.dark => 'dark',
+          ThemeMode.system => 'system',
+        },
+        'bgLight': _hex(palette.cardLight),
+        'bgDark': _hex(palette.cardDark),
+        'accentLight': _hex(palette.accentLight),
+        'accentDark': _hex(palette.accentDark),
+        'subLight': _hex(AppColors.inkSoft),
+        'subDark': _hex(AppColors.paperSoft),
+        'icon': palette.art == null ? null : await _icon(palette.art!),
+      });
+      await _channel.invokeMethod<void>('updateWidget');
     } catch (_) {} // 小组件更新失败不影响 App
+  }
+
+  /// 读取冷启动（或 Activity 重建）时由桌面小组件带入的初始链接；读取后原生侧会清空防止重复触发。
+  static Future<Uri?> initialUri() async {
+    if (!supported) return null;
+    try {
+      final raw = await _channel.invokeMethod<String>('getInitialUri');
+      if (raw == null || raw.isEmpty) return null;
+      return Uri.tryParse(raw);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// App 在后台/前台运行期间点击桌面小组件触发的链接流。
+  static Stream<Uri> get clicked {
+    if (!supported) return const Stream.empty();
+    _clickController ??= StreamController<Uri>.broadcast(onListen: _ensureHandler, onCancel: _clearHandler);
+    return _clickController!.stream;
+  }
+
+  static void _ensureHandler() {
+    if (_handlerRegistered) return;
+    _handlerRegistered = true;
+    _channel.setMethodCallHandler((call) async {
+      if (call.method != 'onWidgetClick') throw MissingPluginException();
+      final raw = call.arguments as String?;
+      final uri = raw == null || raw.isEmpty ? null : Uri.tryParse(raw);
+      if (uri != null) _clickController?.add(uri);
+    });
+  }
+
+  static void _clearHandler() {
+    if (!_handlerRegistered) return;
+    _handlerRegistered = false;
+    _channel.setMethodCallHandler(null);
   }
 
   static Future<String> _coverPath(ImageStore images, String url) => url.isEmpty ? Future.value('') : images.path(url).catchError((_) => '');
@@ -57,9 +104,9 @@ class ReadingWidget {
 
   /// 点小组件打开的链接 → App 里的路由：ark://reader/aid/cid、ark://updates、ark://shelf
   static String? route(Uri? uri) => switch (uri) {
-    Uri(host: 'reader', pathSegments: [final aid, final cid]) => Routes.reader(aid, cid),
-    Uri(host: 'updates') => Routes.updates,
-    Uri(host: 'shelf') => Routes.bookshelf,
+    Uri(scheme: 'ark', host: 'reader', pathSegments: [final aid, final cid]) => Routes.reader(aid, cid),
+    Uri(scheme: 'ark', host: 'updates') => Routes.updates,
+    Uri(scheme: 'ark', host: 'shelf') => Routes.bookshelf,
     _ => null,
   };
 }

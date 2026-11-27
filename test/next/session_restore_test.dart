@@ -2,8 +2,14 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:ark_novel/data/wenku8/wenku8_client.dart';
+import 'package:ark_novel/data/wenku8/wenku8_parser.dart';
 import 'package:ark_novel/models/common/charset_type.dart';
 import 'package:ark_novel/models/common/wenku8_node.dart';
+import 'package:ark_novel/next/app.dart';
+import 'package:ark_novel/next/backup.dart';
+import 'package:ark_novel/next/env.dart';
+import 'package:ark_novel/next/fonts.dart';
+import 'package:ark_novel/next/net_io.dart';
 import 'package:ark_novel/next/session.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
@@ -228,7 +234,148 @@ void main() {
     expect(friendlyError(DioException(requestOptions: ro, error: 'NSURLErrorNetworkConnectionLost Code=-1005')), contains('网络连接被中断'));
     expect(friendlyError(DioException(requestOptions: ro, error: 'NSURLErrorNotConnectedToInternet Code=-1009')), contains('网络已断开'));
     expect(friendlyError(DioException(requestOptions: ro, error: 'NSURLErrorSecureConnectionFailed Code=-1200')), contains('TLS'));
+    // cupertino_http 2.x 实际输出小写 code=-xxxx
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: bad URL [domain=NSURLErrorDomain, code=-1000], uri=https://www.wenku8.net/')), contains('NSURLError -1000'));
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: x [domain=NSURLErrorDomain, code=-1003]')), contains('无法解析域名'));
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: x [domain=NSURLErrorDomain, code=-1001]')), contains('连接超时'));
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: x [domain=NSURLErrorDomain, code=-1005]')), contains('网络连接被中断'));
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: x [domain=NSURLErrorDomain, code=-1009]')), contains('网络已断开'));
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: x [domain=NSURLErrorDomain, code=-1200]')), contains('TLS'));
   });
+
+  test('CupertinoFallbackAdapter：合法 HTTPS 遇 NSURLError -1000 自动回落 Dart IO，其他错误与带流请求原样抛出', () async {
+    var primaryClosed = false;
+    var fallbackClosed = false;
+    var fallbackCalls = 0;
+
+    final adapter = CupertinoFallbackAdapter(
+      primary: _ThrowingAdapter(
+        (o) {
+          if (o.uri.path == '/bad-url') {
+            throw Exception('NSErrorClientException: bad URL [domain=NSURLErrorDomain, code=-1000], uri=${o.uri}');
+          }
+          if (o.uri.path == '/timeout') {
+            throw Exception('NSErrorClientException: timed out [domain=NSURLErrorDomain, code=-1001]');
+          }
+          return ResponseBody.fromString('primary', 200);
+        },
+        onClose: () => primaryClosed = true,
+      ),
+      fallback: () => _ThrowingAdapter(
+        (_) {
+          fallbackCalls++;
+          return ResponseBody.fromString('fallback', 200);
+        },
+        onClose: () => fallbackClosed = true,
+      ),
+    );
+
+    final ok = await adapter.fetch(RequestOptions(path: 'https://www.wenku8.net/ok'), null, null);
+    expect(ok.statusCode, 200);
+    expect(fallbackCalls, 0);
+
+    // 合法 HTTPS 地址遇到 -1000：回落到 fallback 成功
+    final recovered = await adapter.fetch(RequestOptions(path: 'https://www.wenku8.net/bad-url'), null, null);
+    expect(recovered.statusCode, 200);
+    expect(fallbackCalls, 1);
+
+    // 有请求体流时不能重放，原样抛出
+    await expectLater(
+      adapter.fetch(RequestOptions(path: 'https://www.wenku8.net/bad-url'), Stream<Uint8List>.value(Uint8List.fromList([1])), null),
+      throwsA(isA<Exception>()),
+    );
+    expect(fallbackCalls, 1);
+
+    // 其他错误（如 -1001 超时）不误回落
+    await expectLater(adapter.fetch(RequestOptions(path: 'https://www.wenku8.net/timeout'), null, null), throwsA(isA<Exception>()));
+    expect(fallbackCalls, 1);
+
+    adapter.close();
+    expect(primaryClosed, isTrue);
+    expect(fallbackClosed, isTrue);
+  });
+
+  test('UserInfo 结构化存储复用受保护的 userHtml 键、兼容旧版 HTML 回退，且 SessionLoggedIn 实现值相等', () async {
+    final store = await SessionStore.open();
+    final parsed = Wenku8Parser.userInfo(userPage);
+
+    // 写入结构化 UserInfo 后，本地 session Box 存轻量 Map 且仍受 Backup 本地键守卫保护
+    await store.setCachedUser(parsed);
+    expect(Backup.isLocalKey('userHtml'), isTrue);
+    expect(Hive.box('session').get('userHtml'), isA<Map>());
+    expect(store.userHtml, isNull);
+    final restored = store.cachedUser;
+    expect(restored, isNotNull);
+    expect(SessionLoggedIn(restored!), equals(SessionLoggedIn(parsed)));
+    expect(SessionLoggedIn(restored).hashCode, equals(SessionLoggedIn(parsed).hashCode));
+    expect(SessionLoggedIn(restored, offline: true), isNot(equals(SessionLoggedIn(parsed))));
+    expect(SessionLoggedIn(restored, needsVerify: true), isNot(equals(SessionLoggedIn(parsed))));
+
+    // 旧版 HTML 字符串格式仍能回退解析
+    await store.setUserHtml(userPage);
+    expect(store.userHtml, userPage);
+    final fromLegacy = store.cachedUser;
+    expect(fromLegacy, isNotNull);
+    expect(SessionLoggedIn(fromLegacy!), equals(SessionLoggedIn(parsed)));
+
+    await store.setCachedUser(null);
+    expect(store.cachedUser, isNull);
+  });
+
+  test('FontStore.loadSaved 在非自选字体时跳过磁盘读取，ensureLoaded 幂等按需加载', () async {
+    await SessionStore.open();
+    final box = Hive.box('session');
+    await box.put('r.font', 1);
+    await box.put('font:path', '${tmpDir.path}/nonexistent_font.ttf');
+    await box.put('font:family', 'TestLazyFont');
+    FontStore.ready.value = false;
+
+    await FontStore.loadSaved();
+    expect(FontStore.ready.value, isTrue);
+
+    // 切回自选字体后调用 ensureLoaded：先置 ready=false 再安全完成置 true
+    var sawFalse = false;
+    void listener() {
+      if (!FontStore.ready.value) sawFalse = true;
+    }
+
+    FontStore.ready.addListener(listener);
+    await FontStore.ensureLoaded();
+    FontStore.ready.removeListener(listener);
+    expect(sawFalse, isTrue);
+    expect(FontStore.ready.value, isTrue);
+
+    // 清理测试键
+    await box.deleteAll(['r.font', 'font:path', 'font:family']);
+  });
+
+  test('NextApp.markReaderActive 引用计数与 previewProxyBase 去尾斜杠行为正确', () {
+    expect(NextApp.isReaderActive, isFalse);
+    NextApp.markReaderActive(true);
+    NextApp.markReaderActive(true);
+    expect(NextApp.isReaderActive, isTrue);
+    NextApp.markReaderActive(false);
+    expect(NextApp.isReaderActive, isTrue);
+    NextApp.markReaderActive(false);
+    expect(NextApp.isReaderActive, isFalse);
+    NextApp.markReaderActive(false); // 多余退出不减成负数
+    expect(NextApp.isReaderActive, isFalse);
+
+    expect(previewProxyBase.endsWith('/'), isFalse);
+  });
+}
+
+class _ThrowingAdapter implements HttpClientAdapter {
+  _ThrowingAdapter(this.fn, {this.onClose});
+
+  final ResponseBody Function(RequestOptions) fn;
+  final void Function()? onClose;
+
+  @override
+  Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async => fn(options);
+
+  @override
+  void close({bool force = false}) => onClose?.call();
 }
 
 class _CancelAwareAdapter implements HttpClientAdapter {

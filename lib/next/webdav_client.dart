@@ -35,11 +35,78 @@ String _decodeHref(String s) {
   }
 }
 
+/// WebDAV `PROPFIND Depth: 1` 返回的单个 JSON 文件元数据。
+class WebDavFileEntry {
+  const WebDavFileEntry({required this.name, this.etag, this.lastModified, this.contentLength});
+
+  final String name;
+  final String? etag;
+  final String? lastModified;
+  final int? contentLength;
+
+  /// 用于变更检测的稳定指纹：优先使用 ETag，否则使用 `lastModified + contentLength`。
+  String? get fingerprint {
+    final e = etag?.trim();
+    if (e != null && e.isNotEmpty) return 'etag:$e';
+    final lm = lastModified?.trim() ?? '';
+    if (lm.isNotEmpty || contentLength != null) return 'lm:$lm|len:${contentLength ?? -1}';
+    return null;
+  }
+}
+
+final _responseTagRe = RegExp(r'<(?:\w+:)?response\b[^>]*>([\s\S]*?)</(?:\w+:)?response>', caseSensitive: false);
+final _hrefTagRe = RegExp(r'<(?:\w+:)?href\b[^>]*>([^<]+)</(?:\w+:)?href>', caseSensitive: false);
+final _etagTagRe = RegExp(r'<(?:\w+:)?getetag\b[^>]*>([^<]+)</(?:\w+:)?getetag>', caseSensitive: false);
+final _lastModTagRe = RegExp(r'<(?:\w+:)?getlastmodified\b[^>]*>([^<]+)</(?:\w+:)?getlastmodified>', caseSensitive: false);
+final _contentLengthTagRe = RegExp(r'<(?:\w+:)?getcontentlength\b[^>]*>([^<]+)</(?:\w+:)?getcontentlength>', caseSensitive: false);
+
+String? _unescapeXmlText(String? raw) {
+  if (raw == null) return null;
+  final t = raw.trim();
+  if (t.isEmpty) return null;
+  return t.replaceAll('&quot;', '"').replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>');
+}
+
+/// 解析 WebDAV PROPFIND XML 中的 `*.json` 文件条目（含 `etag` / `lastModified` / `contentLength`）。
+List<WebDavFileEntry> parseWebDavFileEntries(String xml) {
+  final responses = _responseTagRe.allMatches(xml).toList();
+  if (responses.isEmpty) {
+    return [
+      for (final m in _hrefTagRe.allMatches(xml))
+        if (_decodeHref(m.group(1)!) case final href when href.endsWith('.json') && !href.endsWith('/')) WebDavFileEntry(name: href.split('/').last),
+    ];
+  }
+  final out = <WebDavFileEntry>[];
+  for (final r in responses) {
+    final block = r.group(1)!;
+    final hrefRaw = _hrefTagRe.firstMatch(block)?.group(1);
+    if (hrefRaw == null) continue;
+    final href = _decodeHref(hrefRaw);
+    if (!href.endsWith('.json') || href.endsWith('/')) continue;
+    final etag = _unescapeXmlText(_etagTagRe.firstMatch(block)?.group(1));
+    final lastMod = _unescapeXmlText(_lastModTagRe.firstMatch(block)?.group(1));
+    final lenText = _contentLengthTagRe.firstMatch(block)?.group(1)?.trim();
+    final contentLength = lenText == null ? null : int.tryParse(lenText);
+    out.add(WebDavFileEntry(name: href.split('/').last, etag: etag, lastModified: lastMod, contentLength: contentLength));
+  }
+  return out;
+}
+
 /// 目录里所有 `*.json` 的文件名（从 WebDAV PROPFIND XML 响应里提取 href）。
-List<String> parseWebDavListing(String xml) => [
-  for (final m in RegExp(r'<(?:\w+:)?href>([^<]+)</(?:\w+:)?href>', caseSensitive: false).allMatches(xml))
-    if (_decodeHref(m.group(1)!) case final href when href.endsWith('.json') && !href.endsWith('/')) href.split('/').last,
-];
+List<String> parseWebDavListing(String xml) => [for (final e in parseWebDavFileEntries(xml)) e.name];
+
+class _BorrowedHttpClientAdapter implements HttpClientAdapter {
+  _BorrowedHttpClientAdapter(this._inner);
+
+  final HttpClientAdapter _inner;
+
+  @override
+  Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream, Future<void>? cancelFuture) =>
+      _inner.fetch(options, requestStream, cancelFuture);
+
+  @override
+  void close({bool force = false}) {}
+}
 
 /// 按本地 [SessionStore] 保存的代理与系统网络栈配置构建适配器，让 WebDAV 同步同样走用户配置的代理/原生网络栈。
 HttpClientAdapter? webDavAdapterFromSessionBox() {
@@ -70,7 +137,7 @@ class WebDavClient {
     Dio? dio,
     HttpClientAdapter? adapter,
   }) : _ownsDio = dio == null,
-       _dio = dio ?? _createDio(user, password, adapter: adapter ?? webDavAdapterFromSessionBox());
+       _dio = dio ?? _createDio(user, password, adapter: adapter != null ? _BorrowedHttpClientAdapter(adapter) : webDavAdapterFromSessionBox());
 
   final String baseUrl;
   final String folder;
@@ -127,12 +194,22 @@ class WebDavClient {
     }
   }
 
-  /// 列出同步目录中的所有 `*.json` 文件名。
-  Future<List<String>> listJsonFiles() async {
-    final r = await _dio.request<String>(dirUrl, options: Options(method: 'PROPFIND', headers: {'Depth': '1'}, responseType: ResponseType.plain));
+  /// 直接 `PROPFIND Depth: 1` 列出同步目录中的所有 `*.json` 文件及其元数据（`etag`/`lastModified`/`contentLength`）。
+  /// 若目标目录不存在（HTTP 404）则按需调用 [ensureDirectory] 逐级建目录后重试，平时省去 1 次 `Depth: 0` RTT。
+  Future<List<WebDavFileEntry>> listJsonFileEntries({bool ensureDirOn404 = true}) async {
+    var r = await _dio.request<String>(dirUrl, options: Options(method: 'PROPFIND', headers: {'Depth': '1'}, responseType: ResponseType.plain));
+    if (r.statusCode == 404 && ensureDirOn404) {
+      await ensureDirectory();
+      r = await _dio.request<String>(dirUrl, options: Options(method: 'PROPFIND', headers: {'Depth': '1'}, responseType: ResponseType.plain));
+    }
     ensureOk(r, '读取目录');
-    return parseWebDavListing(r.data ?? '');
+    return parseWebDavFileEntries(r.data ?? '');
   }
+
+  /// 列出同步目录中的所有 `*.json` 文件名。
+  Future<List<String>> listJsonFiles({bool ensureDirOn404 = true}) async => [
+    for (final e in await listJsonFileEntries(ensureDirOn404: ensureDirOn404)) e.name,
+  ];
 
   /// 读取纯文本文件；[allowNotFound] 为 true 时 HTTP 404 返回 null。
   Future<String?> getText(String fileName, {required String what, bool allowNotFound = false}) async {

@@ -63,10 +63,16 @@ void applyOrientation(int v) => SystemChrome.setPreferredOrientations(switch (v)
 
 /// 阅读器的外观和翻页方式。
 class ReaderPrefs {
-  const ReaderPrefs({this.fontSize = 18, this.lineHeight = 1.8, this.theme = 5, this.mode = 3, this.ttsRate = 0.5, this.margin = 22, this.font = 1, this.ttsPitch = 1.0, this.ttsVoice = '', this.ttsHighlight = true, this.ttsAutoNext = true, this.dual = true, this.dim = 0, this.volumeKeys = true, this.tapZone = 0, this.tapInvert = 0, this.keepScreenOn = true, this.fullscreen = true, this.showStatus = true, this.skipRead = false, this.chapterToast = false, this.warm = 0, this.grayscale = false, this.invert = false, this.customBrightness = false, this.brightness = 0.5, this.volumeInvert = false, this.pageAnim = true, this.prefetch = 2, this.prefetchWifi = false, this.prefetchBook = false, this.hant = false, this.autoScrollSpeed = 60, this.autoTurnSeconds = 8, this.bgTexture = 0, this.bgImageOpacity = 0.35, this.headerLeft = 1, this.headerRight = 0, this.footerLeft = 3, this.footerRight = 4});
+  const ReaderPrefs({this.fontSize = 18, this.lineHeight = 1.8, this.letterSpacing = 0, this.paragraphSpacing = 0, this.theme = 5, this.mode = 3, this.ttsRate = 0.5, this.margin = 22, this.font = 1, this.ttsPitch = 1.0, this.ttsVoice = '', this.ttsHighlight = true, this.ttsAutoNext = true, this.dual = true, this.dim = 0, this.volumeKeys = true, this.tapZone = 0, this.tapInvert = 0, this.keepScreenOn = true, this.fullscreen = true, this.showStatus = true, this.skipRead = false, this.chapterToast = false, this.warm = 0, this.grayscale = false, this.invert = false, this.customBrightness = false, this.brightness = 0.5, this.volumeInvert = false, this.pageAnim = true, this.prefetch = 2, this.prefetchWifi = false, this.prefetchBook = false, this.hant = false, this.autoScrollSpeed = 60, this.autoTurnSeconds = 8, this.bgTexture = 0, this.bgImageOpacity = 0.35, this.headerLeft = 1, this.headerRight = 0, this.footerLeft = 3, this.footerRight = 4});
 
   final double fontSize;
   final double lineHeight;
+
+  /// 字间距（-0.5 ~ 4.0 px，0 为默认）
+  final double letterSpacing;
+
+  /// 段间距（0 ~ 24 px，0 为紧邻换行）
+  final double paragraphSpacing;
 
   /// 阅读背景：0 纸张 1 护眼 2 夜间 3 跟随应用
   final int theme;
@@ -164,9 +170,11 @@ class ReaderPrefs {
   final int footerLeft;
   final int footerRight;
 
-  ReaderPrefs copyWith({double? fontSize, double? lineHeight, int? theme, int? mode, double? ttsRate, double? margin, int? font, double? ttsPitch, String? ttsVoice, bool? ttsHighlight, bool? ttsAutoNext, bool? dual, double? dim, bool? volumeKeys, int? tapZone, int? tapInvert, bool? keepScreenOn, bool? fullscreen, bool? showStatus, bool? skipRead, bool? chapterToast, double? warm, bool? grayscale, bool? invert, bool? customBrightness, double? brightness, bool? volumeInvert, bool? pageAnim, int? prefetch, bool? prefetchWifi, bool? prefetchBook, bool? hant, double? autoScrollSpeed, int? autoTurnSeconds, int? bgTexture, double? bgImageOpacity, int? headerLeft, int? headerRight, int? footerLeft, int? footerRight}) => ReaderPrefs(
+  ReaderPrefs copyWith({double? fontSize, double? lineHeight, double? letterSpacing, double? paragraphSpacing, int? theme, int? mode, double? ttsRate, double? margin, int? font, double? ttsPitch, String? ttsVoice, bool? ttsHighlight, bool? ttsAutoNext, bool? dual, double? dim, bool? volumeKeys, int? tapZone, int? tapInvert, bool? keepScreenOn, bool? fullscreen, bool? showStatus, bool? skipRead, bool? chapterToast, double? warm, bool? grayscale, bool? invert, bool? customBrightness, double? brightness, bool? volumeInvert, bool? pageAnim, int? prefetch, bool? prefetchWifi, bool? prefetchBook, bool? hant, double? autoScrollSpeed, int? autoTurnSeconds, int? bgTexture, double? bgImageOpacity, int? headerLeft, int? headerRight, int? footerLeft, int? footerRight}) => ReaderPrefs(
     fontSize: fontSize ?? this.fontSize,
     lineHeight: lineHeight ?? this.lineHeight,
+    letterSpacing: letterSpacing ?? this.letterSpacing,
+    paragraphSpacing: paragraphSpacing ?? this.paragraphSpacing,
     theme: theme ?? this.theme,
     mode: mode ?? this.mode,
     ttsRate: ttsRate ?? this.ttsRate,
@@ -213,6 +221,8 @@ class ReaderPrefs {
       other is ReaderPrefs &&
           fontSize == other.fontSize &&
           lineHeight == other.lineHeight &&
+          letterSpacing == other.letterSpacing &&
+          paragraphSpacing == other.paragraphSpacing &&
           theme == other.theme &&
           mode == other.mode &&
           ttsRate == other.ttsRate &&
@@ -254,7 +264,7 @@ class ReaderPrefs {
 
   @override
   int get hashCode => Object.hashAll([
-    fontSize, lineHeight, theme, mode, ttsRate, margin, font, ttsPitch, ttsVoice, ttsHighlight, ttsAutoNext,
+    fontSize, lineHeight, letterSpacing, paragraphSpacing, theme, mode, ttsRate, margin, font, ttsPitch, ttsVoice, ttsHighlight, ttsAutoNext,
     dual, dim, volumeKeys, tapZone, tapInvert, keepScreenOn, fullscreen, showStatus, skipRead, chapterToast,
     warm, grayscale, invert, customBrightness, brightness, volumeInvert, pageAnim, prefetch, prefetchWifi, prefetchBook, hant,
     autoScrollSpeed, autoTurnSeconds, bgTexture, bgImageOpacity, headerLeft, headerRight, footerLeft, footerRight,
@@ -262,54 +272,130 @@ class ReaderPrefs {
 }
 
 class ReaderPrefsController extends Notifier<ReaderPrefs> {
-  @override
-  ReaderPrefs build() => ReaderPrefs(
-    fontSize: (_box.get('r.fontSize') as num?)?.toDouble() ?? 18,
-    lineHeight: (_box.get('r.lineHeight') as num?)?.toDouble() ?? 1.8,
-    theme: (_box.get('r.theme') as int?) ?? 5,
-    mode: (_box.get('r.mode') as int?) ?? 3,
-    ttsRate: (_box.get('r.ttsRate') as num?)?.toDouble() ?? 0.5,
-    margin: (_box.get('r.margin') as num?)?.toDouble() ?? 22,
-    font: (_box.get('r.font') as int?) ?? 1,
-    ttsPitch: (_box.get('r.ttsPitch') as num?)?.toDouble() ?? 1.0,
-    ttsVoice: (_box.get('r.ttsVoice') as String?) ?? '',
-    ttsHighlight: (_box.get('r.ttsHighlight') as bool?) ?? true,
-    ttsAutoNext: (_box.get('r.ttsAutoNext') as bool?) ?? true,
-    dual: (_box.get('r.dual') as bool?) ?? true,
-    dim: (_box.get('r.dim') as num?)?.toDouble() ?? 0,
-    volumeKeys: (_box.get('r.volumeKeys') as bool?) ?? true,
-    tapZone: (_box.get('r.tapZone') as int?) ?? 0,
-    tapInvert: (_box.get('r.tapInvert') as int?) ?? 0,
-    keepScreenOn: (_box.get('r.keepScreenOn') as bool?) ?? true,
-    fullscreen: (_box.get('r.fullscreen') as bool?) ?? true,
-    showStatus: (_box.get('r.showStatus') as bool?) ?? true,
-    skipRead: (_box.get('r.skipRead') as bool?) ?? false,
-    chapterToast: (_box.get('r.chapterToast') as bool?) ?? false,
-    warm: (_box.get('r.warm') as num?)?.toDouble() ?? 0,
-    grayscale: (_box.get('r.grayscale') as bool?) ?? false,
-    invert: (_box.get('r.invert') as bool?) ?? false,
-    customBrightness: (_box.get('r.customBrightness') as bool?) ?? false,
-    brightness: (_box.get('r.brightness') as num?)?.toDouble() ?? 0.5,
-    volumeInvert: (_box.get('r.volumeInvert') as bool?) ?? false,
-    pageAnim: (_box.get('r.pageAnim') as bool?) ?? true,
-    prefetch: (_box.get('r.prefetch') as int?) ?? 2,
-    prefetchWifi: (_box.get('r.prefetchWifi') as bool?) ?? false,
-    prefetchBook: (_box.get('r.prefetchBook') as bool?) ?? false,
-    hant: (_box.get('r.hant') as bool?) ?? false,
-    autoScrollSpeed: ((_box.get('r.autoScrollSpeed') as num?)?.toDouble() ?? 60).clamp(20, 220),
-    autoTurnSeconds: ((_box.get('r.autoTurnSeconds') as int?) ?? 8).clamp(3, 30),
-    bgTexture: ((_box.get('r.bgTexture') as int?) ?? 0).clamp(0, 3),
-    bgImageOpacity: ((_box.get('r.bgImageOpacity') as num?)?.toDouble() ?? 0.35).clamp(0.05, 0.85),
-    headerLeft: ((_box.get('r.headerLeft') as int?) ?? 1).clamp(0, 6),
-    headerRight: ((_box.get('r.headerRight') as int?) ?? 0).clamp(0, 6),
-    footerLeft: ((_box.get('r.footerLeft') as int?) ?? 3).clamp(0, 6),
-    footerRight: ((_box.get('r.footerRight') as int?) ?? 4).clamp(0, 6),
-  );
+  late ReaderPrefs _persisted;
 
-  void update(ReaderPrefs next) {
-    _box.putAll({'r.fontSize': next.fontSize, 'r.lineHeight': next.lineHeight, 'r.theme': next.theme, 'r.mode': next.mode, 'r.ttsRate': next.ttsRate, 'r.margin': next.margin, 'r.font': next.font, 'r.ttsPitch': next.ttsPitch, 'r.ttsVoice': next.ttsVoice, 'r.ttsHighlight': next.ttsHighlight, 'r.ttsAutoNext': next.ttsAutoNext, 'r.dual': next.dual, 'r.dim': next.dim, 'r.volumeKeys': next.volumeKeys, 'r.tapZone': next.tapZone, 'r.tapInvert': next.tapInvert, 'r.keepScreenOn': next.keepScreenOn, 'r.fullscreen': next.fullscreen, 'r.showStatus': next.showStatus, 'r.skipRead': next.skipRead, 'r.chapterToast': next.chapterToast, 'r.warm': next.warm, 'r.grayscale': next.grayscale, 'r.invert': next.invert, 'r.customBrightness': next.customBrightness, 'r.brightness': next.brightness, 'r.volumeInvert': next.volumeInvert, 'r.pageAnim': next.pageAnim, 'r.prefetch': next.prefetch, 'r.prefetchWifi': next.prefetchWifi, 'r.prefetchBook': next.prefetchBook, 'r.hant': next.hant, 'r.autoScrollSpeed': next.autoScrollSpeed, 'r.autoTurnSeconds': next.autoTurnSeconds, 'r.bgTexture': next.bgTexture, 'r.bgImageOpacity': next.bgImageOpacity, 'r.headerLeft': next.headerLeft, 'r.headerRight': next.headerRight, 'r.footerLeft': next.footerLeft, 'r.footerRight': next.footerRight, 'sync:readerTs': DateTime.now().millisecondsSinceEpoch});
-    state = next;
+  @override
+  ReaderPrefs build() {
+    final loaded = ReaderPrefs(
+      fontSize: (_box.get('r.fontSize') as num?)?.toDouble() ?? 18,
+      lineHeight: (_box.get('r.lineHeight') as num?)?.toDouble() ?? 1.8,
+      letterSpacing: ((_box.get('r.letterSpacing') as num?)?.toDouble() ?? 0).clamp(-0.5, 4.0),
+      paragraphSpacing: ((_box.get('r.paragraphSpacing') as num?)?.toDouble() ?? 0).clamp(0.0, 24.0),
+      theme: (_box.get('r.theme') as int?) ?? 5,
+      mode: (_box.get('r.mode') as int?) ?? 3,
+      ttsRate: (_box.get('r.ttsRate') as num?)?.toDouble() ?? 0.5,
+      margin: (_box.get('r.margin') as num?)?.toDouble() ?? 22,
+      font: (_box.get('r.font') as int?) ?? 1,
+      ttsPitch: (_box.get('r.ttsPitch') as num?)?.toDouble() ?? 1.0,
+      ttsVoice: (_box.get('r.ttsVoice') as String?) ?? '',
+      ttsHighlight: (_box.get('r.ttsHighlight') as bool?) ?? true,
+      ttsAutoNext: (_box.get('r.ttsAutoNext') as bool?) ?? true,
+      dual: (_box.get('r.dual') as bool?) ?? true,
+      dim: (_box.get('r.dim') as num?)?.toDouble() ?? 0,
+      volumeKeys: (_box.get('r.volumeKeys') as bool?) ?? true,
+      tapZone: (_box.get('r.tapZone') as int?) ?? 0,
+      tapInvert: (_box.get('r.tapInvert') as int?) ?? 0,
+      keepScreenOn: (_box.get('r.keepScreenOn') as bool?) ?? true,
+      fullscreen: (_box.get('r.fullscreen') as bool?) ?? true,
+      showStatus: (_box.get('r.showStatus') as bool?) ?? true,
+      skipRead: (_box.get('r.skipRead') as bool?) ?? false,
+      chapterToast: (_box.get('r.chapterToast') as bool?) ?? false,
+      warm: (_box.get('r.warm') as num?)?.toDouble() ?? 0,
+      grayscale: (_box.get('r.grayscale') as bool?) ?? false,
+      invert: (_box.get('r.invert') as bool?) ?? false,
+      customBrightness: (_box.get('r.customBrightness') as bool?) ?? false,
+      brightness: (_box.get('r.brightness') as num?)?.toDouble() ?? 0.5,
+      volumeInvert: (_box.get('r.volumeInvert') as bool?) ?? false,
+      pageAnim: (_box.get('r.pageAnim') as bool?) ?? true,
+      prefetch: (_box.get('r.prefetch') as int?) ?? 2,
+      prefetchWifi: (_box.get('r.prefetchWifi') as bool?) ?? false,
+      prefetchBook: (_box.get('r.prefetchBook') as bool?) ?? false,
+      hant: (_box.get('r.hant') as bool?) ?? false,
+      autoScrollSpeed: ((_box.get('r.autoScrollSpeed') as num?)?.toDouble() ?? 60).clamp(20, 220),
+      autoTurnSeconds: ((_box.get('r.autoTurnSeconds') as int?) ?? 8).clamp(3, 30),
+      bgTexture: ((_box.get('r.bgTexture') as int?) ?? 0).clamp(0, 3),
+      bgImageOpacity: ((_box.get('r.bgImageOpacity') as num?)?.toDouble() ?? 0.35).clamp(0.05, 0.85),
+      headerLeft: ((_box.get('r.headerLeft') as int?) ?? 1).clamp(0, 6),
+      headerRight: ((_box.get('r.headerRight') as int?) ?? 0).clamp(0, 6),
+      footerLeft: ((_box.get('r.footerLeft') as int?) ?? 3).clamp(0, 6),
+      footerRight: ((_box.get('r.footerRight') as int?) ?? 4).clamp(0, 6),
+    );
+    _persisted = loaded;
+    return loaded;
   }
+
+  static Map<String, Object> _diff(ReaderPrefs prev, ReaderPrefs next) {
+    final diff = <String, Object>{};
+    if (prev.fontSize != next.fontSize) diff['r.fontSize'] = next.fontSize;
+    if (prev.lineHeight != next.lineHeight) diff['r.lineHeight'] = next.lineHeight;
+    if (prev.letterSpacing != next.letterSpacing) diff['r.letterSpacing'] = next.letterSpacing;
+    if (prev.paragraphSpacing != next.paragraphSpacing) diff['r.paragraphSpacing'] = next.paragraphSpacing;
+    if (prev.theme != next.theme) diff['r.theme'] = next.theme;
+    if (prev.mode != next.mode) diff['r.mode'] = next.mode;
+    if (prev.ttsRate != next.ttsRate) diff['r.ttsRate'] = next.ttsRate;
+    if (prev.margin != next.margin) diff['r.margin'] = next.margin;
+    if (prev.font != next.font) diff['r.font'] = next.font;
+    if (prev.ttsPitch != next.ttsPitch) diff['r.ttsPitch'] = next.ttsPitch;
+    if (prev.ttsVoice != next.ttsVoice) diff['r.ttsVoice'] = next.ttsVoice;
+    if (prev.ttsHighlight != next.ttsHighlight) diff['r.ttsHighlight'] = next.ttsHighlight;
+    if (prev.ttsAutoNext != next.ttsAutoNext) diff['r.ttsAutoNext'] = next.ttsAutoNext;
+    if (prev.dual != next.dual) diff['r.dual'] = next.dual;
+    if (prev.dim != next.dim) diff['r.dim'] = next.dim;
+    if (prev.volumeKeys != next.volumeKeys) diff['r.volumeKeys'] = next.volumeKeys;
+    if (prev.tapZone != next.tapZone) diff['r.tapZone'] = next.tapZone;
+    if (prev.tapInvert != next.tapInvert) diff['r.tapInvert'] = next.tapInvert;
+    if (prev.keepScreenOn != next.keepScreenOn) diff['r.keepScreenOn'] = next.keepScreenOn;
+    if (prev.fullscreen != next.fullscreen) diff['r.fullscreen'] = next.fullscreen;
+    if (prev.showStatus != next.showStatus) diff['r.showStatus'] = next.showStatus;
+    if (prev.skipRead != next.skipRead) diff['r.skipRead'] = next.skipRead;
+    if (prev.chapterToast != next.chapterToast) diff['r.chapterToast'] = next.chapterToast;
+    if (prev.warm != next.warm) diff['r.warm'] = next.warm;
+    if (prev.grayscale != next.grayscale) diff['r.grayscale'] = next.grayscale;
+    if (prev.invert != next.invert) diff['r.invert'] = next.invert;
+    if (prev.customBrightness != next.customBrightness) diff['r.customBrightness'] = next.customBrightness;
+    if (prev.brightness != next.brightness) diff['r.brightness'] = next.brightness;
+    if (prev.volumeInvert != next.volumeInvert) diff['r.volumeInvert'] = next.volumeInvert;
+    if (prev.pageAnim != next.pageAnim) diff['r.pageAnim'] = next.pageAnim;
+    if (prev.prefetch != next.prefetch) diff['r.prefetch'] = next.prefetch;
+    if (prev.prefetchWifi != next.prefetchWifi) diff['r.prefetchWifi'] = next.prefetchWifi;
+    if (prev.prefetchBook != next.prefetchBook) diff['r.prefetchBook'] = next.prefetchBook;
+    if (prev.hant != next.hant) diff['r.hant'] = next.hant;
+    if (prev.autoScrollSpeed != next.autoScrollSpeed) diff['r.autoScrollSpeed'] = next.autoScrollSpeed;
+    if (prev.autoTurnSeconds != next.autoTurnSeconds) diff['r.autoTurnSeconds'] = next.autoTurnSeconds;
+    if (prev.bgTexture != next.bgTexture) diff['r.bgTexture'] = next.bgTexture;
+    if (prev.bgImageOpacity != next.bgImageOpacity) diff['r.bgImageOpacity'] = next.bgImageOpacity;
+    if (prev.headerLeft != next.headerLeft) diff['r.headerLeft'] = next.headerLeft;
+    if (prev.headerRight != next.headerRight) diff['r.headerRight'] = next.headerRight;
+    if (prev.footerLeft != next.footerLeft) diff['r.footerLeft'] = next.footerLeft;
+    if (prev.footerRight != next.footerRight) diff['r.footerRight'] = next.footerRight;
+    return diff;
+  }
+
+  /// 仅更新内存状态用于滑块实时预览，不触发 Hive 写盘。
+  void preview(ReaderPrefs next) {
+    if (state != next) state = next;
+  }
+
+  /// 差分写入：仅将真正变化的字段与 `sync:readerTs` 写入 Hive；[persist] 为 false 时等同于 [preview]。
+  void update(ReaderPrefs next, {bool persist = true}) {
+    if (!persist) {
+      preview(next);
+      return;
+    }
+    final diff = _diff(_persisted, next);
+    if (diff.isNotEmpty) {
+      diff['sync:readerTs'] = DateTime.now().millisecondsSinceEpoch;
+      _box.putAll(diff);
+      _persisted = next;
+    }
+    if (state != next) state = next;
+  }
+
+  /// 立即提交 [next] 并差分落盘。
+  void commit(ReaderPrefs next) => update(next, persist: true);
+
+  /// 将当前内存预览态差分落盘（若与上次落盘一致则不写盘）。
+  void flush() => update(state, persist: true);
 }
 
 final readerPrefsProvider = NotifierProvider<ReaderPrefsController, ReaderPrefs>(ReaderPrefsController.new);

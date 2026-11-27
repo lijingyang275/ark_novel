@@ -20,16 +20,25 @@ class ReadingHistory {
 
   static Box get _box => Hive.box('session');
 
-  static List<HistoryEntry> all() => ((_box.get('history2') as List?) ?? const []).cast<Map>().map((e) {
-    return HistoryEntry(
-      aid: e['aid'] as String,
-      title: e['title'] as String,
-      img: e['img'] as String,
-      cid: e['cid'] as String,
-      chapter: e['chapter'] as String,
-      time: DateTime.fromMillisecondsSinceEpoch(e['time'] as int),
-    );
-  }).toList();
+  static HistoryEntry _parse(Map e) => HistoryEntry(
+    aid: e['aid'] as String,
+    title: e['title'] as String,
+    img: e['img'] as String,
+    cid: e['cid'] as String,
+    chapter: e['chapter'] as String,
+    time: DateTime.fromMillisecondsSinceEpoch(e['time'] as int),
+  );
+
+  /// 仅反序列化最近 [limit] 条阅读历史，避免续读卡片/桌面小组件全表解析 300 条。
+  static List<HistoryEntry> latest({int limit = 1}) {
+    if (limit <= 0) return const [];
+    final raw = _box.get('history2') as List?;
+    if (raw == null || raw.isEmpty) return const [];
+    final end = limit < raw.length ? limit : raw.length;
+    return [for (var i = 0; i < end; i++) _parse(raw[i] as Map)];
+  }
+
+  static List<HistoryEntry> all() => ((_box.get('history2') as List?) ?? const []).cast<Map>().map(_parse).toList();
 
   static Future<void> record(String aid, String title, String img, String cid, String chapter) {
     if (Incognito.on) return Future.value();

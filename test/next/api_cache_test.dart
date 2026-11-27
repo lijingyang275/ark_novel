@@ -162,4 +162,44 @@ void main() {
     expect(api3.lastFailedSearchHtml, contains('Weird'));
     expect(lastFailedHtml, contains('Weird'));
   });
+
+  test('Api.search 在 5.2s 冷却等待中被 cancelToken 取消时立即退出且不推进 _lastSearch', () async {
+    adapter.responses.addAll([
+      (200, '<html><body><div id="content"><table class="grid"></table></div></body></html>'),
+      (200, '<html><body><div id="content"><table class="grid"></table></div></body></html>'),
+    ]);
+    // 第一次搜索立刻执行，进入 5.2s 冷却期
+    await api.search('first', byAuthor: false, page: 1);
+    expect(api.isSearchCoolingDown, isTrue);
+
+    // 第二次搜索处于冷却等待期，100ms 后取消应立即退出（远小于 5.2s）
+    final token = CancelToken();
+    Future<void>.delayed(const Duration(milliseconds: 80), () => token.cancel('user_cancelled'));
+    final sw = Stopwatch()..start();
+    await expectLater(api.search('second', byAuthor: false, page: 1, cancelToken: token), throwsA(isA<DioException>()));
+    sw.stop();
+    expect(sw.elapsed, lessThan(const Duration(seconds: 1)));
+    // 响应未被消耗
+    expect(adapter.responses.length, 1);
+  });
+
+  test('ranking/category/completed 5 分钟内存 LRU 缓存与 fresh: true 强刷；大 HTML 走 compute 异步解析', () async {
+    final listHtml = fixture('catalogue.html').replaceFirst('<table class="css">', '<div id="content"><a href="/book/1001.htm" title="测试书">测试书</a></div><table class="css">');
+    adapter.responses.addAll([(200, listHtml), (200, listHtml)]);
+    final r1 = await api.ranking('allvisit', 1);
+    final r2 = await api.ranking('allvisit', 1);
+    expect(r2.items.length, r1.items.length);
+    // 第二次命中内存 LRU 缓存，不消耗第二条网络响应
+    expect(adapter.responses.length, 1);
+
+    // fetchRanking(fresh: true) 强制走网络刷新
+    await api.fetchRanking('allvisit', 1, fresh: true);
+    expect(adapter.responses, isEmpty);
+
+    // > 16 KB 大目录 HTML 走 compute 异步解析正常返回
+    final bigPadding = '<!-- ${'x' * 20000} -->';
+    adapter.responses.add((200, '$bigPadding${fixture('catalogue.html')}'));
+    final bigCat = await api.catalogue('9999', fresh: true);
+    expect(bigCat, isNotEmpty);
+  });
 }

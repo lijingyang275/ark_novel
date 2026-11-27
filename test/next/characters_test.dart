@@ -10,6 +10,7 @@ import 'package:ark_novel/next/rules.dart';
 import 'package:ark_novel/next/sync_merge.dart';
 import 'package:ark_novel/next/volumes.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
@@ -221,6 +222,41 @@ void main() {
       expect(delCount, 2);
       expect(BookCharacters.of(aid).map((c) => c.name).toList(), ['小佐内由纪']);
     });
+
+    test('batchUpdateCnSummaries：批量写入多条中文简介无写丢失，且不重复改写高亮规则', () async {
+      const aid = '2099';
+      final imported = await BookCharacters.importMany(
+        aid,
+        const [
+          BookCharacter(id: 'b1', aid: aid, name: '角色甲', role: CharacterRole.main),
+          BookCharacter(id: 'b2', aid: aid, name: '角色乙', role: CharacterRole.main),
+          BookCharacter(id: 'b3', aid: aid, name: '角色丙', role: CharacterRole.support),
+        ],
+        enableHighlight: true,
+      );
+      expect(imported.length, 3);
+      final rulesVerBefore = ReplaceRules.changes.value;
+      final updated = await BookCharacters.batchUpdateCnSummaries(aid, const {
+        'b1': '甲的萌娘百科中文简介',
+        'b2': '乙的萌娘百科中文简介',
+        'b3': '丙的萌娘百科中文简介',
+      });
+      expect(updated, 3);
+      // 不重写高亮规则
+      expect(ReplaceRules.changes.value, rulesVerBefore);
+      final after = {for (final c in BookCharacters.of(aid)) c.id: c};
+      expect(after['b1']!.cnSummary, '甲的萌娘百科中文简介');
+      expect(after['b2']!.cnSummary, '乙的萌娘百科中文简介');
+      expect(after['b3']!.cnSummary, '丙的萌娘百科中文简介');
+      // activeHighlightRuleIds 批量查询准确
+      final activeIds = BookCharacters.activeHighlightRuleIds();
+      expect(after.values.every((c) => activeIds.contains(c.ruleId)), isTrue);
+
+      // onlyIfEmpty=true 时不覆盖已有中文简介
+      final skipped = await BookCharacters.batchUpdateCnSummaries(aid, const {'b1': '新简介不应覆盖'}, onlyIfEmpty: true);
+      expect(skipped, 0);
+      expect(BookCharacters.byId(aid, 'b1')!.cnSummary, '甲的萌娘百科中文简介');
+    });
   });
 
   group('SyncMerge 增量合并 chars 与墓碑删除', () {
@@ -330,5 +366,55 @@ void main() {
     await tester.tap(find.text('搜索全书出场'));
     await tester.pumpAndSettle();
     expect(searchedTerms, ['八奈见杏菜', '老八']);
+  });
+
+  group('BookCharacters 内存缓存与本地头像索引', () {
+    test('BookCharacters.of(aid)：未改动时复用同一不可变列表实例，变更后立即刷新', () async {
+      const aid = '4100';
+      await BookCharacters.upsert(const BookCharacter(id: 'k1', aid: aid, name: '角色A'));
+      final first = BookCharacters.of(aid);
+      final second = BookCharacters.of(aid);
+      expect(identical(first, second), isTrue);
+      expect(() => first.add(const BookCharacter(id: 'x', aid: aid, name: '非法修改')), throwsUnsupportedError);
+
+      await BookCharacters.upsert(const BookCharacter(id: 'k2', aid: aid, name: '角色B'));
+      final third = BookCharacters.of(aid);
+      expect(identical(first, third), isFalse);
+      expect(third.length, 2);
+    });
+
+    test('本地头像目录索引：ensureAvatarDirLoaded 扫描建索引，增删同步维护且不回退 existsSync', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      BookCharacters.resetAvatarCacheForTest();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/path_provider'),
+        (_) async => tmp.path,
+      );
+      addTearDown(() {
+        BookCharacters.resetAvatarCacheForTest();
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/path_provider'),
+          null,
+        );
+      });
+
+      final fileName = await BookCharacters.saveLocalAvatar('hero1', Uint8List.fromList([1, 2, 3, 4]));
+      final resolved = BookCharacters.localAvatarFileSync(fileName);
+      expect(resolved, isNotNull);
+      expect(resolved!.existsSync(), isTrue);
+
+      // 重置内存缓存后，在重新扫描前 localAvatarFileSync 必须返回 null（不走同步 existsSync）
+      BookCharacters.resetAvatarCacheForTest();
+      expect(BookCharacters.localAvatarFileSync(fileName), isNull);
+
+      // 重新异步扫描后恢复命中
+      await BookCharacters.ensureAvatarDirLoaded();
+      expect(BookCharacters.localAvatarFileSync(fileName), isNotNull);
+
+      // 删除后同步从索引与磁盘移除
+      await BookCharacters.deleteLocalAvatar(fileName);
+      expect(BookCharacters.localAvatarFileSync(fileName), isNull);
+      expect(resolved.existsSync(), isFalse);
+    });
   });
 }

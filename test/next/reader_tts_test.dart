@@ -317,4 +317,42 @@ void main() {
     expect(tts.isSpeaking, isFalse);
     expect(lastError, 'engine died');
   });
+
+  test('engineFactory 懒加载：未朗读时进出阅读器不创建系统 TTS 引擎，首次朗读才初始化', () async {
+    var created = 0;
+    final engine = _FakeTtsEngine();
+    final notice = _FakeNoticePort();
+
+    final idleTts = ReaderTtsController(
+      engineFactory: () {
+        created++;
+        return engine;
+      },
+      notice: notice,
+      requestNotificationPermission: () {},
+    );
+    expect(idleTts.isEngineInitialized, isFalse);
+    idleTts.syncPrefs();
+    idleTts.checkSleepTimer();
+    idleTts.onUserOffsetChanged(12, currentText: () => sampleText);
+    await idleTts.stop();
+    idleTts.dispose();
+    expect(created, 0);
+
+    final activeTts = ReaderTtsController(
+      engineFactory: () {
+        created++;
+        return engine;
+      },
+      notice: notice,
+      requestNotificationPermission: () {},
+    );
+    addTearDown(activeTts.dispose);
+    expect(activeTts.isEngineInitialized, isFalse);
+
+    expect(await activeTts.start(sampleText), isTrue);
+    expect(created, 1);
+    expect(activeTts.isEngineInitialized, isTrue);
+    expect(engine.spoken, ['第一句用来测试朗读状态机是否正常工作。']);
+  });
 }

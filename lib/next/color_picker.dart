@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart' hide Text;
+import 'package:flutter/services.dart' show HapticFeedback;
 
 import 'app_prefs.dart';
+import 'motion.dart';
 import 'rules.dart';
 import 'text.dart';
 
@@ -75,16 +77,24 @@ class _ColorPickerFieldState extends State<ColorPickerField> {
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
           onTap: () {
+            HapticFeedback.selectionClick();
             _pick(c);
             setState(() {
               _hsv = HSVColor.fromColor(Color(c));
               _hex.text = hex;
             });
           },
-          child: Container(
-            width: size,
-            height: size,
-            decoration: BoxDecoration(color: Color(c), shape: BoxShape.circle, border: selected ? Border.all(width: 3, color: Theme.of(context).colorScheme.onSurface) : null),
+          child: AnimatedScale(
+            scale: selected ? 1.1 : 1.0,
+            duration: AppMotion.dur(context, AppMotion.fast),
+            curve: AppMotion.snappy,
+            child: AnimatedContainer(
+              duration: AppMotion.dur(context, AppMotion.fast),
+              curve: AppMotion.snappy,
+              width: size,
+              height: size,
+              decoration: BoxDecoration(color: Color(c), shape: BoxShape.circle, border: selected ? Border.all(width: 3, color: Theme.of(context).colorScheme.onSurface) : null),
+            ),
           ),
         ),
       ),
@@ -163,35 +173,43 @@ class _ColorPickerFieldState extends State<ColorPickerField> {
         const SizedBox(height: 8),
         TextButton.icon(
           onPressed: () => setState(() => _open = !_open),
-          icon: Icon(_open ? Icons.expand_less : Icons.palette_outlined, size: 18),
+          icon: AppIconSwap(
+            child: Icon(_open ? Icons.expand_less : Icons.palette_outlined, key: ValueKey(_open), size: 18),
+          ),
           label: Text(_open ? '收起调色盘' : '调色盘'),
         ),
-        if (_open) ...[
-          _slider('色相', _hsv.hue, 360, hues, (v) => _setHsv(_hsv.withHue(v))),
-          _slider('饱和度', _hsv.saturation, 1, [HSVColor.fromAHSV(1, _hsv.hue, 0, _hsv.value).toColor(), HSVColor.fromAHSV(1, _hsv.hue, 1, _hsv.value).toColor()], (v) => _setHsv(_hsv.withSaturation(v))),
-          _slider('亮度', _hsv.value, 1, [Colors.black, HSVColor.fromAHSV(1, _hsv.hue, _hsv.saturation, 1).toColor()], (v) => _setHsv(_hsv.withValue(v))),
-          Row(
+        AppCollapse(
+          visible: _open,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              SizedBox(width: 48, child: Text('色值', style: theme.textTheme.bodySmall)),
-              SizedBox(
-                width: 112,
-                child: TextField(
-                  controller: _hex,
-                  maxLength: 6,
-                  style: const TextStyle(fontSize: 15),
-                  decoration: const InputDecoration(prefixText: '#', counterText: '', isDense: true, contentPadding: EdgeInsets.symmetric(vertical: 10, horizontal: 8)),
-                  onChanged: (t) {
-                    final v = int.tryParse(t, radix: 16);
-                    if (t.length == 6 && v != null) _setHsv(HSVColor.fromColor(Color(0xFF000000 | v)), fromHex: true);
-                  },
-                ),
+              _slider('色相', _hsv.hue, 360, hues, (v) => _setHsv(_hsv.withHue(v))),
+              _slider('饱和度', _hsv.saturation, 1, [HSVColor.fromAHSV(1, _hsv.hue, 0, _hsv.value).toColor(), HSVColor.fromAHSV(1, _hsv.hue, 1, _hsv.value).toColor()], (v) => _setHsv(_hsv.withSaturation(v))),
+              _slider('亮度', _hsv.value, 1, [Colors.black, HSVColor.fromAHSV(1, _hsv.hue, _hsv.saturation, 1).toColor()], (v) => _setHsv(_hsv.withValue(v))),
+              Row(
+                children: [
+                  SizedBox(width: 48, child: Text('色值', style: theme.textTheme.bodySmall)),
+                  SizedBox(
+                    width: 112,
+                    child: TextField(
+                      controller: _hex,
+                      maxLength: 6,
+                      style: const TextStyle(fontSize: 15),
+                      decoration: const InputDecoration(prefixText: '#', counterText: '', isDense: true, contentPadding: EdgeInsets.symmetric(vertical: 10, horizontal: 8)),
+                      onChanged: (t) {
+                        final v = int.tryParse(t, radix: 16);
+                        if (t.length == 6 && v != null) _setHsv(HSVColor.fromColor(Color(0xFF000000 | v)), fromHex: true);
+                      },
+                    ),
+                  ),
+                  const Spacer(),
+                  // 调好了点这个，记进"最近用过"
+                  TextButton(onPressed: () => setState(() => _pick(widget.color, remember: true)), child: const Text('存为常用')),
+                ],
               ),
-              const Spacer(),
-              // 调好了点这个，记进"最近用过"
-              TextButton(onPressed: () => setState(() => _pick(widget.color, remember: true)), child: const Text('存为常用')),
             ],
           ),
-        ],
+        ),
       ],
     );
   }

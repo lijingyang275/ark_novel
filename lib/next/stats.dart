@@ -78,7 +78,7 @@ class ReadingStats {
       histTitle = rawHist?['title'] as String?;
       histImg = rawHist?['img'] as String?;
     }
-    final cached = lib == null && histTitle == null ? ChapterCache.books()[aid] : null;
+    final cached = lib == null && histTitle == null ? ChapterCache.metaOf(aid) : null;
     final title = (lib?['title'] as String?) ?? histTitle ?? cached?.$1;
     final img = [m?.img, lib?['img'] as String?, histImg, cached?.$3].whereType<String>().where((e) => e.isNotEmpty).firstOrNull ?? '';
     return (title: LibraryStore.shown(aid, title ?? '书号 $aid'), author: m?.author ?? '', img: img);
@@ -86,7 +86,10 @@ class ReadingStats {
 
   static Future<void> setMeta(String aid, String title, String author, String img) async {
     if (Incognito.on) return;
-    final all = Map.of((_box.get('stats:meta') as Map?) ?? const {});
+    final raw = _box.get('stats:meta') as Map?;
+    final cur = raw?[aid];
+    if (cur is Map && cur['t'] == title && cur['a'] == author && cur['i'] == img) return;
+    final all = Map.of(raw ?? const {});
     all[aid] = {'t': title, 'a': author, 'i': img};
     await _box.put('stats:meta', all);
   }
@@ -232,12 +235,14 @@ class ReadingStats {
       day[dKey] = (day[dKey] ?? 0) + sec;
       book[aid] = (book[aid] ?? 0) + sec;
     }
-    if (ch != null) await _box.put('stats:ch:$aid', ch);
-    if (daysAdded) await _box.put('stats:days:$aid', days);
-    await _box.put('stats:day', day);
-    await _box.put('stats:book', book);
-    // 最后一次读的时间：别的设备删了这本书的统计时，用来判断删除那天的记录是不是删之后读的
-    await _box.put('stats:last', _map('stats:last')..[aid] = now.millisecondsSinceEpoch);
+    await _box.putAll({
+      'stats:ch:$aid': ?ch,
+      if (daysAdded) 'stats:days:$aid': days,
+      'stats:day': day,
+      'stats:book': book,
+      // 最后一次读的时间：别的设备删了这本书的统计时，用来判断删除那天的记录是不是删之后读的
+      'stats:last': _map('stats:last')..[aid] = now.millisecondsSinceEpoch,
+    });
     changes.value++;
   }
 
@@ -247,8 +252,10 @@ class ReadingStats {
     final seen = ((_box.get('stats:seen') as List?) ?? const []).cast<String>();
     final key = '$today:$aid:$cid';
     if (seen.contains(key)) return;
-    await _box.put('stats:seen', [...seen.where((e) => e.startsWith(today)), key]);
-    await _box.put('stats:chapters', ((_box.get('stats:chapters') as int?) ?? 0) + 1);
+    await _box.putAll({
+      'stats:seen': [...seen.where((e) => e.startsWith(today)), key],
+      'stats:chapters': ((_box.get('stats:chapters') as int?) ?? 0) + 1,
+    });
     changes.value++;
   }
 }

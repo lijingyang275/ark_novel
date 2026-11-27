@@ -307,4 +307,28 @@ void main() {
     expect(legacyRestored.containsKey('reader_bg:path'), isFalse);
     expect(Directory(p.join(support, 'reader_bg')).listSync(), isEmpty);
   });
+
+  test('lib:shelves 属于本机私有键不进入备份，且 Backup.restore 正常合并旧版 JSON 备份', () async {
+    final box = await Hive.openBox('session');
+    await box.putAll({
+      'lib:shelves': {'uid': '1', 'ids': [0]},
+      'palette': 2,
+    });
+    expect(Backup.isLocalKey('lib:shelves'), isTrue);
+    final exported = jsonDecode(Backup.make()) as Map<String, dynamic>;
+    expect((exported['box'] as Map).containsKey('lib:shelves'), isFalse);
+
+    final legacyJson = jsonEncode({
+      'v': 2,
+      'device': 'legacyDevice',
+      'at': DateTime.now().millisecondsSinceEpoch,
+      'progress': {'9': ['c1', 5, 1000]},
+      'extra': {
+        'lib:books': {'9': {'aid': '9', 'title': '旧书', 'img': '', 'added': 100}},
+      },
+    });
+    expect(await Backup.restore(legacyJson), 1);
+    expect(box.get('progress:9'), ['c1', 5, 1000]);
+    expect((box.get('lib:books') as Map).containsKey('9'), isTrue);
+  });
 }

@@ -23,6 +23,7 @@ import '../models/user_info.dart';
 import 'backup.dart';
 import 'cache.dart';
 import 'env.dart';
+import 'meta_cache.dart';
 import 'net_stub.dart' if (dart.library.io) 'net_io.dart';
 import 'web_fetch.dart';
 
@@ -33,15 +34,21 @@ class SessionStore {
   final Box _box;
   static const _secure = FlutterSecureStorage(mOptions: MacOsOptions(usesDataProtectionKeychain: false)); // 没开发者签名的 Mac 版用不了新式钥匙串（-34018）
 
-  static Future<SessionStore> open() async {
-    if (!kIsWeb && Platform.isWindows) {
-      // Windows 默认会放进「文档」文件夹，改放 App 自己的数据目录
-      Hive.init((await Directory(p.join((await getApplicationSupportDirectory()).path, 'next')).create(recursive: true)).path);
-    } else {
+  static Future<SessionStore> open({bool openMetaCache = true}) async {
+    if (kIsWeb) {
       await Hive.initFlutter('next');
+    } else if (Platform.isWindows) {
+      // Windows 默认会放进「文档」文件夹，改放 App 自己的数据目录；复用同一次 supportDir 避免重复平台通道查询
+      final supportDir = (await getApplicationSupportDirectory()).path;
+      Hive.init((await Directory(p.join(supportDir, 'next')).create(recursive: true)).path);
+      await Backup.apply(supportDir);
+    } else {
+      final results = await Future.wait<Object?>([Hive.initFlutter('next'), getApplicationSupportDirectory()]);
+      await Backup.apply((results[1] as Directory).path);
     }
-    if (!kIsWeb) await Backup.applyPending();
-    return SessionStore._(await Hive.openBox('session'));
+    final sessionBox = await Hive.openBox('session');
+    if (openMetaCache) await MetaCache.open();
+    return SessionStore._(sessionBox);
   }
 
   /// 登录 cookie（`jieqiUserInfo=…;jieqiVisitInfo=…`）；网页预览：cookie 保存在转发程序里，这里只存一个标记。
@@ -133,10 +140,63 @@ class SessionStore {
     return i != null && i >= 0 && i < Wenku8Node.values.length ? Wenku8Node.values[i] : Wenku8Node.wwwWenku8Cc;
   }
 
-  /// 最近一次成功取到的用户页 HTML，断网时用它显示登录状态。
-  String? get userHtml => _box.get('userHtml') as String?;
+  /// 最近一次成功取到的用户页 HTML（兼容旧版本字符串格式；新版本在同一本地键存轻量结构化 Map）。
+  String? get userHtml {
+    final raw = _box.get('userHtml');
+    return raw is String ? raw : null;
+  }
 
   Future<void> setUserHtml(String? html) => html == null ? _box.delete('userHtml') : _box.put('userHtml', html);
+
+  /// 本地缓存的结构化用户信息：优先从轻量 Map 直接构造（免冷启动 HTML DOM 解析），
+  /// 若本地仍是旧版本 HTML 字符串则自动回退解析，保持完全向后兼容且复用已受备份守卫保护的 `userHtml` 本地键。
+  UserInfo? get cachedUser {
+    final raw = _box.get('userHtml');
+    if (raw is Map) return _decodeUser(raw);
+    if (raw is String) {
+      try {
+        return Wenku8Parser.userInfo(raw);
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  Future<void> setCachedUser(UserInfo? user) => user == null ? _box.delete('userHtml') : _box.put('userHtml', _encodeUser(user));
+
+  static Map<String, String> _encodeUser(UserInfo u) => {
+    'avatar': u.avatar,
+    'uid': u.uid,
+    'username': u.username,
+    'userLevel': u.userLevel,
+    'email': u.email,
+    'registerDate': u.registerDate,
+    'contribution': u.contribution,
+    'experience': u.experience,
+    'point': u.point,
+    'maxBookshelfNum': u.maxBookshelfNum,
+    'maxRecommendNum': u.maxRecommendNum,
+  };
+
+  static UserInfo? _decodeUser(Map raw) {
+    final uid = raw['uid'];
+    if (uid is! String || uid.isEmpty) return null;
+    String field(String k) => raw[k] is String ? raw[k] as String : '';
+    return UserInfo(
+      avatar: field('avatar'),
+      uid: uid,
+      username: field('username'),
+      userLevel: field('userLevel'),
+      email: field('email'),
+      registerDate: field('registerDate'),
+      contribution: field('contribution'),
+      experience: field('experience'),
+      point: field('point'),
+      maxBookshelfNum: field('maxBookshelfNum'),
+      maxRecommendNum: field('maxRecommendNum'),
+    );
+  }
 
   Future<void> setNode(Wenku8Node node) => _box.put('node', node.index);
 
@@ -258,6 +318,34 @@ class NativeNetController extends Notifier<bool> {
 
 final nativeNetProvider = NotifierProvider<NativeNetController, bool>(NativeNetController.new);
 
+/// 包装共享的底层 [HttpClientAdapter]：忽略单个上层 [Dio.close]，由 [sharedHttpAdapterProvider] 统一管理生命周期。
+class NonClosingHttpClientAdapter implements HttpClientAdapter {
+  NonClosingHttpClientAdapter(this._inner);
+
+  final HttpClientAdapter _inner;
+
+  @override
+  Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream, Future<void>? cancelFuture) =>
+      _inner.fetch(options, requestStream, cancelFuture);
+
+  @override
+  void close({bool force = false}) {}
+}
+
+/// 全局共享单一底层网络适配器（Cronet / NSURLSession / Dart IO），避免多个 Dio 各自创建独立的原生网络引擎。
+final sharedHttpAdapterProvider = Provider<HttpClientAdapter>((ref) {
+  final store = ref.watch(sessionStoreProvider);
+  ref.watch(proxyProvider);
+  ref.watch(nativeNetProvider);
+  final raw = store.adapter();
+  ref.onDispose(() {
+    try {
+      raw.close(force: false);
+    } catch (_) {}
+  });
+  return NonClosingHttpClientAdapter(raw);
+});
+
 /// 当前用于请求的站点地址：网页预览走转发程序，原生 App 直连所选节点。
 String siteBase(Wenku8Node node) => isWebPreview ? previewProxyBase : node.node;
 
@@ -269,7 +357,7 @@ final wenku8ClientProvider = Provider<Wenku8Client>((ref) {
     charset: () => CharsetType.gbk,
     // 浏览器不允许网页设置 User-Agent，由转发程序代为添加
     headers: kIsWeb ? const {} : {'User-Agent': store.userAgent},
-    dio: kIsWeb ? null : (Dio()..httpClientAdapter = store.adapter()),
+    dio: kIsWeb ? null : (Dio()..httpClientAdapter = ref.read(sharedHttpAdapterProvider)),
     challengeFallback: kIsWeb
         ? null
         : (url, {referer}) => webFetch(
@@ -285,10 +373,9 @@ final wenku8ClientProvider = Provider<Wenku8Client>((ref) {
           ),
     shouldRetryAfterFallback: kIsWeb ? null : (html) => store.cookie != null && store.cookie != 'preview' && Wenku8Parser.needsLogin(html),
   );
-  // shortcut: 换代理或切换原生网络栈时热替换适配器（旧适配器在途请求自然结束，避免正在传输时强关底层引擎）
+  // 换代理或切换原生网络栈时热替换共享适配器（旧底层适配器优雅排空在途请求后自动释放）
   if (!kIsWeb) {
-    ref.listen(proxyProvider, (_, _) => client.dio.httpClientAdapter = store.adapter());
-    ref.listen(nativeNetProvider, (_, _) => client.dio.httpClientAdapter = store.adapter());
+    ref.listen<HttpClientAdapter>(sharedHttpAdapterProvider, (_, next) => client.dio.httpClientAdapter = next);
   }
   return client;
 });
@@ -325,11 +412,9 @@ final imageChallengeProvider = Provider<ImageChallengeFallback?>((ref) {
 /// 图片专用的 Dio：和请求页面一样走所选代理与原生网络栈，通过拦截器动态读取当前节点 Referer、浏览器 UA 与各图床保存的 Cloudflare cookie。
 final imageDioProvider = Provider<Dio>((ref) {
   final store = ref.watch(sessionStoreProvider);
-  ref.watch(proxyProvider);
-  ref.watch(nativeNetProvider);
   final jar = ref.watch(imageCookieJarProvider);
   final dio = Dio(BaseOptions(responseType: ResponseType.bytes, connectTimeout: const Duration(seconds: 12), receiveTimeout: const Duration(seconds: 25)))
-    ..httpClientAdapter = store.adapter();
+    ..httpClientAdapter = ref.watch(sharedHttpAdapterProvider);
   if (!kIsWeb) {
     final restoring = <String, Future<void>>{};
     dio.interceptors.add(
@@ -388,6 +473,41 @@ class SessionLoggedIn extends SessionState {
 
   /// 离线的原因是被 Cloudflare 拦住：去验证一下就能恢复，不是真的没网
   final bool needsVerify;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SessionLoggedIn &&
+          other.offline == offline &&
+          other.needsVerify == needsVerify &&
+          other.user.uid == user.uid &&
+          other.user.username == user.username &&
+          other.user.avatar == user.avatar &&
+          other.user.userLevel == user.userLevel &&
+          other.user.email == user.email &&
+          other.user.registerDate == user.registerDate &&
+          other.user.contribution == user.contribution &&
+          other.user.experience == user.experience &&
+          other.user.point == user.point &&
+          other.user.maxBookshelfNum == user.maxBookshelfNum &&
+          other.user.maxRecommendNum == user.maxRecommendNum;
+
+  @override
+  int get hashCode => Object.hash(
+    offline,
+    needsVerify,
+    user.uid,
+    user.username,
+    user.avatar,
+    user.userLevel,
+    user.email,
+    user.registerDate,
+    user.contribution,
+    user.experience,
+    user.point,
+    user.maxBookshelfNum,
+    user.maxRecommendNum,
+  );
 }
 
 bool isCloudflare(Object e) => e is Cloudflare403Exception || e is CloudflareChallengeException;
@@ -414,22 +534,25 @@ String friendlyError(Object e) {
     if (detail.contains('127.0.0.1') || lower.contains('connection refused') || detail.contains('ERR_CONNECTION_REFUSED')) {
       return '连接被拒绝（本地 DNS 可能拦截了域名，建议切到 wenku8.cc 或开启代理）';
     }
-    if (detail.contains('ERR_NAME_NOT_RESOLVED') || detail.contains('HOSTNAME_NOT_RESOLVED') || lower.contains('failed host lookup') || detail.contains('NSURLErrorCannotFindHost') || detail.contains('Code=-1003') || lower.contains('cannot find host')) {
+    if (detail.contains('ERR_NAME_NOT_RESOLVED') || detail.contains('HOSTNAME_NOT_RESOLVED') || lower.contains('failed host lookup') || detail.contains('NSURLErrorCannotFindHost') || lower.contains('code=-1003') || lower.contains('cannot find host')) {
       return '无法解析域名，请检查网络或切换站点线路';
     }
-    if (detail.contains('ERR_CONNECTION_TIMED_OUT') || detail.contains('ERR_TIMED_OUT') || detail.contains('NSURLErrorTimedOut') || detail.contains('Code=-1001') || lower.contains('request timed out')) {
+    if (detail.contains('ERR_CONNECTION_TIMED_OUT') || detail.contains('ERR_TIMED_OUT') || detail.contains('NSURLErrorTimedOut') || lower.contains('code=-1001') || lower.contains('request timed out')) {
       return '连接超时，请检查网络或切换线路';
     }
-    if (detail.contains('ERR_INTERNET_DISCONNECTED') || detail.contains('ERR_NETWORK_CHANGED') || detail.contains('NSURLErrorNotConnectedToInternet') || detail.contains('Code=-1009') || lower.contains('appears to be offline')) {
+    if (detail.contains('ERR_INTERNET_DISCONNECTED') || detail.contains('ERR_NETWORK_CHANGED') || detail.contains('NSURLErrorNotConnectedToInternet') || lower.contains('code=-1009') || lower.contains('appears to be offline')) {
       return '网络已断开，请检查网络连接';
     }
-    if (detail.contains('ERR_CONNECTION_RESET') || detail.contains('ERR_CONNECTION_CLOSED') || detail.contains('ERR_CONNECTION_ABORTED') || detail.contains('NSURLErrorNetworkConnectionLost') || detail.contains('Code=-1005') || lower.contains('connection reset') || lower.contains('connection closed')) {
+    if (detail.contains('ERR_CONNECTION_RESET') || detail.contains('ERR_CONNECTION_CLOSED') || detail.contains('ERR_CONNECTION_ABORTED') || detail.contains('NSURLErrorNetworkConnectionLost') || lower.contains('code=-1005') || lower.contains('connection reset') || lower.contains('connection closed')) {
       return '网络连接被中断，请稍后重试或切换线路';
+    }
+    if (detail.contains('NSURLErrorBadURL') || (lower.contains('nsurlerrordomain') && (lower.contains('code=-1000') || lower.contains('bad url')))) {
+      return '系统网络栈请求异常（NSURLError -1000），如开启了虚拟网卡/代理，可在设置中关闭「系统网络栈」或填写 HTTP 代理';
     }
     if (detail.contains('ERR_PROXY_CONNECTION_FAILED') || detail.contains('ERR_TUNNEL_CONNECTION_FAILED')) {
       return '代理服务器连接失败，请检查代理地址与端口';
     }
-    if (err is HandshakeException || detail.contains('ERR_SSL_') || detail.contains('ERR_CERT_') || detail.contains('NSURLErrorSecureConnectionFailed') || detail.contains('NSURLErrorServerCertificate') || detail.contains('Code=-1200') || detail.contains('Code=-1202')) {
+    if (err is HandshakeException || detail.contains('ERR_SSL_') || detail.contains('ERR_CERT_') || detail.contains('NSURLErrorSecureConnectionFailed') || detail.contains('NSURLErrorServerCertificate') || lower.contains('code=-1200') || lower.contains('code=-1202')) {
       return '安全连接（TLS）握手失败，可能被网络拦截，建议切换线路或开关系统网络栈';
     }
     if (detail.contains('ERR_ADDRESS_UNREACHABLE') || lower.contains('network is unreachable')) {
@@ -454,14 +577,8 @@ class SessionController extends Notifier<SessionState> {
   Future<void> _cookieOp = Future<void>.value();
   bool _prunedCf = false;
 
-  static UserInfo? _tryParseUser(String? html) {
-    if (html == null) return null;
-    try {
-      return Wenku8Parser.userInfo(html);
-    } catch (_) {
-      return null;
-    }
-  }
+  static final _titleRe = RegExp(r'<title[^>]*>(.*?)</title>', caseSensitive: false, dotAll: true);
+  static final _wsRe = RegExp(r'\s+');
 
   @override
   SessionState build() {
@@ -472,7 +589,7 @@ class SessionController extends Notifier<SessionState> {
     // 本地就能定下来的直接给，第一帧就进主界面，不在启动页停：没登录 → 游客；有上次的账号信息 → 先当已登录，确认在后台做。
     // 只有存了 cookie 却没有账号信息（刚登录完就被杀掉）时才在启动页等确认
     if (_store.cookie == null) return const SessionLoggedOut();
-    final cached = _tryParseUser(_store.userHtml);
+    final cached = _store.cachedUser;
     return cached != null ? SessionLoggedIn(cached) : const SessionChecking();
   }
 
@@ -580,7 +697,7 @@ class SessionController extends Notifier<SessionState> {
         return null;
       }
       // 联网失败不等于没登录：有 cookie 和上次保存的账号信息就按离线登录处理
-      final cached = _tryParseUser(_store.userHtml);
+      final cached = _store.cachedUser;
       final verify = isCloudflare(e);
       state = cached == null ? SessionLoggedOut(needsVerify: verify) : SessionLoggedIn(cached, offline: true, needsVerify: verify);
       return _describeError(e);
@@ -670,13 +787,15 @@ class SessionController extends Notifier<SessionState> {
     final UserInfo user;
     try {
       user = Wenku8Parser.userInfo(html);
+    } on Wenku8LoginRequiredException {
+      // Wenku8Parser.userInfo 已经解析过一次 DOM 并判定 needsLoginDoc(doc)，直接透传避免重复 parse(html)
+      rethrow;
     } on Wenku8UnexpectedPageException {
-      if (Wenku8Parser.needsLogin(html)) rethrow;
-      final m = RegExp(r'<title[^>]*>(.*?)</title>', caseSensitive: false, dotAll: true).firstMatch(html);
-      final title = m?.group(1)?.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+      final m = _titleRe.firstMatch(html);
+      final title = m?.group(1)?.replaceAll(_wsRe, ' ').trim() ?? '';
       throw _OddUserPage(title);
     }
-    await _store.setUserHtml(html);
+    await _store.setCachedUser(user);
     return user;
   }
 
@@ -690,7 +809,7 @@ class SessionController extends Notifier<SessionState> {
       } catch (_) {}
     }
     // 书架这类账号私有的离线备份一并清掉，换账号不会看到上一个人的内容（还在确认登录时按上次保存的账号）
-    final uid = s is SessionLoggedIn ? s.user.uid : _tryParseUser(_store.userHtml)?.uid;
+    final uid = s is SessionLoggedIn ? s.user.uid : _store.cachedUser?.uid;
     if (uid != null && uid.isNotEmpty) await PageStore.removeScope(uid);
     await _clear();
     state = const SessionLoggedOut();
@@ -699,7 +818,7 @@ class SessionController extends Notifier<SessionState> {
   /// 注销或登录失效时清理 `jieqi*` 登录 cookie，保留有效 Cloudflare cookie。
   Future<void> _clear() => _serializeCookies(() async {
     await _store.setCookie(null);
-    await _store.setUserHtml(null);
+    await _store.setCachedUser(null);
     await _client.clearCookie();
     if (!isWebPreview) {
       for (final n in _nodeHosts) {

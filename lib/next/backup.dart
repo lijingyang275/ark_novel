@@ -2,11 +2,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, kIsWeb, visibleForTesting;
 import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'meta_cache.dart';
 import 'sync.dart';
 
 /// 完整备份：一个 zip，里面是本地数据库里除登录信息外的全部键（`data.json`），加上自选的头像和字体（`files/`）。
@@ -45,6 +46,7 @@ class Backup {
     'lib:imported',
     'lib:ops',
     'lib:opsFor',
+    'lib:shelves',
     'imgShrunk2',
     'imgHq',
     'coverSkipDropped',
@@ -55,22 +57,34 @@ class Backup {
   /// 设备私有键：不进备份，恢复时也不覆盖/删除本机。
   static bool _isLocal(String k) => _localKeys.contains(k) || k.startsWith('cf:') || k.startsWith('unlock:txt:');
 
-  /// 可再生缓存键：新导出排除出备份（缩小体积），旧备份里若带有则仍兼容恢复。
-  static bool _isCache(String k) => k == 'ccolor' || k.startsWith('bgm:') || k.startsWith('bgm_');
+  /// 可再生缓存键：新导出排除出备份（缩小体积），旧备份里若带有则仍兼容恢复（下次启动自动迁入 `meta_cache`）。
+  static bool _isCache(String k) => MetaCache.isCacheKey(k);
 
-  static String make() => jsonEncode({
+  @visibleForTesting
+  static bool isLocalKey(String k) => _isLocal(k);
+
+  @visibleForTesting
+  static bool isCacheKey(String k) => _isCache(k);
+
+  static Map<String, dynamic> makeData() => {
     'backup': 3,
     'device': Sync.deviceId,
     'box': {for (final k in _box.keys.whereType<String>().where((k) => !_isLocal(k) && !_isCache(k))) k: _box.get(k)},
-  });
+  };
+
+  static String make() => jsonEncode(makeData());
 
   static Future<String> _supportDir() async => (await getApplicationSupportDirectory()).path;
 
-  /// 打包成临时目录里的 zip，返回文件路径。
+  static Future<void> _packMap(({String out, Map<String, dynamic> data, String supportDir}) a) => pack(a.out, jsonEncode(a.data), a.supportDir);
+
+  static dynamic _decodeJson(String json) => jsonDecode(json);
+
+  /// 打包成临时目录里的 zip，返回文件路径（大 Map 的 `jsonEncode` 放到后台 Isolate 执行）。
   static Future<String> export() async {
     final out = p.join((await getTemporaryDirectory()).path, 'ark_novel_backup.zip');
-    final args = (out: out, data: make(), supportDir: await _supportDir());
-    await compute((a) => pack(a.out, a.data, a.supportDir), args);
+    final args = (out: out, data: makeData(), supportDir: await _supportDir());
+    await compute(_packMap, args);
     return out;
   }
 
@@ -209,11 +223,11 @@ class Backup {
   /// 导入旧版的 JSON 备份：只合并，不覆盖现有的。同步快照按同步规则并入（本机自己导出的跳过）；书架里没有的书、没有的分类补上；
   /// 其余设置只补本机还没有的；删除过（有墓碑）的书和分类不补回来。返回恢复了多少本书。
   static Future<int> restore(String json) async {
-    final decoded = jsonDecode(json);
+    final decoded = !kIsWeb && json.length > 64 * 1024 ? await compute(_decodeJson, json) : jsonDecode(json);
     if (decoded is! Map<String, dynamic>) throw const FormatException('不是有效的备份文件');
     final m = decoded;
     try {
-      await Sync.importBackup(json);
+      await Sync.importDecodedBackup(m);
     } on StaleSnapshotException {
       // 太旧的快照不按同步规则合并，下面只补书架上还没有、也没删过的书
     }

@@ -5,14 +5,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../cache.dart';
 import '../image_cache.dart';
 import '../routes.dart';
 import '../stats.dart';
+import '../text.dart';
 import '../widgets.dart';
 import '../x_list.dart';
-import '../text.dart';
 
 /// 存储空间：各部分占多少、每本书的章节缓存多大；可以一键清掉读过的章节。网页预览不进这页。
 class StoragePage extends ConsumerStatefulWidget {
@@ -25,7 +26,18 @@ class StoragePage extends ConsumerStatefulWidget {
 class _StoragePageState extends ConsumerState<StoragePage> {
   late Future<List<(String, int)>> _sizes = _measure();
 
-  /// Hive 的数据文件都在同一个目录：正文、网页备份单列，其余算"其他数据"
+  static const _customResourceDirs = ['font', 'reader_bg', 'char_avatar', 'avatar'];
+
+  Future<int> _dirBytes(Directory dir) async {
+    if (!await dir.exists()) return 0;
+    var n = 0;
+    await for (final entity in dir.list(recursive: true)) {
+      if (entity is File) n += await entity.length();
+    }
+    return n;
+  }
+
+  /// Hive 的数据文件都在同一个目录：正文、网页备份单列，其余算"其他数据"；同时统计自定义资源目录。
   Future<List<(String, int)>> _measure() async {
     var text = 0, pages = 0, other = 0;
     await for (final f in File(Hive.box('session').path!).parent.list()) {
@@ -40,8 +52,24 @@ class _StoragePageState extends ConsumerState<StoragePage> {
           other += n;
       }
     }
+
+    var customBytes = 0;
+    try {
+      final support = await getApplicationSupportDirectory();
+      for (final sub in _customResourceDirs) {
+        customBytes += await _dirBytes(Directory(p.join(support.path, sub)));
+      }
+    } catch (_) {}
+
     final images = await ref.read(imageStoreProvider).diskBytes();
-    return [('章节正文', text), ('图片', images), ('网页备份', pages), ('其他数据', other)];
+
+    return [
+      ('章节正文', text),
+      ('图片', images),
+      if (customBytes > 0) ('字体与自定义资源', customBytes),
+      ('网页备份', pages),
+      ('其他数据', other),
+    ];
   }
 
   void _refresh() => setState(() {
@@ -54,7 +82,10 @@ class _StoragePageState extends ConsumerState<StoragePage> {
         builder: (context) => AlertDialog(
           title: Text(title),
           content: Text(content),
-          actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')), FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('清除'))],
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('清除')),
+          ],
         ),
       ) ==
       true;
@@ -70,7 +101,9 @@ class _StoragePageState extends ConsumerState<StoragePage> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final books = ChapterCache.cachedBooks().toList()..sort((a, b) => ChapterCache.bytesOf(b).compareTo(ChapterCache.bytesOf(a)));
+    final cachedIds = ChapterCache.cachedBooks().toList();
+    final bytesByBook = {for (final aid in cachedIds) aid: ChapterCache.bytesOf(aid)};
+    final books = cachedIds..sort((a, b) => bytesByBook[b]!.compareTo(bytesByBook[a]!));
     return Scaffold(
       appBar: AppBar(title: const Text('存储空间'), actions: [TextButton(onPressed: books.isEmpty ? null : _clearRead, child: const Text('清除已读章节'))]),
       body: contentWidth(
@@ -105,7 +138,7 @@ class _StoragePageState extends ConsumerState<StoragePage> {
               for (final aid in books)
                 XTile(
                   title: ReadingStats.info(aid).title,
-                  subtitle: '${ChapterCache.count(aid)} 章 · ${ChapterCache.sizeLabel(aid)}',
+                  subtitle: '${ChapterCache.count(aid)} 章 · ${sizeText(bytesByBook[aid]!)}',
                   onTap: () => context.push(Routes.cacheBook(aid)).then((_) => mounted ? _refresh() : null),
                   trailing: IconButton(
                     tooltip: hz(context, '删除缓存'),

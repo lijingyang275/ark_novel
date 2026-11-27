@@ -1,7 +1,8 @@
+import 'dart:isolate' show TransferableTypedData;
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
-import 'package:flutter/foundation.dart' show Uint8List, compute;
+import 'package:flutter/foundation.dart' show Uint8List, compute, kIsWeb;
 
 /// 封面四周的白边：框出来的封面常常带上旁边的白底（封面比框窄、框得不够准），扫描图本身也常有一圈白边。
 /// 图片解码成长边不超过 [maxSide] 的图来找。不能缩得太小：跨页里框出的封面只占三成宽，
@@ -41,11 +42,18 @@ class CoverPixels {
     return res == null ? crop : ui.Rect.fromLTRB(res.$1, res.$2, res.$3, res.$4);
   }
 
-  /// 异步去白边：在后台 Isolate 执行像素扫描（原生端走 `Isolate.run`，Web 自动同步执行），避免阻塞 UI 线程。
+  /// 异步去白边：通过 [TransferableTypedData] 零拷贝跨 Isolate 传递像素缓冲执行扫描，避免阻塞 UI 线程。
   Future<ui.Rect> trimAsync(ui.Rect crop, {double maxTrim = 0.15}) async {
-    final res = await compute(_trimPixels, (rgba, w, h, crop.left, crop.top, crop.right, crop.bottom, maxTrim));
+    if (kIsWeb) return trim(crop, maxTrim: maxTrim);
+    final transferable = TransferableTypedData.fromList([rgba]);
+    final res = await compute(_trimPixelsTransferable, (transferable, w, h, crop.left, crop.top, crop.right, crop.bottom, maxTrim));
     return res == null ? crop : ui.Rect.fromLTRB(res.$1, res.$2, res.$3, res.$4);
   }
+}
+
+(double, double, double, double)? _trimPixelsTransferable((TransferableTypedData, int, int, double, double, double, double, double) args) {
+  final (data, w, h, left, top, right, bottom, maxTrim) = args;
+  return _trimPixels((data.materialize().asUint8List(), w, h, left, top, right, bottom, maxTrim));
 }
 
 (double, double, double, double)? _trimPixels((Uint8List, int, int, double, double, double, double, double) args) {

@@ -54,6 +54,9 @@ add_subdirectory(${FLUTTER_MANAGED_DIR})
 add_subdirectory("runner")
 
 
+# 禁止探测本机 JNI 环境，避免 Windows 端编译无用的 dartjni.dll
+set(CMAKE_DISABLE_FIND_PACKAGE_JNI TRUE)
+
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
 include(flutter/generated_plugins.cmake)

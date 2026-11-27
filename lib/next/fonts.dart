@@ -18,19 +18,55 @@ class FontStore {
 
   static String? get customFamily => _box.get('font:family') as String?;
 
-  /// 启动时把上次选的字体文件重新加载进引擎。
-  /// 不挡着启动（字体文件可能有十几 MB），在后台加载；阅读页用自选字体时等 [ready] 变成 true 再排版。
+  static String? _loadedFamily;
+  static String? _loadedPath;
+  static Future<void>? _loading;
+
+  /// 启动时仅在当前阅读字体就是自选字体（`r.font == 2`）时才读取并加载字体文件；
+  /// 否则跳过磁盘读取直接置 [ready] 为 true，避免启动空读十几 MB 字体文件。
   static Future<void> loadSaved() async {
-    try {
-      final path = _box.get('font:path') as String?;
-      final family = customFamily;
-      if (path == null || family == null) return;
-      final file = File(path);
-      if (await file.exists()) await _load(family, await file.readAsBytes());
-    } catch (_) {
-      // 字体文件坏了就按系统字体显示
-    } finally {
+    if ((_box.get('r.font') as int?) != 2) {
       ready.value = true;
+      return;
+    }
+    await ensureLoaded();
+  }
+
+  /// 幂等按需加载已保存的自选字体文件（供启动或用户稍后切回 `font == 2` 时调用）。
+  /// 加载前将 [ready] 置为 false，加载完成（或无需加载/失败回退）后置为 true。
+  static Future<void> ensureLoaded() async {
+    final path = _box.get('font:path') as String?;
+    final family = customFamily;
+    if (path == null || family == null) {
+      ready.value = true;
+      return;
+    }
+    if (_loadedFamily == family && _loadedPath == path) {
+      ready.value = true;
+      return;
+    }
+    final running = _loading;
+    if (running != null) return running;
+    ready.value = false;
+    final task = () async {
+      try {
+        final file = File(path);
+        if (await file.exists()) {
+          await _load(family, await file.readAsBytes());
+          _loadedFamily = family;
+          _loadedPath = path;
+        }
+      } catch (_) {
+        // 字体文件坏了就按系统字体显示
+      } finally {
+        ready.value = true;
+      }
+    }();
+    _loading = task;
+    try {
+      await task;
+    } finally {
+      if (identical(_loading, task)) _loading = null;
     }
   }
 
@@ -54,6 +90,9 @@ class FontStore {
     final dest = await File(src).copy(p.join(dir.path, 'font_$stamp${p.extension(src)}'));
     final family = 'ReaderFont$stamp';
     await _load(family, await dest.readAsBytes());
+    _loadedFamily = family;
+    _loadedPath = dest.path;
+    ready.value = true;
     await _box.put('font:path', dest.path);
     await _box.put('font:family', family);
     return true;
@@ -63,11 +102,22 @@ class FontStore {
   static const names = {0: '系统默认', 1: '系统衬线', 3: '霞鹜文楷', 4: '思源宋体', 2: '自选字体'};
 
   /// 没有自选字体时按系统默认。内置字体只含常用字，缺的字回退到系统字体。
-  static ({String? family, List<String>? fallback}) resolve(int font) => switch (font) {
-    1 => (family: null, fallback: kSerifFallback),
-    2 when customFamily != null => (family: customFamily, fallback: null),
-    3 => (family: 'LXGWWenKai', fallback: kSerifFallback),
-    4 => (family: 'NotoSerifSCBundled', fallback: kSerifFallback),
-    _ => (family: null, fallback: null),
-  };
+  static ({String? family, List<String>? fallback}) resolve(int font) {
+    if (font == 2) {
+      final family = customFamily;
+      if (family != null) {
+        final path = _box.get('font:path') as String?;
+        if (path != null && (_loadedFamily != family || _loadedPath != path) && _loading == null) {
+          Future.microtask(ensureLoaded);
+        }
+        return (family: family, fallback: null);
+      }
+    }
+    return switch (font) {
+      1 => (family: null, fallback: kSerifFallback),
+      3 => (family: 'LXGWWenKai', fallback: kSerifFallback),
+      4 => (family: 'NotoSerifSCBundled', fallback: kSerifFallback),
+      _ => (family: null, fallback: null),
+    };
+  }
 }

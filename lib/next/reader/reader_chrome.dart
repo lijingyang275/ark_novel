@@ -4,7 +4,6 @@ import 'package:flutter/material.dart' hide Text;
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../cache.dart';
-import '../local_books.dart';
 import '../pages/stats_page.dart' show charsPerMinute, secondsPerChapter;
 import '../read_state.dart';
 import '../stats.dart';
@@ -60,22 +59,23 @@ class ReaderChromeConfig {
 
   bool get hasHeader => headerLeft != ReaderChromeField.empty || headerRight != ReaderChromeField.empty;
   bool get hasFooter => footerLeft != ReaderChromeField.empty || footerRight != ReaderChromeField.empty;
+  bool get needsVolumeEta =>
+      headerLeft == ReaderChromeField.volumeEta ||
+      headerRight == ReaderChromeField.volumeEta ||
+      footerLeft == ReaderChromeField.volumeEta ||
+      footerRight == ReaderChromeField.volumeEta;
 
   /// 用于缓存键比较（忽略闭包实例差异，仅比较字段配置和书名）。
   int get layoutSignature => Object.hash(headerLeft, headerRight, footerLeft, footerRight, bookTitle);
 }
 
-/// 纯函数：估算本卷剩余阅读时间（秒）。
-///
-/// - 优先按个人阅读速度 [personalCharsPerMinute]（合理范围 100~5000 字/分钟，否则回退 500 字/分钟）
-///   计算当前章剩余字数 + 后续已缓存章节字数；
-/// - 后续未缓存章节优先用 [avgSecondsPerChapter]（本书或全局单章均时），其次用本卷已知章节平均字数折算；
-/// - 数据完全不足无法估算时返回 null（绝不返回负数或乱码）。
-int? estimateVolumeRemainingSeconds({
+/// 纯函数：根据已预统计的后续章节字数/章数估算本卷剩余阅读时间（秒），单章内翻页为 O(1)。
+int? estimateVolumeRemainingSecondsFromTail({
   required int currentChapterChars,
   required double currentChapterFraction,
-  required List<String> remainingCids,
-  required int? Function(String cid) cachedLengthOf,
+  required int cachedCharsSum,
+  required int cachedCount,
+  required int uncachedCount,
   int? personalCharsPerMinute,
   int? avgSecondsPerChapter,
 }) {
@@ -85,20 +85,6 @@ int? estimateVolumeRemainingSeconds({
 
   final curRemChars = ((1.0 - frac) * safeCurChars).round();
   final curSec = curRemChars > 0 ? (curRemChars * 60 / cpm).round() : 0;
-
-  var cachedCharsSum = 0;
-  var cachedCount = 0;
-  var uncachedCount = 0;
-  for (final cid in remainingCids) {
-    final len = cachedLengthOf(cid);
-    if (len != null && len > 0) {
-      cachedCharsSum += len;
-      cachedCount++;
-    } else {
-      uncachedCount++;
-    }
-  }
-
   final cachedSec = cachedCharsSum > 0 ? (cachedCharsSum * 60 / cpm).round() : 0;
 
   var uncachedSec = 0;
@@ -120,6 +106,43 @@ int? estimateVolumeRemainingSeconds({
   return total < 0 ? 0 : total;
 }
 
+/// 纯函数：估算本卷剩余阅读时间（秒）。
+///
+/// - 优先按个人阅读速度 [personalCharsPerMinute]（合理范围 100~5000 字/分钟，否则回退 500 字/分钟）
+///   计算当前章剩余字数 + 后续已缓存章节字数；
+/// - 后续未缓存章节优先用 [avgSecondsPerChapter]（本书或全局单章均时），其次用本卷已知章节平均字数折算；
+/// - 数据完全不足无法估算时返回 null（绝不返回负数或乱码）。
+int? estimateVolumeRemainingSeconds({
+  required int currentChapterChars,
+  required double currentChapterFraction,
+  required List<String> remainingCids,
+  required int? Function(String cid) cachedLengthOf,
+  int? personalCharsPerMinute,
+  int? avgSecondsPerChapter,
+}) {
+  var cachedCharsSum = 0;
+  var cachedCount = 0;
+  var uncachedCount = 0;
+  for (final cid in remainingCids) {
+    final len = cachedLengthOf(cid);
+    if (len != null && len > 0) {
+      cachedCharsSum += len;
+      cachedCount++;
+    } else {
+      uncachedCount++;
+    }
+  }
+  return estimateVolumeRemainingSecondsFromTail(
+    currentChapterChars: currentChapterChars,
+    currentChapterFraction: currentChapterFraction,
+    cachedCharsSum: cachedCharsSum,
+    cachedCount: cachedCount,
+    uncachedCount: uncachedCount,
+    personalCharsPerMinute: personalCharsPerMinute,
+    avgSecondsPerChapter: avgSecondsPerChapter,
+  );
+}
+
 /// 格式化本卷剩余预计时间；当 [remainingSeconds] 为 null（数据不足）时优雅回退为本卷进度或空串。
 String formatVolumeEta(int? remainingSeconds, {double? fallbackVolumeProgress}) {
   if (remainingSeconds == null) {
@@ -135,7 +158,7 @@ String formatVolumeEta(int? remainingSeconds, {double? fallbackVolumeProgress}) 
   return m == 0 ? '本卷约剩 $h 小时' : '本卷约剩 $h 小时 $m 分';
 }
 
-/// 阅读器缓存的阅读速度快照（避免每次翻页遍历统计数据）。
+/// 阅读器缓存的阅读速度快照（仅在配置了 `volumeEta` 字段时惰性计算，且每本书只读一次章节统计）。
 class ReaderPaceSnapshot {
   const ReaderPaceSnapshot({this.charsPerMin, this.globalSecPerChapter});
 
@@ -144,21 +167,50 @@ class ReaderPaceSnapshot {
 
   static ReaderPaceSnapshot capture() {
     if (!Hive.isBoxOpen('session')) return const ReaderPaceSnapshot();
-    final books = ReadingStats.chapterBooks().toList();
-    final secPerCh = secondsPerChapter(books.expand((a) => ReadingStats.chapterSeconds(a).values));
     final hasCache = Hive.isBoxOpen('chapter_index');
-    final cpm = charsPerMinute([
-      for (final aid in books)
-        for (final e in ReadingStats.chapterSeconds(aid).entries)
-          if (ReadState.isRead(aid, e.key))
-            if ((isLocalAid(aid) ? LocalBooks.chapterLength(aid, e.key) : (hasCache ? ChapterCache.length(aid, e.key) : null)) case final n?)
-              (n, e.value.values.fold(0, (a, b) => a + b)),
-    ]);
-    return ReaderPaceSnapshot(charsPerMin: cpm, globalSecPerChapter: secPerCh);
+    final allChapterDays = <Map<String, int>>[];
+    final speedSamples = <(int, int)>[];
+    for (final aid in ReadingStats.chapterBooks()) {
+      final chSecs = ReadingStats.chapterSeconds(aid);
+      if (chSecs.isEmpty) continue;
+      final read = hasCache ? ReadState.readView(aid) : const <String>{};
+      for (final e in chSecs.entries) {
+        allChapterDays.add(e.value);
+        if (hasCache && read.contains(e.key)) {
+          final n = ChapterCache.length(aid, e.key);
+          if (n != null) {
+            var sec = 0;
+            for (final v in e.value.values) {
+              sec += v;
+            }
+            speedSamples.add((n, sec));
+          }
+        }
+      }
+    }
+    return ReaderPaceSnapshot(
+      charsPerMin: charsPerMinute(speedSamples),
+      globalSecPerChapter: secondsPerChapter(allChapterDays),
+    );
   }
 }
 
-/// 计算指定书籍当前章节所在卷的剩余预计时间文案。
+typedef _VolumeEtaTail = ({
+  Object? rawVols,
+  Object? rawRead,
+  bool hasVol,
+  int cachedCharsSum,
+  int cachedCount,
+  int uncachedCount,
+  int? bookSecPerCh,
+});
+
+final _etaTailCache = <(String, String, int, int, int?), _VolumeEtaTail>{};
+
+/// 清空章节级剩余字数/均时缓存（切章或内存压力清理时调用）。
+void clearVolumeEtaCache() => _etaTailCache.clear();
+
+/// 计算指定书籍当前章节所在卷的剩余预计时间文案（章内后续固定字数与单章均时按章缓存，单章翻页为 O(1)）。
 String resolveVolumeEtaText({
   required String aid,
   required String cid,
@@ -168,26 +220,61 @@ String resolveVolumeEtaText({
   required ReaderPaceSnapshot pace,
 }) {
   if (!Hive.isBoxOpen('session')) return formatVolumeEta(null, fallbackVolumeProgress: volumeProgress);
-  final vols = Volumes.of(aid);
-  final vol = vols.where((v) => v.cids.contains(cid)).firstOrNull;
-  if (vol == null) return formatVolumeEta(null, fallbackVolumeProgress: volumeProgress);
-
-  final textCids = vol.textCids.toList();
-  final idx = textCids.indexOf(cid);
-  final read = ReadState.readView(aid);
-  // 取当前章之后的正文章节（若当前章是插图章则取本卷未读正文章节）
-  final remainingCids = idx >= 0 ? textCids.skip(idx + 1).toList() : textCids.where((c) => c != cid && !read.contains(c)).toList();
-
-  final bookSecPerCh = secondsPerChapter(ReadingStats.chapterSeconds(aid).values) ?? pace.globalSecPerChapter;
-  final local = isLocalAid(aid);
+  final box = Hive.box('session');
   final hasCache = Hive.isBoxOpen('chapter_index');
-  final sec = estimateVolumeRemainingSeconds(
+  final cacheCount = hasCache ? ChapterCache.count(aid) : -1;
+  final statsVer = ReadingStats.changes.value;
+  final rawVols = box.get('vols:$aid');
+  final rawRead = box.get('read:$aid');
+  final key = (aid, cid, cacheCount, statsVer, pace.globalSecPerChapter);
+
+  var tail = _etaTailCache.remove(key);
+  if (tail == null || !identical(tail.rawVols, rawVols) || !identical(tail.rawRead, rawRead)) {
+    final vols = Volumes.of(aid);
+    final vol = vols.where((v) => v.cids.contains(cid)).firstOrNull;
+    if (vol == null) {
+      tail = (rawVols: rawVols, rawRead: rawRead, hasVol: false, cachedCharsSum: 0, cachedCount: 0, uncachedCount: 0, bookSecPerCh: null);
+    } else {
+      final textCids = vol.textCids.toList();
+      final idx = textCids.indexOf(cid);
+      final read = idx >= 0 ? const <String>{} : ReadState.readView(aid);
+      final remainingCids = idx >= 0 ? textCids.skip(idx + 1) : textCids.where((c) => c != cid && !read.contains(c));
+      var cachedCharsSum = 0;
+      var cachedCount = 0;
+      var uncachedCount = 0;
+      for (final c in remainingCids) {
+        final len = hasCache ? ChapterCache.length(aid, c) : null;
+        if (len != null && len > 0) {
+          cachedCharsSum += len;
+          cachedCount++;
+        } else {
+          uncachedCount++;
+        }
+      }
+      final bookSecPerCh = secondsPerChapter(ReadingStats.chapterSeconds(aid).values) ?? pace.globalSecPerChapter;
+      tail = (
+        rawVols: rawVols,
+        rawRead: rawRead,
+        hasVol: true,
+        cachedCharsSum: cachedCharsSum,
+        cachedCount: cachedCount,
+        uncachedCount: uncachedCount,
+        bookSecPerCh: bookSecPerCh,
+      );
+    }
+    if (_etaTailCache.length >= 6) _etaTailCache.remove(_etaTailCache.keys.first);
+  }
+  _etaTailCache[key] = tail;
+
+  if (!tail.hasVol) return formatVolumeEta(null, fallbackVolumeProgress: volumeProgress);
+  final sec = estimateVolumeRemainingSecondsFromTail(
     currentChapterChars: currentChapterChars,
     currentChapterFraction: chapterFraction,
-    remainingCids: remainingCids,
-    cachedLengthOf: (c) => local ? LocalBooks.chapterLength(aid, c) : (hasCache ? ChapterCache.length(aid, c) : null),
+    cachedCharsSum: tail.cachedCharsSum,
+    cachedCount: tail.cachedCount,
+    uncachedCount: tail.uncachedCount,
     personalCharsPerMinute: pace.charsPerMin,
-    avgSecondsPerChapter: bookSecPerCh,
+    avgSecondsPerChapter: tail.bookSecPerCh,
   );
   return formatVolumeEta(sec, fallbackVolumeProgress: volumeProgress);
 }

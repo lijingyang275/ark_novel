@@ -358,12 +358,12 @@ void main() {
       // 加载态左上角常驻返回按钮可见
       expect(find.byIcon(Icons.arrow_back), findsWidgets);
 
-      // 菜单收起时：顶栏在上方 (0, -1)，底栏在下方 (0, 1)
-      AnimatedSlide slideOf(String key) => t.widget<AnimatedSlide>(find.descendant(of: find.byKey(ValueKey(key)), matching: find.byType(AnimatedSlide)));
-      expect(slideOf('reader_top_bar').offset, const Offset(0, -1));
-      expect(slideOf('reader_bottom_bar').offset, const Offset(0, 1));
+      // 菜单收起时：顶栏与底栏彻底卸载，不保留屏幕外 SlideTransition / Slider
+      expect(find.descendant(of: find.byKey(const ValueKey('reader_top_bar')), matching: find.byType(SlideTransition)), findsNothing);
+      expect(find.descendant(of: find.byKey(const ValueKey('reader_bottom_bar')), matching: find.byType(SlideTransition)), findsNothing);
+      expect(find.byType(Slider), findsNothing);
 
-      // 轻触中央唤出菜单栏（加载中含无限旋转指示器，不能用 pumpAndSettle；需先起帧再推进 300ms 完成 220ms 滑入）
+      // 轻触中央唤出菜单栏（加载中含无限旋转指示器，不能用 pumpAndSettle；需先起帧再推进 300ms 完成滑入）
       await t.tap(find.text('正在加载章节…'));
       await t.pump();
       // 滑入动画中途：顶栏应从上方滑下（dy < 0），底栏应从下方滑上（dy > 0），不可错位复用状态
@@ -377,7 +377,15 @@ void main() {
       expect(find.text('目录'), findsOneWidget);
       expect(find.text('朗读设置'), findsNothing); // 非朗读时已精简底栏槽位
 
-      // 点击返回：无上层路由时不崩，安全回到书架
+      // 再次轻触中央收起菜单：退场动画结束后彻底卸载顶栏与底栏
+      await t.tap(find.text('正在加载章节…'));
+      await t.pump();
+      await t.pump(const Duration(milliseconds: 300));
+      expect(find.descendant(of: find.byKey(const ValueKey('reader_top_bar')), matching: find.byType(SlideTransition)), findsNothing);
+      expect(find.descendant(of: find.byKey(const ValueKey('reader_bottom_bar')), matching: find.byType(SlideTransition)), findsNothing);
+      expect(find.text('目录'), findsNothing);
+
+      // 点击加载态左上角返回：无上层路由时不崩，安全回到书架
       await t.tap(find.byIcon(Icons.arrow_back).first);
       await t.pumpAndSettle();
       expect(find.text('BOOKSHELF_HOME'), findsOneWidget);
@@ -500,7 +508,9 @@ void main() {
       expect(find.text('这是一段书签摘录'), findsOneWidget);
       await t.runAsync(() async {
         await t.tap(find.byIcon(Icons.delete_outline));
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+        for (var i = 0; i < 40 && bookmarkChanged == 0; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+        }
       });
       await t.pumpAndSettle();
       expect(find.text('还没有书签'), findsOneWidget);
@@ -559,6 +569,197 @@ void main() {
       await t.pumpAndSettle();
       final barOpacity = t.widget<AnimatedOpacity>(find.byType(AnimatedOpacity));
       expect(barOpacity.opacity, 0);
+    });
+  });
+
+  group('阅读器引擎核心优化回归验证', () {
+    testWidgets('ScrollBody 长章按段落惰性虚拟化构建，TTS 高亮只重建受影响的 1~2 个块', (t) async {
+      t.view.physicalSize = const Size(400, 700);
+      t.view.devicePixelRatio = 1;
+      addTearDown(t.view.reset);
+
+      final text = List.generate(300, (i) => '　　这是第$i段测试正文内容，用于验证滚屏虚拟化与局部高亮刷新。').join('\n');
+      final chapter = Chapter(text: text, images: const [], marks: const []);
+      const style = TextStyle(fontSize: 18, height: 1.8, color: Colors.black);
+      final highlight = ValueNotifier<(int, int)?>(null);
+      addTearDown(highlight.dispose);
+      final builtRanges = <(int, int)>[];
+
+      await t.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ScrollBody(
+              chapter: chapter,
+              spanOf: (a, b) => TextSpan(text: text.substring(a, b), style: style),
+              spanOfHighlight: (a, b, hl) {
+                builtRanges.add((a, b));
+                return TextSpan(text: text.substring(a, b), style: style);
+              },
+              highlight: highlight,
+              style: style,
+              margin: 16,
+              paragraphSpacing: 12,
+              title: '长章',
+              startOffset: 0,
+              onOffset: (_) {},
+              onEnd: () {},
+              onNext: null,
+              wrap: (w) => w,
+              onTapZone: () {},
+              onMark: (_) {},
+              hasSelection: () => false,
+            ),
+          ),
+        ),
+      );
+      await t.pumpAndSettle();
+
+      // 300 段正文仅挂载可见区域与缓存区段落块，绝不一次性构建全部 300 段
+      expect(builtRanges.length, lessThan(45));
+      builtRanges.clear();
+
+      // 高亮切入第 0 段：只重建该 1 个段落块
+      final p0End = text.indexOf('\n');
+      highlight.value = (2, p0End);
+      await t.pump();
+      expect(builtRanges.length, 1);
+
+      // 高亮从第 0 段移动到第 1 段：只重建切出与切入的 2 个段落块
+      builtRanges.clear();
+      final p1Start = p0End + 1;
+      final p1End = text.indexOf('\n', p1Start);
+      highlight.value = (p1Start + 2, p1End);
+      await t.pump();
+      expect(builtRanges.length, 2);
+    });
+
+    testWidgets('PagedBody 双页模式按页过滤 TTS 高亮，不重建未命中高亮的另一页', (t) async {
+      t.view.physicalSize = const Size(1200, 800);
+      t.view.devicePixelRatio = 1;
+      addTearDown(t.view.reset);
+
+      final text = List.generate(200, (i) => '　　这是第$i段双页正文，用于测试双页局部高亮过滤机制。').join('\n');
+      final chapter = Chapter(text: text, images: const [], marks: const []);
+      const style = TextStyle(fontSize: 18, height: 1.8, color: Colors.black);
+      final highlight = ValueNotifier<(int, int)?>(null);
+      addTearDown(highlight.dispose);
+      final builtRanges = <(int, int)>[];
+
+      await t.pumpWidget(
+        MaterialApp(
+          home: PagedBody(
+            chapter: chapter,
+            spanOf: (a, b) => TextSpan(text: text.substring(a, b), style: style),
+            spanOfHighlight: (a, b, hl) {
+              builtRanges.add((a, b));
+              return TextSpan(text: text.substring(a, b), style: style);
+            },
+            highlight: highlight,
+            style: style,
+            margin: 20,
+            title: '双页高亮',
+            curl: false,
+            dual: true,
+            background: Colors.white,
+            color: Colors.black,
+            startOffset: 0,
+            onOffset: (_) {},
+            onEnd: () {},
+            onPrev: null,
+            onNext: null,
+            wrap: (w) => w,
+            onTapZone: () {},
+            onMark: (_) {},
+            hasSelection: () => false,
+          ),
+        ),
+      );
+      await t.pumpAndSettle();
+      expect(builtRanges.length, 2); // 首屏左、右两页各建 1 次
+      builtRanges.clear();
+
+      // 高亮落在左页开头区间：仅左页重建 1 次，右页零重建
+      highlight.value = (0, 12);
+      await t.pump();
+      expect(builtRanges.length, 1);
+      expect(builtRanges.single.$1, 0);
+    });
+
+    testWidgets('PageCurl 覆盖翻页与仿真翻页动画正常渲染，dispose 正确解绑 controller', (t) async {
+      for (final cover in const [true, false]) {
+        final controller = PageCurlController();
+        var index = 0;
+        await t.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: PageCurl(
+                controller: controller,
+                cover: cover,
+                pageCount: 3,
+                initialIndex: 0,
+                background: const Color(0xFFF6F1E7),
+                pageBuilder: (_, i, _) => Center(child: material.Text('页$i')),
+                onIndexChanged: (i) => index = i,
+              ),
+            ),
+          ),
+        );
+        await t.pump();
+        controller.next();
+        await t.pump();
+        await t.pump(const Duration(milliseconds: 60));
+        await t.pumpAndSettle();
+        expect(index, 1, reason: 'cover=$cover');
+        expect(t.takeException(), isNull);
+
+        // 卸载后调用 controller 不抛异常且不触发已销毁 State 回调
+        await t.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+        await t.pump();
+        controller.next();
+        controller.prev();
+        controller.goTo(0);
+        expect(index, 1);
+      }
+    });
+
+    testWidgets('暖色护眼带插图章不退化为全屏 ColorFiltered，仅对插图施加局部滤镜', (t) async {
+      await t.runAsync(() => Hive.box('session').putAll({'r.warm': 0.35, 'r.mode': 0, 'r.fullscreen': false, 'incognito': true}));
+      const illustrated = Chapter(text: '　　带插图正文段落。', images: ['https://pic.wenku8.com/w1.jpg'], marks: []);
+
+      await t.pumpWidget(
+        ProviderScope(
+          overrides: [
+            chapterProvider(('1', '300')).overrideWith((ref) async => illustrated),
+            novelProvider('1').overrideWith((ref) => const Stream.empty()),
+            imageStoreProvider.overrideWithValue(_StubImageStore()),
+          ],
+          child: const MaterialApp(home: ReaderPage(aid: '1', cid: '300')),
+        ),
+      );
+      await t.pumpAndSettle();
+
+      // 仅对插图节点施加局部 ColorFiltered（不包含整个 Scaffold.body 的全屏 ColorFiltered）
+      final filters = find.byType(ColorFiltered);
+      expect(filters, findsOneWidget);
+      expect(find.descendant(of: filters, matching: find.byType(ScrollBody)), findsNothing);
+      expect(find.descendant(of: filters, matching: find.byType(Image)), findsOneWidget);
+    });
+
+    test('Bookmarks 索引缓存：has 零分配精确匹配且 toggle / remove / 外部写入自动失效', () async {
+      expect(Bookmarks.has('5', 'c1', 100), isFalse);
+      expect(Bookmarks.bookmarkedAids(), isEmpty);
+      expect(Bookmarks.bookmarkedCids('5'), isEmpty);
+
+      expect(await Bookmarks.toggle('5', '测试书', 'c1', '第一章', 100, '摘录'), isTrue);
+      expect(Bookmarks.has('5', 'c1', 100), isTrue);
+      expect(Bookmarks.has('5', 'c1', 140), isTrue);
+      expect(Bookmarks.has('5', 'c1', 141), isFalse);
+      expect(Bookmarks.bookmarkedAids(), {'5'});
+      expect(Bookmarks.bookmarkedCids('5'), {'c1'});
+
+      expect(await Bookmarks.toggle('5', '测试书', 'c1', '第一章', 110, '摘录'), isFalse);
+      expect(Bookmarks.has('5', 'c1', 100), isFalse);
+      expect(Bookmarks.bookmarkedAids(), isEmpty);
     });
   });
 }

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'env.dart';
+import 'motion.dart';
 import 'theme_doodle.dart';
 
 /// "Claude 风格"配色：暖米白底、陶土橙强调色、暖深灰暗色模式。
@@ -27,9 +29,10 @@ class AppColors {
 /// 标题用衬线体；没有安装时依次回退到系统宋体。
 const List<String> kSerifFallback = ['Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', 'serif'];
 
-/// 配色方案：强调色 + 浅色 / 深色各一套底色，整个界面（背景、卡片、边框、导航）都跟着换。
+/// 配色方案：强调色 + 浅色 / 深色各一个底色，整个界面（背景、卡片、边框、导航）都跟着换。
+/// 卡片、分隔线等表面色不再逐个手调，按 [SurfaceTones.of] 从底色和强调色统一推导，所有配色的层次感一致。
 class AppPalette {
-  const AppPalette(this.name, this.accentLight, this.accentDark, {required this.bgLight, required this.cardLight, required this.lineLight, required this.bgDark, required this.cardDark, required this.lineDark, this.art, this.secondary, this.scene = false});
+  const AppPalette(this.name, this.accentLight, this.accentDark, {required this.bgLight, required this.bgDark, this.art, this.secondary, this.scene = false});
 
   final String name;
 
@@ -42,31 +45,52 @@ class AppPalette {
   /// 插画主题（遗迹·晴空）：书架和「我的」顶部插画、手画导航图标、旗形角标、方一点的圆角、文楷标题
   final bool scene;
   final Color accentLight, accentDark;
-  final Color bgLight, cardLight, lineLight;
-  final Color bgDark, cardDark, lineDark;
+  final Color bgLight, bgDark;
 
   Color accent(bool dark) => dark ? accentDark : accentLight;
   Color bg(bool dark) => dark ? bgDark : bgLight;
-  Color card(bool dark) => dark ? cardDark : cardLight;
-  Color line(bool dark) => dark ? lineDark : lineLight;
+  SurfaceTones tones(bool dark) => SurfaceTones.of(bg(dark), accent(dark), dark);
+  Color card(bool dark) => tones(dark).container;
+  Color line(bool dark) => tones(dark).line;
+  Color get cardLight => card(false);
+  Color get cardDark => card(true);
+}
+
+/// 一套表面色阶：在底色上按固定比例混入文字色，再染一点强调色。
+/// 浅色时 [lowest] 是比底色更亮的“抬起”面（卡片、输入框）；深色时卡片要比底色亮才看得出，[lowest] 也取亮一档。
+class SurfaceTones {
+  const SurfaceTones._(this.lowest, this.low, this.container, this.high, this.highest, this.line);
+
+  final Color lowest, low, container, high, highest, line;
+
+  static const _inkMix = Color(0xFF1A1A18);
+  static const _paperMix = Color(0xFFF2F0EA);
+
+  static SurfaceTones of(Color bg, Color accent, bool dark) {
+    final on = dark ? _paperMix : _inkMix;
+    Color tone(double t) => Color.lerp(Color.lerp(bg, on, t)!, accent, dark ? 0.035 : 0.025)!;
+    return dark
+        ? SurfaceTones._(tone(0.07), tone(0.035), tone(0.06), tone(0.09), tone(0.13), tone(0.15))
+        : SurfaceTones._(Color.lerp(bg, Colors.white, 0.7)!, tone(0.028), tone(0.048), tone(0.07), tone(0.10), tone(0.12));
+  }
 }
 
 const appPalettes = [
-  AppPalette('陶土', AppColors.terracotta, AppColors.terracottaLight, bgLight: AppColors.cream, cardLight: AppColors.creamDeep, lineLight: AppColors.line, bgDark: AppColors.night, cardDark: AppColors.nightRaised, lineDark: AppColors.lineDark),
-  AppPalette('靛蓝', Color(0xFF3D5A9B), Color(0xFF8FA8E0), bgLight: Color(0xFFF4F6FB), cardLight: Color(0xFFE5EAF5), lineLight: Color(0xFFD3DAEA), bgDark: Color(0xFF181C27), cardDark: Color(0xFF242A3A), lineDark: Color(0xFF353C52)),
-  AppPalette('森绿', Color(0xFF4A7C59), Color(0xFF8DBB9A), bgLight: Color(0xFFF4F7F2), cardLight: Color(0xFFE4ECDF), lineLight: Color(0xFFD1DDCB), bgDark: Color(0xFF171D18), cardDark: Color(0xFF232B25), lineDark: Color(0xFF34402F)),
-  AppPalette('玫瑰', Color(0xFFB04A6B), Color(0xFFE08CA5), bgLight: Color(0xFFFBF5F6), cardLight: Color(0xFFF3E3E7), lineLight: Color(0xFFE8D0D6), bgDark: Color(0xFF211A1D), cardDark: Color(0xFF30262A), lineDark: Color(0xFF463539)),
-  AppPalette('琥珀', Color(0xFFB07A1E), Color(0xFFE2B45E), bgLight: Color(0xFFFAF6EC), cardLight: Color(0xFFF1E8D2), lineLight: Color(0xFFE3D6B5), bgDark: Color(0xFF1F1B12), cardDark: Color(0xFF2D271A), lineDark: Color(0xFF43392A)),
-  AppPalette('杏菜·汽水', Color(0xFF2F6FD6), Color(0xFF6FA8F0), // 强调色取发色（蓝）
-      bgLight: Color(0xFFF2F9FE), cardLight: Color(0xFFDDEFFA), lineLight: Color(0xFFC5E0F2), bgDark: Color(0xFF121A33), cardDark: Color(0xFF1C2848), lineDark: Color(0xFF2D3C66), art: 'anna', secondary: Color(0xFFF4935E)),
-  AppPalette('知花·草莓牛奶', Color(0xFFB0303F), Color(0xFFE8707C), // 发色（酒红）
-      bgLight: Color(0xFFFDF1F3), cardLight: Color(0xFFF8DCE2), lineLight: Color(0xFFEFC6CF), bgDark: Color(0xFF241619), cardDark: Color(0xFF33212A), lineDark: Color(0xFF4A3038), art: 'chika', secondary: Color(0xFF29A9E0)),
-  AppPalette('天爱星·薄荷会长', Color(0xFF2D3D6E), Color(0xFF8FA3D8), // 发色（深藏青）
-      bgLight: Color(0xFFF1F8F2), cardLight: Color(0xFFDDEBDF), lineLight: Color(0xFFC8DDCB), bgDark: Color(0xFF141C26), cardDark: Color(0xFF1F2A38), lineDark: Color(0xFF31405A), art: 'amane', secondary: Color(0xFFEE6C9A)),
-  AppPalette('石墨', Color(0xFF4B4A47), Color(0xFFC2C0B6), bgLight: Color(0xFFF3F3F2), cardLight: Color(0xFFE6E6E4), lineLight: Color(0xFFD5D5D2), bgDark: Color(0xFF121212), cardDark: Color(0xFF1E1E1E), lineDark: Color(0xFF333333)),
+  AppPalette('陶土', Color(0xFFC15F3C), Color(0xFFDE8462), bgLight: AppColors.cream, bgDark: AppColors.night),
+  AppPalette('靛蓝', Color(0xFF3E5BA6), Color(0xFF9BB0E6), bgLight: Color(0xFFF6F7F9), bgDark: Color(0xFF1B1D23)),
+  AppPalette('森绿', Color(0xFF3D7655), Color(0xFF93C3A2), bgLight: Color(0xFFF6F7F4), bgDark: Color(0xFF1B1E1B)),
+  AppPalette('玫瑰', Color(0xFFB04868), Color(0xFFE896AE), bgLight: Color(0xFFFAF7F7), bgDark: Color(0xFF221D1F)),
+  AppPalette('琥珀', Color(0xFFA26E1A), Color(0xFFE2B867), bgLight: Color(0xFFFAF8F2), bgDark: Color(0xFF211E18)),
+  AppPalette('杏菜·汽水', Color(0xFF2F6CCF), Color(0xFF80B2F2), // 强调色取发色（蓝）
+      bgLight: Color(0xFFF4F8FC), bgDark: Color(0xFF171C27), art: 'anna', secondary: Color(0xFFF4935E)),
+  AppPalette('知花·草莓牛奶', Color(0xFFAE3646), Color(0xFFEE8693), // 发色（酒红）
+      bgLight: Color(0xFFFCF6F7), bgDark: Color(0xFF241C1E), art: 'chika', secondary: Color(0xFF29A9E0)),
+  AppPalette('天爱星·薄荷会长', Color(0xFF2F5577), Color(0xFF93B8D8), // 发色（藏青）往薄荷底色的青调靠一点，不再生硬
+      bgLight: Color(0xFFF3F8F5), bgDark: Color(0xFF171E21), art: 'amane', secondary: Color(0xFFEE6C9A)),
+  AppPalette('石墨', Color(0xFF3B3B39), Color(0xFFD4D2CC), bgLight: Color(0xFFF6F6F5), bgDark: Color(0xFF1E1E1F)),
   // 放在最后：配色按序号存，插在中间会让已经选了后面配色的人换掉
   AppPalette('遗迹·晴空', Color(0xFFA8452F), Color(0xFFE08A68), // 石柱的赭红；第二强调色是旗子的芥末黄
-      bgLight: Color(0xFFF6F0E5), cardLight: Color(0xFFDDEBE6), lineLight: Color(0xFFDCD0BD), bgDark: Color(0xFF13222A), cardDark: Color(0xFF1C313B), lineDark: Color(0xFF2E4752), secondary: Color(0xFFD9A03F), scene: true),
+      bgLight: Color(0xFFF7F2E8), bgDark: Color(0xFF14232A), secondary: Color(0xFFD9A03F), scene: true),
 ];
 
 /// 滑块没拖到的那段轨道：默认色在浅底上看不见，用文字色的淡影。阅读设置面板换了底色，也用这两个。
@@ -89,19 +113,20 @@ Color _onColor(Color bg, {bool preferDark = false}) {
   return Colors.white;
 }
 
-/// [pureBlack]：深色时底色用纯黑（AMOLED 屏黑色像素不发光），卡片和边框也压到接近黑。
-ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPalette('陶土', AppColors.terracotta, AppColors.terracottaLight, bgLight: AppColors.cream, cardLight: AppColors.creamDeep, lineLight: AppColors.line, bgDark: AppColors.night, cardDark: AppColors.nightRaised, lineDark: AppColors.lineDark), bool pureBlack = false]) {
+/// [pureBlack]：深色时底色用纯黑（AMOLED 屏黑色像素不发光），卡片和边框也按同样比例从纯黑推导，压到接近黑。
+ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPalette('陶土', Color(0xFFC15F3C), Color(0xFFDE8462), bgLight: AppColors.cream, bgDark: AppColors.night), bool pureBlack = false]) {
   final dark = brightness == Brightness.dark;
   final black = dark && pureBlack;
   final bg = black ? Colors.black : palette.bg(dark);
-  final card = black ? const Color(0xFF111111) : palette.card(dark);
-  final line = black ? const Color(0xFF262626) : palette.line(dark);
-  final raised = dark ? card : Colors.white;
   final primary = palette.accent(dark);
+  final t = SurfaceTones.of(bg, primary, dark);
+  final card = t.container;
+  final line = t.line;
+  final raised = t.lowest;
   final secondary = palette.secondary ?? (dark ? AppColors.paperSoft : AppColors.inkSoft);
   final onSurface = dark ? AppColors.paper : AppColors.ink;
-  final highest = Color.lerp(card, line, dark ? 0.65 : 0.55)!;
   final tertiaryContainer = Color.alphaBlend((palette.secondary ?? primary).withValues(alpha: dark ? 0.22 : 0.16), card);
+  final desktop = isDesktop;
   final scheme = ColorScheme(
     brightness: brightness,
     primary: primary,
@@ -116,10 +141,10 @@ ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPa
     onSurface: onSurface,
     onSurfaceVariant: dark ? AppColors.paperSoft : AppColors.inkSoft,
     surfaceContainerLowest: raised,
-    surfaceContainerLow: card,
+    surfaceContainerLow: t.low,
     surfaceContainer: card,
-    surfaceContainerHigh: card,
-    surfaceContainerHighest: highest,
+    surfaceContainerHigh: t.high,
+    surfaceContainerHighest: t.highest,
     outline: line,
     outlineVariant: line,
   );
@@ -128,7 +153,9 @@ ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPa
   // 插画主题：标题换文楷、字距拉开一点，圆角收小，像切过的石块
   final serif = palette.scene ? base.textTheme.apply(fontFamily: 'LXGWWenKai', fontFamilyFallback: kSerifFallback) : base.textTheme.apply(fontFamilyFallback: kSerifFallback);
   final spacing = palette.scene ? 1.5 : null;
-  final r = palette.scene ? 5.0 : 12.0;
+  final r = palette.scene ? 5.0 : (desktop ? 9.0 : 12.0);
+  // 桌面端用鼠标点，按钮不用撑到手指大小
+  final buttonSize = desktop ? const Size(64, 40) : const Size(64, 48);
 
   return base.copyWith(
     textTheme: base.textTheme.copyWith(
@@ -141,28 +168,31 @@ ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPa
       backgroundColor: scheme.surface,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
+      scrolledUnderElevation: desktop ? 0 : null,
       centerTitle: false,
-      titleTextStyle: serif.titleLarge?.copyWith(color: scheme.onSurface, fontWeight: FontWeight.w500, letterSpacing: spacing),
+      // 桌面端顶栏和书架的单行顶栏一样高（52），标题用衬线大字
+      toolbarHeight: desktop ? 52 : null,
+      titleTextStyle: serif.titleLarge?.copyWith(color: scheme.onSurface, fontWeight: desktop ? FontWeight.w600 : FontWeight.w500, fontSize: desktop ? 20 : null, letterSpacing: spacing),
     ),
     cardTheme: CardThemeData(
       color: raised,
       elevation: 0,
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(palette.scene ? 6 : 16),
+        borderRadius: BorderRadius.circular(palette.scene ? 6 : (desktop ? 12 : 16)),
         side: BorderSide(color: scheme.outline),
       ),
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
-        minimumSize: const Size(64, 48),
+        minimumSize: buttonSize,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(r)),
-        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        textStyle: TextStyle(fontSize: desktop ? 14.5 : 16, fontWeight: FontWeight.w600),
       ),
     ),
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(
-        minimumSize: const Size(64, 48),
+        minimumSize: buttonSize,
         foregroundColor: scheme.onSurface,
         side: BorderSide(color: scheme.outline),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(r)),
@@ -197,8 +227,20 @@ ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPa
     switchTheme: appSwitchTheme(scheme),
     popupMenuTheme: const PopupMenuThemeData(position: PopupMenuPosition.under),
     snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+    pageTransitionsTheme: const PageTransitionsTheme(
+      builders: {
+        TargetPlatform.iOS: ApplePageTransitionsBuilder(),
+        TargetPlatform.android: ApplePageTransitionsBuilder(),
+        TargetPlatform.macOS: ApplePageTransitionsBuilder(),
+        TargetPlatform.windows: ApplePageTransitionsBuilder(),
+        TargetPlatform.linux: ApplePageTransitionsBuilder(),
+      },
+    ),
     dialogTheme: palette.scene ? DialogThemeData(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))) : null,
-    bottomSheetTheme: palette.scene ? const BottomSheetThemeData(shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(12)))) : null,
+    bottomSheetTheme: BottomSheetThemeData(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(palette.scene ? 12 : 20))),
+      showDragHandle: false,
+    ),
     chipTheme: palette.scene ? ChipThemeData(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(r))) : null,
     segmentedButtonTheme: palette.scene ? SegmentedButtonThemeData(style: ButtonStyle(shape: WidgetStatePropertyAll(RoundedRectangleBorder(borderRadius: BorderRadius.circular(r))))) : null,
     extensions: [?characterArtOf(palette)],

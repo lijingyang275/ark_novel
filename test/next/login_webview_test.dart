@@ -48,10 +48,10 @@ void main() {
     expect(resolveVerifyTargetUri(initial, null), initial);
   });
 
-  test('defaultVerifyUrl 主站默认走当前线路 login.php，图床走根路径，显式 http 主站自动升 https', () {
-    expect(defaultVerifyUrl(url: null, host: null, node: Wenku8Node.wwwWenku8Cc), 'https://www.wenku8.cc/login.php');
-    expect(defaultVerifyUrl(url: null, host: null, node: Wenku8Node.wwwWenku8Net), 'https://www.wenku8.net/login.php');
-    expect(defaultVerifyUrl(url: null, host: 'www.wenku8.cc', node: Wenku8Node.wwwWenku8Net), 'https://www.wenku8.cc/login.php');
+  test('defaultVerifyUrl 主站默认走当前线路 index.php，图床走根路径，显式 http 主站自动升 https', () {
+    expect(defaultVerifyUrl(url: null, host: null, node: Wenku8Node.wwwWenku8Cc), 'https://www.wenku8.cc/index.php');
+    expect(defaultVerifyUrl(url: null, host: null, node: Wenku8Node.wwwWenku8Net), 'https://www.wenku8.net/index.php');
+    expect(defaultVerifyUrl(url: null, host: 'www.wenku8.cc', node: Wenku8Node.wwwWenku8Net), 'https://www.wenku8.cc/index.php');
     expect(defaultVerifyUrl(url: null, host: 'pic.wenku8.com', node: Wenku8Node.wwwWenku8Cc), 'https://pic.wenku8.com/');
     expect(
       defaultVerifyUrl(url: 'http://www.wenku8.cc/book/123.htm', host: null, node: Wenku8Node.wwwWenku8Cc),

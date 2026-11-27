@@ -164,8 +164,9 @@ void main() {
       throwsA(isA<SyncException>().having((e) => e.message, 'message', allOf(contains('已合并 1 台设备'), contains('dBroken.json')))),
     );
     expect(adapter.closed, isFalse);
-    // 目录 PROPFIND(Depth: 0) 仅执行一次（run 内复用同一 Dio，不再额外建 Dio 调 test）
-    expect(adapter.requests.where((r) => r.method == 'PROPFIND' && r.headers['Depth'] == '0').length, 1);
+    // 直接 PROPFIND Depth: 1 省去 Depth: 0 的 1 次 RTT
+    expect(adapter.requests.where((r) => r.method == 'PROPFIND' && r.headers['Depth'] == '0').length, 0);
+    expect(adapter.requests.where((r) => r.method == 'PROPFIND' && r.headers['Depth'] == '1').length, 1);
     expect(Sync.lastSkipped, ['dStale.json']);
     expect(box.get('progress:1'), ['c2', 55, 2000]);
     expect(box.get('progress:2'), ['c9', 3, 1500]);
@@ -231,5 +232,99 @@ void main() {
     expect(File(savedAvatarPath).readAsBytesSync(), remoteAvatarBytes);
     // 已拉取对方最新头像并记为 sync:avatarUp == now，不重复上传本机旧头像
     expect(files.containsKey('dLocal.avatar'), isFalse);
+  });
+
+  test('WebDavClient 解析 ETag/LastModified/ContentLength、复用外部 adapter 不关闭，且 Sync 按 ETag 跳过未变化文件与冗余 PUT', () async {
+    await box.putAll({
+      'sync:url': 'https://dav.example.com/dav/',
+      'sync:user': 'alice',
+      'sync:folder': 'ArkNovel',
+      'sync:device': 'dLocal',
+      'progress:1': ['c1', 10, 1000],
+    });
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var etag = '"v1"';
+    final files = <String, Uint8List>{
+      'dOther.json': Uint8List.fromList(utf8.encode(jsonEncode({
+        'v': 3,
+        'device': 'dOther',
+        'at': now,
+        'progress': {'2': ['c2', 20, 2000]},
+        'history': [],
+        'bookmarks': [],
+        'read': {},
+        'readchars': {},
+        'rating': {},
+        'rules': [],
+        'notes': {},
+        'stats': {'day': {}, 'book': {}, 'chapters': 0, 'meta': {}, 'days': {}},
+      }))),
+    };
+
+    final adapter = _MockAdapter((req) async {
+      final name = Uri.decodeComponent(req.uri.pathSegments.where((s) => s.isNotEmpty).last);
+      if (req.method == 'PROPFIND') {
+        final xml = [
+          '<d:multistatus xmlns:d="DAV:">',
+          for (final entry in files.entries)
+            '<d:response><d:href>/dav/ArkNovel/${entry.key}</d:href><d:propstat><d:prop>'
+                '<d:getetag>${entry.key == 'dOther.json' ? etag : '"own"'}</d:getetag>'
+                '<d:getlastmodified>Thu, 26 Nov 2026 00:00:00 GMT</d:getlastmodified>'
+                '<d:getcontentlength>${entry.value.length}</d:getcontentlength>'
+                '</d:prop></d:propstat></d:response>',
+          '</d:multistatus>',
+        ].join();
+        return _resp(207, body: xml, contentType: 'application/xml');
+      }
+      if (req.method == 'GET') {
+        final data = files[name];
+        return data == null ? _resp(404) : _resp(200, bytes: data);
+      }
+      if (req.method == 'PUT') {
+        files[name] = req.body;
+        return _resp(201);
+      }
+      return _resp(405);
+    });
+
+    // 通过 adapter 参数注入（非 dio）：WebDavClient.close 不得关闭外部共享适配器
+    expect(await Sync.run(adapter: adapter), 1);
+    expect(adapter.closed, isFalse);
+    expect(box.get('progress:2'), ['c2', 20, 2000]);
+    expect(adapter.requests.where((r) => r.method == 'GET' && r.uri.path.endsWith('dOther.json')).length, 1);
+    expect(adapter.requests.where((r) => r.method == 'PUT').length, 1);
+
+    // ETag 未变 + 本机内容未变 + skipUnchangedUpload: true（自动同步模式）：跳过 dOther.json 的 GET 和本机的冗余 PUT
+    adapter.requests.clear();
+    expect(await Sync.run(adapter: adapter, skipUnchangedUpload: true), 0);
+    expect(adapter.requests.where((r) => r.method == 'GET').length, 0);
+    expect(adapter.requests.where((r) => r.method == 'PUT').length, 0);
+
+    // 远端 ETag 变化后立即重新 GET 并合并
+    etag = '"v2"';
+    files['dOther.json'] = Uint8List.fromList(utf8.encode(jsonEncode({
+      'v': 3,
+      'device': 'dOther',
+      'at': now + 1000,
+      'progress': {'3': ['c3', 30, 3000]},
+      'history': [],
+      'bookmarks': [],
+      'read': {},
+      'readchars': {},
+      'rating': {},
+      'rules': [],
+      'notes': {},
+      'stats': {'day': {}, 'book': {}, 'chapters': 0, 'meta': {}, 'days': {}},
+    })));
+    adapter.requests.clear();
+    expect(await Sync.run(adapter: adapter, skipUnchangedUpload: true), 1);
+    expect(adapter.requests.where((r) => r.method == 'GET' && r.uri.path.endsWith('dOther.json')).length, 1);
+    expect(box.get('progress:3'), ['c3', 30, 3000]);
+    // 合并后本机快照内容发生变化，应正常 PUT
+    expect(adapter.requests.where((r) => r.method == 'PUT').length, 1);
+
+    // 本机 ETag 缓存绝不污染 session 或 Sync.snapshot()
+    expect(box.keys.whereType<String>().any((k) => k.contains('etag')), isFalse);
+    expect(Sync.snapshot().containsKey('etags'), isFalse);
   });
 }

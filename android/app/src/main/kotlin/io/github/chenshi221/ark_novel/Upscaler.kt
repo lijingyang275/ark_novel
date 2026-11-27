@@ -47,7 +47,7 @@ class Upscaler private constructor(private val context: Context) {
         }
     }
 
-    // 一张图要分配几十 MB（输出 4 倍大小的浮点缓冲、像素数组、Bitmap），用完的 Bitmap 马上 recycle，不等 GC
+    // 一张图要分配几十 MB（输出 4 倍大小的浮点缓冲、Bitmap），像素按行读写避免整图 IntArray 峰值，用完的 Bitmap 马上 recycle，不等 GC
     private fun run(input: ByteArray): ByteArray {
         var bmp = BitmapFactory.decodeByteArray(input, 0, input.size) ?: throw IllegalArgumentException("图片解码失败")
         val long = max(bmp.width, bmp.height)
@@ -59,14 +59,19 @@ class Upscaler private constructor(private val context: Context) {
         }
         val w = bmp.width
         val h = bmp.height
-        val px = IntArray(w * h)
-        bmp.getPixels(px, 0, w, 0, 0, w, h)
-        bmp.recycle()
         val inBuf = ByteBuffer.allocateDirect(w * h * 3 * 4).order(ByteOrder.nativeOrder())
-        for (p in px) {
-            inBuf.putFloat(((p shr 16) and 0xff) / 255f)
-            inBuf.putFloat(((p shr 8) and 0xff) / 255f)
-            inBuf.putFloat((p and 0xff) / 255f)
+        try {
+            val inRow = IntArray(w)
+            for (y in 0 until h) {
+                bmp.getPixels(inRow, 0, w, 0, y, w, 1)
+                for (p in inRow) {
+                    inBuf.putFloat(((p shr 16) and 0xff) / 255f)
+                    inBuf.putFloat(((p shr 8) and 0xff) / 255f)
+                    inBuf.putFloat((p and 0xff) / 255f)
+                }
+            }
+        } finally {
+            bmp.recycle()
         }
         inBuf.rewind()
         val ow = w * SCALE
@@ -78,13 +83,16 @@ class Upscaler private constructor(private val context: Context) {
             interp.run(inBuf, outBuf)
         }
         outBuf.rewind()
-        val out = IntArray(ow * oh)
         fun c(v: Float) = (v * 255f + 0.5f).toInt().coerceIn(0, 255)
-        for (i in out.indices) {
-            out[i] = (0xff shl 24) or (c(outBuf.float) shl 16) or (c(outBuf.float) shl 8) or c(outBuf.float)
-        }
-        val result = Bitmap.createBitmap(out, ow, oh, Bitmap.Config.ARGB_8888)
+        val result = Bitmap.createBitmap(ow, oh, Bitmap.Config.ARGB_8888)
         try {
+            val outRow = IntArray(ow)
+            for (y in 0 until oh) {
+                for (x in 0 until ow) {
+                    outRow[x] = (0xff shl 24) or (c(outBuf.float) shl 16) or (c(outBuf.float) shl 8) or c(outBuf.float)
+                }
+                result.setPixels(outRow, 0, ow, 0, y, ow, 1)
+            }
             return ByteArrayOutputStream().use {
                 result.compress(Bitmap.CompressFormat.JPEG, 92, it)
                 it.toByteArray()

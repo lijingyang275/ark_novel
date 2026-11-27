@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -8,6 +9,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+
+import '../epub_codec.dart' show detectImageFormat;
+import '../files.dart';
+import '../image_cache.dart' show shrinkImage;
+import '../motion.dart';
 
 /// 阅读器内置纸张纹理选项：0 无纹理、1 宣纸细纹、2 复古纸微噪点、3 淡雅笔记纸。
 const kReaderBgTextures = <int, String>{
@@ -29,18 +35,29 @@ class ReaderBgImageController extends Notifier<String?> {
     return raw == null || raw.isEmpty ? null : raw;
   }
 
-  /// 弹出系统图片选择器并复制到 `ApplicationSupport/reader_bg/`；用户取消返回 false。
+  /// 弹出系统图片选择器并适度压缩后写入 `ApplicationSupport/reader_bg/`；用户取消返回 false。
   Future<bool> pick() async {
     final file = await FilePicker.pickFile(type: FileType.image);
     final src = file?.path;
     if (src == null || src.isEmpty) return false;
+    final rawBytes = await File(src).readAsBytes();
+    final bytes = await shrinkImage(rawBytes);
     final dir = Directory(p.join((await getApplicationSupportDirectory()).path, kReaderBgDir));
-    if (await dir.exists()) await dir.delete(recursive: true);
     await dir.create(recursive: true);
-    final ext = p.extension(src);
-    final dest = await File(src).copy(p.join(dir.path, 'bg_${DateTime.now().millisecondsSinceEpoch}${ext.isEmpty ? '.jpg' : ext}'));
+    final fmt = detectImageFormat(bytes, p.basename(src));
+    final dest = File(p.join(dir.path, 'bg_${DateTime.now().millisecondsSinceEpoch}${fmt.ext}'));
+    await writeFileAtomic(dest, bytes);
     await Hive.box('session').put(kReaderBgPathKey, dest.path);
     state = dest.path;
+    try {
+      await for (final entity in dir.list()) {
+        if (entity is File && entity.path != dest.path) {
+          try {
+            await entity.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
     return true;
   }
 
@@ -58,7 +75,8 @@ class ReaderBgImageController extends Notifier<String?> {
 final readerBgImageProvider = NotifierProvider<ReaderBgImageController, String?>(ReaderBgImageController.new);
 
 /// 阅读器背景层：按主题底色 → 自定义背景图（带透明度与可读性柔和遮罩）→ 程序化纸张纹理叠放。
-/// 包裹在 [RepaintBoundary] 内避免翻页、滚动或菜单动画反复重绘纹理。
+/// 底色动画与静态图片/纹理层拆分为独立 [RepaintBoundary]，切主题/调暖色不连带重绘纹理；
+/// 宣纸（1）与复古纸（2）烘焙为共享缓存 [ui.Image]，复用并按需释放显存。
 class ReaderBackground extends StatelessWidget {
   const ReaderBackground({
     super.key,
@@ -67,6 +85,7 @@ class ReaderBackground extends StatelessWidget {
     this.texture = 0,
     this.imagePath,
     this.imageOpacity = 0.35,
+    this.imageColorFilter,
   });
 
   final Color baseColor;
@@ -79,56 +98,194 @@ class ReaderBackground extends StatelessWidget {
   /// 自定义背景图浓度 0.05 ~ 0.85
   final double imageOpacity;
 
+  /// 可选的局部背景图色彩滤镜（仅开暖色护眼时只滤背景图与插图，避免全屏 `saveLayer`）。
+  final ColorFilter? imageColorFilter;
+
   bool get hasCustomLayer => texture != 0 || (imagePath != null && imagePath!.isNotEmpty);
+
+  /// 清空并释放所有已烘焙的程序化纸张纹理 `ui.Image`（切换/内存压力/退出阅读器时调用）。
+  static void evictTextureCache() => _PaperTextureCache.evictAll();
 
   @override
   Widget build(BuildContext context) {
     final hasImage = !kIsWeb && imagePath != null && imagePath!.isNotEmpty;
-    if (!hasImage && texture == 0) return ColoredBox(color: baseColor);
+    final dur = AppMotion.dur(context, AppMotion.standard);
+    if (!hasImage && texture == 0) return AnimatedContainer(duration: dur, curve: AppMotion.curve, color: baseColor);
 
     final isDark = ThemeData.estimateBrightnessForColor(baseColor) == Brightness.dark;
     final clampedOpacity = imageOpacity.clamp(0.05, 0.85);
     // 盖一层与当前主题底色同向的柔和遮罩，即使透明度拉到最高也确保正文清晰护眼
     final veilAlpha = isDark ? 0.22 : 0.14;
 
-    return RepaintBoundary(
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          ColoredBox(color: baseColor),
-          if (hasImage) ...[
-            Opacity(
-              opacity: clampedOpacity,
-              child: Image.file(
-                File(imagePath!),
-                fit: BoxFit.cover,
-                filterQuality: FilterQuality.medium,
-                gaplessPlayback: true,
-                errorBuilder: (_, _, _) => const SizedBox.shrink(),
-              ),
-            ),
+    final mq = MediaQuery.maybeOf(context);
+    final cacheW = mq == null ? null : (mq.size.width * mq.devicePixelRatio).round().clamp(360, 2400);
+
+    Widget? imageNode;
+    if (hasImage) {
+      Widget img = Image.file(
+        File(imagePath!),
+        fit: BoxFit.cover,
+        opacity: AlwaysStoppedAnimation<double>(clampedOpacity),
+        cacheWidth: cacheW,
+        filterQuality: FilterQuality.medium,
+        gaplessPlayback: true,
+        errorBuilder: (_, _, _) => const SizedBox.shrink(),
+      );
+      if (imageColorFilter != null) {
+        img = ColorFiltered(colorFilter: imageColorFilter!, child: img);
+      }
+      imageNode = RepaintBoundary(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            img,
             ColoredBox(color: baseColor.withValues(alpha: veilAlpha)),
           ],
-          if (texture >= 1 && texture <= 3)
-            CustomPaint(
-              painter: _PaperTexturePainter(texture: texture, baseColor: baseColor, fgColor: fgColor, isDark: isDark),
+        ),
+      );
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        AnimatedContainer(duration: dur, curve: AppMotion.curve, color: baseColor),
+        ?imageNode,
+        if (texture == 1 || texture == 2)
+          RepaintBoundary(
+            child: _BakedPaperTexture(texture: texture, fgColor: fgColor, isDark: isDark),
+          )
+        else if (texture == 3)
+          RepaintBoundary(
+            child: CustomPaint(
+              painter: _PaperTexturePainter(texture: texture, fgColor: fgColor, isDark: isDark),
             ),
-        ],
-      ),
+          ),
+      ],
     );
   }
+}
+
+typedef _TextureCacheKey = (int, int, bool, int, int);
+
+/// 宣纸 / 复古纸烘焙 `ui.Image` 共享 LRU 缓存：以 `.clone()` 分发独立句柄，淘汰或清空时立即 `dispose()` 缓存句柄。
+class _PaperTextureCache {
+  _PaperTextureCache._();
+
+  static const _maxEntries = 4;
+  static final _entries = <_TextureCacheKey, ui.Image>{};
+
+  static (int, int) quantize(Size size) {
+    var w = size.width;
+    var h = size.height;
+    final maxEdge = math.max(w, h);
+    if (maxEdge > 1024) {
+      final scale = 1024 / maxEdge;
+      w *= scale;
+      h *= scale;
+    }
+    final qW = ((w / 64).ceil() * 64).clamp(128, 1024);
+    final qH = ((h / 64).ceil() * 64).clamp(128, 1024);
+    return (qW, qH);
+  }
+
+  static ui.Image acquire({required int texture, required Color fgColor, required bool isDark, required int qW, required int qH}) {
+    final key = (texture, fgColor.toARGB32(), isDark, qW, qH);
+    final hit = _entries.remove(key);
+    if (hit != null) {
+      _entries[key] = hit;
+      return hit.clone();
+    }
+    if (_entries.length >= _maxEntries) {
+      _entries.remove(_entries.keys.first)?.dispose();
+    }
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, qW.toDouble(), qH.toDouble()));
+    _PaperTexturePainter(texture: texture, fgColor: fgColor, isDark: isDark).paint(canvas, Size(qW.toDouble(), qH.toDouble()));
+    final picture = recorder.endRecording();
+    final baked = picture.toImageSync(qW, qH);
+    picture.dispose();
+    _entries[key] = baked;
+    return baked.clone();
+  }
+
+  static void evictAll() {
+    for (final img in _entries.values) {
+      img.dispose();
+    }
+    _entries.clear();
+  }
+}
+
+class _BakedPaperTexture extends StatefulWidget {
+  const _BakedPaperTexture({required this.texture, required this.fgColor, required this.isDark});
+
+  final int texture;
+  final Color fgColor;
+  final bool isDark;
+
+  @override
+  State<_BakedPaperTexture> createState() => _BakedPaperTextureState();
+}
+
+class _BakedPaperTextureState extends State<_BakedPaperTexture> {
+  _TextureCacheKey? _key;
+  ui.Image? _image;
+
+  ui.Image _ensureImage(Size size) {
+    final (qW, qH) = _PaperTextureCache.quantize(size);
+    final nextKey = (widget.texture, widget.fgColor.toARGB32(), widget.isDark, qW, qH);
+    if (_image != null && _key == nextKey) return _image!;
+    _image?.dispose();
+    _key = nextKey;
+    return _image = _PaperTextureCache.acquire(texture: widget.texture, fgColor: widget.fgColor, isDark: widget.isDark, qW: qW, qH: qH);
+  }
+
+  @override
+  void dispose() {
+    _image?.dispose();
+    _image = null;
+    _key = null;
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (_, constraints) {
+        final size = constraints.biggest;
+        if (size.isEmpty || !size.isFinite) return const SizedBox.shrink();
+        final img = _ensureImage(size);
+        return CustomPaint(painter: _BakedImagePainter(img));
+      },
+    );
+  }
+}
+
+class _BakedImagePainter extends CustomPainter {
+  const _BakedImagePainter(this.image);
+
+  final ui.Image image;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) return;
+    final src = Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
+    final dst = Offset.zero & size;
+    canvas.drawImageRect(image, src, dst, Paint()..filterQuality = FilterQuality.low);
+  }
+
+  @override
+  bool shouldRepaint(_BakedImagePainter old) => !identical(old.image, image);
 }
 
 class _PaperTexturePainter extends CustomPainter {
   const _PaperTexturePainter({
     required this.texture,
-    required this.baseColor,
     required this.fgColor,
     required this.isDark,
   });
 
   final int texture;
-  final Color baseColor;
   final Color fgColor;
   final bool isDark;
 
@@ -240,5 +397,5 @@ class _PaperTexturePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_PaperTexturePainter old) => old.texture != texture || old.baseColor != baseColor || old.fgColor != fgColor || old.isDark != isDark;
+  bool shouldRepaint(_PaperTexturePainter old) => old.texture != texture || old.fgColor != fgColor || old.isDark != isDark;
 }

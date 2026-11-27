@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'bangumi.dart';
+import 'motion.dart';
 import 'text.dart';
 
 /// 书籍详情页的 Bangumi 信息卡：
@@ -49,6 +50,14 @@ class _BangumiInfoCardState extends ConsumerState<BangumiInfoCard> {
 
   Future<void> _fetch(CancelToken token) async {
     try {
+      if (_info == null) {
+        final disk = await BangumiCovers.loadSavedInfo(widget.aid);
+        if (!mounted || token.isCancelled) return;
+        if (disk != null) {
+          setState(() => _info = disk);
+          if (!BangumiCovers.isInfoExpired(disk)) return;
+        }
+      }
       final fresh = await ref.read(bangumiProvider).subjectInfo(widget.aid, fallbackTitle: widget.title, cancelToken: token);
       if (!mounted || token.isCancelled) return;
       if (fresh != null) setState(() => _info = fresh);
@@ -68,8 +77,15 @@ class _BangumiInfoCardState extends ConsumerState<BangumiInfoCard> {
   @override
   Widget build(BuildContext context) {
     final info = _info;
-    if (info == null) return const SizedBox.shrink();
+    return AppCollapse(
+      visible: info != null,
+      duration: AppMotion.standard,
+      reverseDuration: AppMotion.fast,
+      child: info == null ? const SizedBox.shrink() : _buildCard(context, info),
+    );
+  }
 
+  Widget _buildCard(BuildContext context, BgmSubjectInfo info) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final muted = theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);

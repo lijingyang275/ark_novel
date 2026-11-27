@@ -55,6 +55,17 @@ class Wenku8NovelDetail {
 class Wenku8Parser {
   const Wenku8Parser._();
 
+  static final _bookHtmRe = RegExp(r'/book/(\d+)\.htm');
+  static final _articleInfoIdRe = RegExp(r'articleinfo\.php\?id=(\d+)');
+  static final _heatRe = RegExp(r'[热熱]度[：:]\s*([^，,\s]+)');
+  static final _trendingRe = RegExp(r'指[数數][^：:]*[：:]\s*([^，,\s]+)');
+  static final _bookIdRe = RegExp(r'book/(\d+)');
+  static final _ridRe = RegExp(r'rid=(\d+)');
+  static final _uidRe = RegExp(r'uid=(\d+)');
+  static final _digitsRe = RegExp(r'^\d+$');
+  static final _trimEdgesRe = RegExp(r'^[\n\s]*|[\n\s]*$');
+  static final _paraSplitRe = RegExp(r'\n\s*\n');
+
   /// 排行、分类、搜索等列表页。[baseUrl] 用于补全详情页和缺省封面地址。
   static List<NovelCover> novelList(String html, {required String baseUrl}) => novelListDoc(parse(html), baseUrl: baseUrl);
 
@@ -100,7 +111,7 @@ class Wenku8Parser {
     final out = <NovelCover>[];
     for (final a in content.querySelectorAll('a')) {
       final href = a.attributes['href'] ?? '';
-      final aid = RegExp(r'/book/(\d+)\.htm').firstMatch(href)?.group(1) ?? RegExp(r'articleinfo\.php\?id=(\d+)').firstMatch(href)?.group(1);
+      final aid = _bookHtmRe.firstMatch(href)?.group(1) ?? _articleInfoIdRe.firstMatch(href)?.group(1);
       if (aid == null) continue;
       final title = (a.attributes['title'] ?? a.text).trim();
       if (title.isEmpty || !seen.add(aid)) continue;
@@ -158,8 +169,8 @@ class Wenku8Parser {
       introduce = tempHeat; // 下架书籍的简介在这个位置
     } else if (tempHeat.length >= 19) {
       // 「作品热度：A级，当前热度上升指数为：B级」：按冒号后面取，SSS级这种多于一个字母的也完整
-      heat = RegExp(r'[热熱]度[：:]\s*([^，,\s]+)').firstMatch(tempHeat)?[1];
-      trending = RegExp(r'指[数數][^：:]*[：:]\s*([^，,\s]+)').firstMatch(tempHeat)?[1];
+      heat = _heatRe.firstMatch(tempHeat)?[1];
+      trending = _trendingRe.firstMatch(tempHeat)?[1];
     }
 
     final tags = (tag.length >= 7 ? tag.substring(7) : tag).split(" ").where((t) => t.isNotEmpty).toList();
@@ -198,7 +209,7 @@ class Wenku8Parser {
     if (anchors.length < 2 || imgs.isEmpty) return null;
     final String url = anchors[0].attributes["href"] ?? "";
     // 链接格式不对（没有 .htm、带参数）时只是这本没有书号，不能让整个首页推荐失败
-    final String aid = RegExp(r'book/(\d+)').firstMatch(url)?[1] ?? "";
+    final String aid = _bookIdRe.firstMatch(url)?[1] ?? "";
     return NovelCover(anchors[1].text, ImageUrlHelper.normalize(imgs[0].attributes["src"] ?? ""), aid);
   }
 
@@ -282,7 +293,7 @@ class Wenku8Parser {
       if (tds.length < 4) continue;
       final a0 = tds[0].querySelector('a');
       final href0 = a0?.attributes['href'] ?? '';
-      final rid = RegExp(r"rid=(\d+)").firstMatch(href0)?.group(1) ?? href0;
+      final rid = _ridRe.firstMatch(href0)?.group(1) ?? href0;
       final viewAndReply = tds[1].text.trim();
       final idx = viewAndReply.indexOf('/');
       final a2 = tds[2].querySelector('a');
@@ -315,7 +326,7 @@ class Wenku8Parser {
       if (tds.length < 2) continue;
       final Element? userLink = tds[0].querySelector("a");
       final String? href = userLink?.attributes["href"];
-      final String uid = href == null ? "" : RegExp(r'uid=(\d+)').firstMatch(href)?[1] ?? "";
+      final String uid = href == null ? "" : _uidRe.firstMatch(href)?[1] ?? "";
 
       final List<Element> divs = tds[1].querySelectorAll("div");
       String rawTime = "";
@@ -363,8 +374,11 @@ class Wenku8Parser {
   }
 
   /// 投票后的提示文字。
-  static String voteResult(String html) {
-    final blockContent = parse(html).getElementsByClassName("blockcontent");
+  static String voteResult(String html) => voteResultDoc(parse(html));
+
+  /// 从已解析的投票结果 [Document] 提取提示文字，避免重复 DOM 解析。
+  static String voteResultDoc(Document doc) {
+    final blockContent = doc.getElementsByClassName("blockcontent");
     if (blockContent.isEmpty) return "";
     return blockContent[0].querySelector("div[style='padding:10px']")?.text ?? "";
   }
@@ -385,7 +399,7 @@ class Wenku8Parser {
     }
 
     final uid = cell(0, 1);
-    if (uid.isEmpty || !RegExp(r'^\d+$').hasMatch(uid)) {
+    if (uid.isEmpty || !_digitsRe.hasMatch(uid)) {
       throw const Wenku8UnexpectedPageException("user info: not a user detail page");
     }
 
@@ -480,8 +494,8 @@ class Wenku8Parser {
 
     contentElement.querySelectorAll('ul#contentdp').forEach((e) => e.remove());
 
-    final String trimmed = contentElement.text.replaceAll(RegExp(r'^[\n\s]*|[\n\s]*$'), '');
-    final paragraphs = trimmed.split(RegExp(r'\n\s*\n')).map((paragraph) {
+    final String trimmed = contentElement.text.replaceAll(_trimEdgesRe, '');
+    final paragraphs = trimmed.split(_paraSplitRe).map((paragraph) {
       if (paragraph.trim().isEmpty) return '';
       final lines = paragraph.split('\n');
       lines[0] = '   ${lines[0]}'; // 仅首行加 3 个空格缩进

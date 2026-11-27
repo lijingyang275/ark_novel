@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:html/parser.dart' show parse;
 
@@ -43,9 +46,16 @@ class Api {
   Api(this._client, this._urls, this._base, this._scope, {this.unlock, this.onCloudflare});
 
   static String? _lastFailedHtml;
+  static const _asyncParseThreshold = 16 * 1024;
+  static const _listCacheTtl = Duration(minutes: 5);
+  static const _listCacheCap = 20;
+  static final _wsRe = RegExp(r'\s+');
 
   /// 最近一次解析失败的搜索页原文（兼容旧顶层访问）。
   static String? get lastFailedHtml => _lastFailedHtml;
+
+  /// 响应内存告警时释放静态缓存的失败搜索页原文。
+  static void evictMemory() => _lastFailedHtml = null;
 
   final Wenku8Client _client;
   final Wenku8Urls _urls;
@@ -61,6 +71,7 @@ class Api {
   final String _scope;
 
   String? _lastFailedSearchHtml;
+  final _listCache = <String, (DateTime at, PageResult result)>{};
 
   /// 当前 [Api] 实例最近一次解析失败的搜索页原文。
   String? get lastFailedSearchHtml => _lastFailedSearchHtml;
@@ -70,11 +81,36 @@ class Api {
     _lastFailedHtml = html;
   }
 
+  /// 清空列表页短期内存缓存。
+  void clearListCache() => _listCache.clear();
+
+  /// 响应内存压力告警：清空列表缓存与最近失败搜索页源码。
+  void onMemoryPressure() {
+    _listCache.clear();
+    _setFailedSearchHtml(null);
+  }
+
+  static Future<Wenku8NovelDetail> _parseNovelDetail(String html) =>
+      !kIsWeb && html.length > _asyncParseThreshold ? compute(Wenku8Parser.novelDetail, html) : Future.value(Wenku8Parser.novelDetail(html));
+
+  static Future<List<CatVolume>> _parseCatalogue(String html) =>
+      !kIsWeb && html.length > _asyncParseThreshold ? compute(Wenku8Parser.catalogue, html) : Future.value(Wenku8Parser.catalogue(html));
+
+  static Future<Content> _parseChapterContent(String html) =>
+      !kIsWeb && html.length > _asyncParseThreshold ? compute(Wenku8Parser.chapterContent, html) : Future.value(Wenku8Parser.chapterContent(html));
+
   /// 取页面并解析，带离线备份：
   /// - 联网且解析成功：返回结果并更新备份（解析失败的页面——登录页、错误页、结构变了——绝不写进备份）
   /// - 页面不对（[Wenku8UnexpectedPageException]）或请求被主动取消：直接抛出，不拿旧备份冒充
   /// - 网络问题（超时、断网、5xx、Cloudflare）：遇 Cloudflare 时同步触发 [onCloudflare]；有备份就用备份；[fresh] 时不用备份，直接抛出
-  Future<T> _cached<T>(String url, T Function(String html) parse, {bool private = false, String? referer, bool fresh = false, CancelToken? cancelToken}) async {
+  Future<T> _cached<T>(
+    String url,
+    FutureOr<T> Function(String html) parse, {
+    bool private = false,
+    String? referer,
+    bool fresh = false,
+    CancelToken? cancelToken,
+  }) async {
     final key = private ? '$_scope|$url' : url;
     final String html;
     try {
@@ -86,9 +122,9 @@ class Api {
       if (isCloudflare(e)) onCloudflare?.call();
       final saved = fresh ? null : await PageStore.get(key);
       if (saved == null) rethrow;
-      return parse(saved);
+      return await parse(saved);
     }
-    final result = parse(html);
+    final result = await parse(html);
     await PageStore.put(key, html);
     return result;
   }
@@ -123,14 +159,40 @@ class Api {
     return PageResult(Wenku8Parser.novelListDoc(doc, baseUrl: _base), Wenku8Parser.maxPageDoc(doc));
   }
 
-  Future<PageResult> ranking(String sort, int page, {CancelToken? cancelToken}) async =>
-      _list(await _client.getPage(_urls.ranking(sort, page), charsetParam: false, cancelToken: cancelToken));
+  Future<PageResult> _cachedList(String url, {bool fresh = false, CancelToken? cancelToken}) async {
+    if (!fresh) {
+      final hit = _listCache.remove(url);
+      if (hit != null && DateTime.now().difference(hit.$1) < _listCacheTtl) {
+        _listCache[url] = hit;
+        return hit.$2;
+      }
+    }
+    final result = _list(await _client.getPage(url, charsetParam: false, cancelToken: cancelToken));
+    _listCache.remove(url);
+    _listCache[url] = (DateTime.now(), result);
+    while (_listCache.length > _listCacheCap) {
+      _listCache.remove(_listCache.keys.first);
+    }
+    return result;
+  }
 
-  Future<PageResult> category(String tag, String sort, int page, {CancelToken? cancelToken}) async =>
-      _list(await _client.getPage(_urls.category(tag, sort, page), charsetParam: false, cancelToken: cancelToken));
+  Future<PageResult> ranking(String sort, int page, {CancelToken? cancelToken}) => fetchRanking(sort, page, cancelToken: cancelToken);
 
-  Future<PageResult> completed(int page, {CancelToken? cancelToken}) async =>
-      _list(await _client.getPage(_urls.completedNovels(page), charsetParam: false, cancelToken: cancelToken));
+  /// 拉取排行榜列表，带 5 分钟内存 LRU 缓存（容量 20）；[fresh] 为 true 时强制刷新。
+  Future<PageResult> fetchRanking(String sort, int page, {bool fresh = false, CancelToken? cancelToken}) =>
+      _cachedList(_urls.ranking(sort, page), fresh: fresh, cancelToken: cancelToken);
+
+  Future<PageResult> category(String tag, String sort, int page, {CancelToken? cancelToken}) => fetchCategory(tag, sort, page, cancelToken: cancelToken);
+
+  /// 拉取分类列表，带 5 分钟内存 LRU 缓存（容量 20）；[fresh] 为 true 时强制刷新。
+  Future<PageResult> fetchCategory(String tag, String sort, int page, {bool fresh = false, CancelToken? cancelToken}) =>
+      _cachedList(_urls.category(tag, sort, page), fresh: fresh, cancelToken: cancelToken);
+
+  Future<PageResult> completed(int page, {CancelToken? cancelToken}) => fetchCompleted(page, cancelToken: cancelToken);
+
+  /// 拉取完结列表，带 5 分钟内存 LRU 缓存（容量 20）；[fresh] 为 true 时强制刷新。
+  Future<PageResult> fetchCompleted(int page, {bool fresh = false, CancelToken? cancelToken}) =>
+      _cachedList(_urls.completedNovels(page), fresh: fresh, cancelToken: cancelToken);
 
   DateTime _lastSearch = DateTime(0);
   Future<void> _searchLock = Future<void>.value();
@@ -138,13 +200,33 @@ class Api {
   /// 当前是否处于文库 5 秒搜索冷却窗口内。
   bool get isSearchCoolingDown => DateTime.now().difference(_lastSearch) < const Duration(seconds: 5);
 
-  /// 网站限制搜索间隔 5 秒：连续搜索串行排队等待；因为太频繁、超时、网络抖动失败的，等一下自动重试一次。
+  static DioException _cancelError(CancelToken token, String path) =>
+      token.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: path), reason: 'cancelled');
+
+  /// 网站限制搜索间隔 5 秒：连续搜索串行排队等待；等待或排队期间响应 [cancelToken] 立即退出且不推进冷却基准。
   /// Cloudflare 拦截、429 限流、取消、"没搜到结果"或页面结构异常（[lastFailedSearchHtml] 有值）不做二次等待重试。
   Future<PageResult> search(String keyword, {required bool byAuthor, required int page, CancelToken? cancelToken}) async {
+    if (cancelToken?.isCancelled == true) throw _cancelError(cancelToken!, 'search');
     Future<PageResult> run() async {
       for (var attempt = 0;; attempt++) {
+        if (cancelToken?.isCancelled == true) throw _cancelError(cancelToken!, 'search');
         final wait = const Duration(seconds: 5, milliseconds: 200) - DateTime.now().difference(_lastSearch);
-        if (wait > Duration.zero) await Future<void>.delayed(wait);
+        if (wait > Duration.zero) {
+          if (cancelToken == null) {
+            await Future<void>.delayed(wait);
+          } else {
+            DioException? cancelErr;
+            await Future.any<void>([
+              Future<void>.delayed(wait),
+              cancelToken.whenCancel.then((e) {
+                cancelErr = e;
+              }),
+            ]);
+            if (cancelErr != null || cancelToken.isCancelled) {
+              throw cancelErr ?? _cancelError(cancelToken, 'search');
+            }
+          }
+        }
         _lastSearch = DateTime.now();
         _setFailedSearchHtml(null);
         try {
@@ -165,7 +247,24 @@ class Api {
     }
 
     final prev = _searchLock;
-    final future = prev.then((_) => run());
+    final Future<PageResult> future;
+    if (cancelToken == null) {
+      future = prev.then((_) => run());
+    } else {
+      future = () async {
+        DioException? cancelErr;
+        await Future.any<void>([
+          prev,
+          cancelToken.whenCancel.then((e) {
+            cancelErr = e;
+          }),
+        ]);
+        if (cancelErr != null || cancelToken.isCancelled) {
+          throw cancelErr ?? _cancelError(cancelToken, 'search');
+        }
+        return run();
+      }();
+    }
     _searchLock = future.then((_) {}, onError: (_) {});
     return future;
   }
@@ -188,7 +287,7 @@ class Api {
       // 正常的搜索结果页有 #content，只是没有匹配的书：返回空结果让界面显示友好的空状态
       if (doc.getElementById('content') != null) return const PageResult([], 0);
       final title = doc.querySelector('title')?.text.trim() ?? '';
-      final text = doc.body?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+      final text = doc.body?.text.replaceAll(_wsRe, ' ').trim() ?? '';
       _setFailedSearchHtml(html);
       throw Wenku8UnexpectedPageException('搜索页面返回异常：$title ${text.length > 100 ? text.substring(0, 100) : text}');
     }
@@ -203,7 +302,7 @@ class Api {
     final cat = await PageStore.get(_urls.catalogue(aid));
     if (detail == null || cat == null) return null;
     try {
-      return NovelPage(Wenku8Parser.novelDetail(detail), Wenku8Parser.catalogue(cat));
+      return NovelPage(await _parseNovelDetail(detail), await _parseCatalogue(cat));
     } catch (_) {
       return null;
     }
@@ -211,18 +310,22 @@ class Api {
 
   bool hasDetail(String aid) => PageStore.has(_urls.novelDetail(aid));
 
-  Future<Wenku8NovelDetail> detail(String aid, {CancelToken? cancelToken}) => _cached(_urls.novelDetail(aid), Wenku8Parser.novelDetail, cancelToken: cancelToken);
+  Future<Wenku8NovelDetail> detail(String aid, {CancelToken? cancelToken}) => _cached(_urls.novelDetail(aid), _parseNovelDetail, cancelToken: cancelToken);
 
   Future<NovelPage> novel(String aid, {CancelToken? cancelToken}) async => NovelPage(await detail(aid, cancelToken: cancelToken), await catalogue(aid, cancelToken: cancelToken));
 
   /// 只取目录（检查更新用，比 [novel] 少一次请求）。
   Future<List<CatVolume>> catalogue(String aid, {bool fresh = false, CancelToken? cancelToken}) =>
-      _cached(_urls.catalogue(aid), Wenku8Parser.catalogue, referer: '$_base/book/$aid.htm', fresh: fresh, cancelToken: cancelToken);
+      _cached(_urls.catalogue(aid), _parseCatalogue, referer: '$_base/book/$aid.htm', fresh: fresh, cancelToken: cancelToken);
 
-  Future<Content> chapter(String aid, String cid) async {
-    final content = Wenku8Parser.chapterContent(await _client.getPage(_urls.chapterContent(aid, cid), charsetParam: false, referer: _urls.catalogue(aid)));
+  Future<Content> chapter(String aid, String cid) => fetchChapter(aid, cid);
+
+  /// 拉取单章正文并支持透传 [cancelToken]（保持 [chapter] 签名不变以兼容既有测试桩）。
+  Future<Content> fetchChapter(String aid, String cid, {CancelToken? cancelToken}) async {
+    final html = await _client.getPage(_urls.chapterContent(aid, cid), charsetParam: false, referer: _urls.catalogue(aid), cancelToken: cancelToken);
+    final content = await _parseChapterContent(html);
     if (!isLockedContent(content) || !(unlock?.enabled ?? false)) return content;
-    return unlock!.chapter(aid, cid, () => catalogue(aid));
+    return unlock!.chapter(aid, cid, () => catalogue(aid, cancelToken: cancelToken), cancelToken: cancelToken);
   }
 
   Future<Bookshelf> bookshelf(int classId, {bool fresh = false}) =>
@@ -239,7 +342,7 @@ class Api {
     final html = await _client.getPage(_urls.vote(aid), charsetParam: false, retryTransient: false);
     final doc = parse(html);
     if (Wenku8Parser.needsLoginDoc(doc)) throw const Wenku8LoginRequiredException('登录后才能推荐投票');
-    return Wenku8Parser.voteResult(html);
+    return Wenku8Parser.voteResultDoc(doc);
   }
 
   Future<List<CommentItem>> comments(String aid, int page, {CancelToken? cancelToken}) async =>

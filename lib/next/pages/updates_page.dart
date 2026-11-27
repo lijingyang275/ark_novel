@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../library.dart';
+import '../motion.dart';
 import '../routes.dart';
 import '../updates.dart';
 import '../volume_covers.dart';
@@ -81,8 +82,10 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
       ),
     );
 
+    final String bodyKey;
     Widget body;
     if (feed.isEmpty && !progress.running && progress.error != null) {
+      bodyKey = 'upd-error';
       body = StatePanel(
         title: '检查更新失败',
         detail: progress.error,
@@ -90,6 +93,7 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
         onRetry: () => ref.read(updateProvider.notifier).refresh(),
       );
     } else if (feed.isEmpty && !progress.running) {
+      bodyKey = 'upd-empty';
       body = CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
@@ -105,6 +109,7 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
         ],
       );
     } else {
+      bodyKey = 'upd-list';
       body = ListView.builder(
         physics: const AlwaysScrollableScrollPhysics(),
         itemCount: rows.length,
@@ -133,17 +138,28 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
       appBar: AppBar(
         title: const Text('更新'),
         actions: [
-          if (progress.running)
-            TextButton(onPressed: () => ref.read(updateProvider.notifier).cancel(), child: const Text('取消'))
-          else
-            IconButton(tooltip: hz(context, '检查更新'), icon: const Icon(Icons.refresh), onPressed: () => ref.read(updateProvider.notifier).refresh()),
+          AppIconSwap(
+            child: progress.running
+                ? TextButton(key: const ValueKey('cancel'), onPressed: () => ref.read(updateProvider.notifier).cancel(), child: const Text('取消'))
+                : IconButton(key: const ValueKey('refresh'), tooltip: hz(context, '检查更新'), icon: const Icon(Icons.refresh), onPressed: () => ref.read(updateProvider.notifier).refresh()),
+          ),
         ],
-        bottom: progress.running ? PreferredSize(preferredSize: const Size.fromHeight(2), child: LinearProgressIndicator(value: progress.total == 0 ? null : progress.done / progress.total, minHeight: 2)) : null,
+        bottom: PreferredSize(
+          preferredSize: Size.fromHeight(progress.running ? 2 : 0),
+          child: AppCollapse(
+            visible: progress.running,
+            duration: AppMotion.fast,
+            reverseDuration: AppMotion.fast,
+            child: progress.total == 0
+                ? const LinearProgressIndicator(minHeight: 2)
+                : AppProgressBar(value: progress.done / progress.total, minHeight: 2, borderRadius: 0),
+          ),
+        ),
       ),
       body: contentWidth(
         RefreshIndicator(
           onRefresh: () => ref.read(updateProvider.notifier).refresh(),
-          child: body,
+          child: AppCrossfade(fill: true, duration: AppMotion.fast, child: KeyedSubtree(key: ValueKey(bodyKey), child: body)),
         ),
       ),
     );

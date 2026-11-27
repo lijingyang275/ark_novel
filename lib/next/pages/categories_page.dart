@@ -4,6 +4,7 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../app_prefs.dart';
 import '../library.dart';
+import '../motion.dart';
 import '../shelf_tabs.dart';
 import '../widgets.dart';
 import '../x_list.dart';
@@ -157,8 +158,10 @@ class CategoriesPage extends ConsumerWidget {
           return Material(
             key: ValueKey(c.id),
             color: Colors.transparent,
-            child: Opacity(
+            child: AnimatedOpacity(
               opacity: off ? 0.5 : 1,
+              duration: AppMotion.dur(context, AppMotion.fast),
+              curve: AppMotion.curve,
               child: XTile(
                 leading: XLeading(icon: auto ? Icons.auto_awesome_outlined : Icons.label_outline, color: scheme.primary),
                 title: c.name,
@@ -166,7 +169,11 @@ class CategoriesPage extends ConsumerWidget {
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    IconButton(tooltip: hz(context, off ? '在书架上显示' : '在书架上隐藏'), icon: Icon(off ? Icons.visibility_off_outlined : Icons.visibility_outlined, color: scheme.onSurfaceVariant), onPressed: () => toggleHidden(c)),
+                    IconButton(
+                      tooltip: hz(context, off ? '在书架上显示' : '在书架上隐藏'),
+                      icon: AppIconSwap(child: Icon(off ? Icons.visibility_off_outlined : Icons.visibility_outlined, key: ValueKey(off), color: scheme.onSurfaceVariant)),
+                      onPressed: () => toggleHidden(c),
+                    ),
                     if (auto) const SizedBox(width: 48) else menu(c), // 占住菜单的位置，眼睛图标上下对齐
                     ReorderableDragStartListener(index: i, child: Padding(padding: const EdgeInsets.all(8), child: Icon(Icons.drag_indicator, color: scheme.onSurfaceVariant))),
                   ],

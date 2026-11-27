@@ -15,14 +15,57 @@ bool _cronetUnavailable = false;
 HttpClientAdapter? nativeAdapter(HttpClientAdapter Function() fallback) {
   if (Platform.isAndroid) return _SplitCookies(_SharedCronetAdapter(fallback));
   if (Platform.isIOS || Platform.isMacOS) {
-    return _SplitCookies(NativeAdapter(
-      createCupertinoConfiguration: () => URLSessionConfiguration.ephemeralSessionConfiguration()
-        ..httpShouldSetCookies = false
-        ..httpCookieAcceptPolicy = NSHTTPCookieAcceptPolicy.NSHTTPCookieAcceptPolicyNever
-        ..timeoutIntervalForRequest = const Duration(seconds: 25),
-    ));
+    return _SplitCookies(
+      CupertinoFallbackAdapter(
+        primary: NativeAdapter(
+          createCupertinoConfiguration: () => URLSessionConfiguration.ephemeralSessionConfiguration()
+            ..httpShouldSetCookies = false
+            ..httpCookieAcceptPolicy = NSHTTPCookieAcceptPolicy.NSHTTPCookieAcceptPolicyNever
+            ..timeoutIntervalForRequest = const Duration(seconds: 25),
+        ),
+        fallback: fallback,
+      ),
+    );
   }
   return null;
+}
+
+/// 苹果端 `NSURLSession`（`cupertino_http`）在虚拟网卡/代理/重定向环境下偶发对合法 HTTP(S) 地址报
+/// `NSURLErrorDomain code=-1000 (bad URL)`：对可重放请求自动回落到 Dart IO 适配器重试一次，其余请求仍走原生栈。
+class CupertinoFallbackAdapter implements HttpClientAdapter {
+  CupertinoFallbackAdapter({required this.primary, required HttpClientAdapter Function() fallback}) : _fallbackFactory = fallback;
+
+  final HttpClientAdapter primary;
+  final HttpClientAdapter Function() _fallbackFactory;
+  HttpClientAdapter? _fallback;
+  bool _closed = false;
+
+  static bool isSpuriousBadUrl(Object error, Uri uri) {
+    if ((uri.scheme != 'http' && uri.scheme != 'https') || uri.host.isEmpty) return false;
+    final lower = error.toString().toLowerCase();
+    return lower.contains('nsurlerrordomain') && (lower.contains('code=-1000') || lower.contains('bad url'));
+  }
+
+  @override
+  Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
+    try {
+      return await primary.fetch(options, requestStream, cancelFuture);
+    } catch (error) {
+      if (!_closed && requestStream == null && isSpuriousBadUrl(error, options.uri)) {
+        final fb = _fallback ??= _fallbackFactory();
+        return fb.fetch(options, null, cancelFuture);
+      }
+      rethrow;
+    }
+  }
+
+  @override
+  void close({bool force = false}) {
+    if (_closed) return;
+    _closed = true;
+    primary.close(force: force);
+    _fallback?.close(force: force);
+  }
 }
 
 /// 懒加载并复用进程级单例 [CronetEngine]；关闭单个 Dio 时只关闭对应的 [CronetClient] 包装，不关闭共享引擎。

@@ -128,7 +128,7 @@ class DoodleRule extends StatelessWidget {
   final double width;
 
   @override
-  Widget build(BuildContext context) => CustomPaint(size: Size(width, 12), painter: _RulePainter(motif, line, accent));
+  Widget build(BuildContext context) => RepaintBoundary(child: CustomPaint(size: Size(width, 12), painter: _RulePainter(motif, line, accent)));
 }
 
 class _RulePainter extends CustomPainter {
@@ -165,9 +165,20 @@ class DoodleBanner extends StatelessWidget {
         width: double.infinity,
         child: Stack(
           children: [
-            Positioned.fill(child: RepaintBoundary(child: CustomPaint(painter: _BannerPainter(art.motif, Color.alphaBlend(scheme.primary.withValues(alpha: 0.09), scheme.surface), scheme.primary, art.secondary)))),
+            // 底色：抬起面上只染一点强调色（直接叠在页面底色上，深色发色配浅色底会发灰）
+            Positioned.fill(child: RepaintBoundary(child: CustomPaint(painter: _BannerPainter(art.motif, Color.alphaBlend(scheme.primary.withValues(alpha: Theme.of(context).brightness == Brightness.dark ? 0.12 : 0.05), scheme.surfaceContainerLowest), scheme.primary, art.secondary)))),
             // 半身像底部贴着横幅下沿，上面稍微出血一点
-            Positioned(right: 4, bottom: -height * 0.06, height: height * 1.12, child: Image.asset(art.banner, fit: BoxFit.contain)),
+            Positioned(
+              right: 4,
+              bottom: -height * 0.06,
+              height: height * 1.12,
+              child: Builder(
+                builder: (context) {
+                  final px = (height * 1.12 * MediaQuery.devicePixelRatioOf(context)).round();
+                  return Image.asset(art.banner, fit: BoxFit.contain, cacheWidth: px, cacheHeight: px);
+                },
+              ),
+            ),
           ],
         ),
       ),

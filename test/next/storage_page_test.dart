@@ -53,6 +53,8 @@ void main() {
       await tester.pump();
     }
     expect(images.measured, isTrue, reason: '占用测量应完成');
+    await tester.pump();
+    await tester.runAsync(() => Future<void>.delayed(Duration.zero));
     await tester.pumpAndSettle();
   }
 

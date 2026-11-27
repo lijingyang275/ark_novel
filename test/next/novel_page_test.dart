@@ -6,12 +6,15 @@ import 'package:ark_novel/data/wenku8/wenku8_parser.dart';
 import 'package:ark_novel/data/wenku8/wenku8_urls.dart';
 import 'package:ark_novel/models/cat_chapter.dart';
 import 'package:ark_novel/models/cat_volume.dart';
+import 'package:ark_novel/models/comment_item.dart';
 import 'package:ark_novel/models/common/charset_type.dart';
 import 'package:ark_novel/models/custom_exception.dart';
+import 'package:ark_novel/models/reply_item.dart';
 import 'package:ark_novel/models/user_info.dart';
 import 'package:ark_novel/next/cache.dart';
 import 'package:ark_novel/next/chapter_list.dart';
 import 'package:ark_novel/next/data.dart';
+import 'package:ark_novel/next/pages/comments_page.dart';
 import 'package:ark_novel/next/pages/novel_page.dart';
 import 'package:ark_novel/next/routes.dart';
 import 'package:ark_novel/next/session.dart';
@@ -25,7 +28,7 @@ import 'package:go_router/go_router.dart';
 import 'package:hive_ce/hive.dart';
 
 class _FakeApi extends Api {
-  _FakeApi({this.savedPage, this.freshPage, this.onVote})
+  _FakeApi({this.savedPage, this.freshPage, this.onVote, this.onNovel, this.onComments, this.onReplies})
     : super(
         Wenku8Client(baseUrl: () => 'https://www.wenku8.net', charset: () => CharsetType.gbk, headers: const {}),
         const Wenku8Urls('https://www.wenku8.net', CharsetType.gbk),
@@ -36,6 +39,9 @@ class _FakeApi extends Api {
   final NovelPage? savedPage;
   final NovelPage? freshPage;
   final Future<String> Function(String aid)? onVote;
+  final Future<NovelPage> Function(String aid, CancelToken? cancelToken)? onNovel;
+  final Future<List<CommentItem>> Function(String aid, int page, CancelToken? cancelToken)? onComments;
+  final Future<List<ReplyItem>> Function(String rid, int page, CancelToken? cancelToken)? onReplies;
   int novelCalls = 0;
   int voteCalls = 0;
 
@@ -45,7 +51,20 @@ class _FakeApi extends Api {
   @override
   Future<NovelPage> novel(String aid, {CancelToken? cancelToken}) async {
     novelCalls++;
+    if (onNovel != null) return onNovel!(aid, cancelToken);
     return freshPage ?? savedPage!;
+  }
+
+  @override
+  Future<List<CommentItem>> comments(String aid, int page, {CancelToken? cancelToken}) async {
+    if (onComments != null) return onComments!(aid, page, cancelToken);
+    return const [];
+  }
+
+  @override
+  Future<List<ReplyItem>> replies(String rid, int page, {CancelToken? cancelToken}) async {
+    if (onReplies != null) return onReplies!(rid, page, cancelToken);
+    return const [];
   }
 
   @override
@@ -117,7 +136,7 @@ void main() {
     addTearDown(tester.view.reset);
 
     await tester.runAsync(() async {
-      ChapterListOptions.save(aid, const ChapterListOptions(showIndex: true));
+      await ChapterListOptions.save(aid, const ChapterListOptions(showIndex: true));
       await Future<void>.delayed(const Duration(milliseconds: 20));
     });
 
@@ -199,12 +218,36 @@ void main() {
     final apiExpired = _FakeApi(savedPage: saved, freshPage: fresh);
     final c2 = ProviderContainer(overrides: [sessionStoreProvider.overrideWithValue(store), apiProvider.overrideWithValue(apiExpired)]);
     addTearDown(c2.dispose);
-    final sub2 = c2.listen(novelProvider(aid), (_, _) {});
+    final refreshed = Completer<void>();
+    final sub2 = c2.listen(novelProvider(aid), (_, next) {
+      if (next.value?.detail.title == '新标题' && !refreshed.isCompleted) refreshed.complete();
+    });
     addTearDown(sub2.close);
     await c2.read(novelProvider(aid).future);
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await refreshed.future.timeout(const Duration(seconds: 2));
     expect(apiExpired.novelCalls, 1);
     expect(c2.read(novelProvider(aid)).value?.detail.title, '新标题');
+
+    // 阅读器专用 readerNovelProvider：即使已过 45s TTL，只要本地有缓存就秒回旧缓存、0 次联网请求
+    final apiReaderCached = _FakeApi(savedPage: saved, freshPage: fresh);
+    final c3 = ProviderContainer(overrides: [sessionStoreProvider.overrideWithValue(store), apiProvider.overrideWithValue(apiReaderCached)]);
+    addTearDown(c3.dispose);
+    final sub3 = c3.listen(readerNovelProvider(aid), (_, _) {});
+    addTearDown(sub3.close);
+    final readerCached = await c3.read(readerNovelProvider(aid).future);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(apiReaderCached.novelCalls, 0);
+    expect(readerCached.detail.title, '旧标题');
+
+    // 本地无缓存时 readerNovelProvider 自动回退拉取最新数据
+    final apiReaderCold = _FakeApi(savedPage: null, freshPage: fresh);
+    final c4 = ProviderContainer(overrides: [sessionStoreProvider.overrideWithValue(store), apiProvider.overrideWithValue(apiReaderCold)]);
+    addTearDown(c4.dispose);
+    final sub4 = c4.listen(readerNovelProvider(aid), (_, _) {});
+    addTearDown(sub4.close);
+    final readerCold = await c4.read(readerNovelProvider(aid).future);
+    expect(apiReaderCold.novelCalls, 1);
+    expect(readerCold.detail.title, '新标题');
   });
 
   testWidgets('详情页：360px 窄屏四按钮不溢出、推荐防连点、按卷懒构建、吸顶书名与 Esc 退出多选', (tester) async {
@@ -354,5 +397,62 @@ void main() {
     expect(CoverImage.isMarkedFailed(url), isFalse);
     now = now.add(const Duration(seconds: 31));
     expect(CoverImage.isMarkedFailed(url), isFalse);
+  });
+
+  test('novelProvider / readerNovelProvider / commentsProvider / repliesProvider：销毁时取消在途 CancelToken', () async {
+    CancelToken? novelToken;
+    CancelToken? readerToken;
+    CancelToken? commentsToken;
+    CancelToken? repliesToken;
+    final novelPending = Completer<NovelPage>();
+    final readerPending = Completer<NovelPage>();
+    final commentsPending = Completer<List<CommentItem>>();
+    final repliesPending = Completer<List<ReplyItem>>();
+
+    final api = _FakeApi(
+      onNovel: (aid, token) {
+        if (aid == '9001') {
+          novelToken = token;
+          return novelPending.future;
+        }
+        readerToken = token;
+        return readerPending.future;
+      },
+      onComments: (_, _, token) {
+        commentsToken = token;
+        return commentsPending.future;
+      },
+      onReplies: (_, _, token) {
+        repliesToken = token;
+        return repliesPending.future;
+      },
+    );
+
+    final container = ProviderContainer(overrides: [sessionStoreProvider.overrideWithValue(store), apiProvider.overrideWithValue(api)]);
+    final sub1 = container.listen(novelProvider('9001'), (_, _) {});
+    final sub2 = container.listen(readerNovelProvider('9002'), (_, _) {});
+    final sub3 = container.listen(commentsProvider(('9001', 1)), (_, _) {});
+    final sub4 = container.listen(repliesProvider(('r1', 1)), (_, _) {});
+
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(novelToken, isNotNull);
+    expect(readerToken, isNotNull);
+    expect(commentsToken, isNotNull);
+    expect(repliesToken, isNotNull);
+    expect(novelToken!.isCancelled, isFalse);
+    expect(readerToken!.isCancelled, isFalse);
+    expect(commentsToken!.isCancelled, isFalse);
+    expect(repliesToken!.isCancelled, isFalse);
+
+    sub1.close();
+    sub2.close();
+    sub3.close();
+    sub4.close();
+    container.dispose();
+
+    expect(novelToken!.isCancelled, isTrue);
+    expect(readerToken!.isCancelled, isTrue);
+    expect(commentsToken!.isCancelled, isTrue);
+    expect(repliesToken!.isCancelled, isTrue);
   });
 }

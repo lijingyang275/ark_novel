@@ -195,4 +195,32 @@ void main() {
     subB.close();
     subG.close();
   });
+
+  test('Volumes.metaChanges 与封面变更分离；tintFrom 直接按 crop 采样结果与 cropRgba 一致', () async {
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+    var metaHits = 0;
+    final subMeta = c.listen(volumeMetaChangesProvider, (_, _) => metaHits++);
+
+    await Volumes.saveCatalogue('aidMeta', [vol('第一卷', ['c1'])]);
+    await Future<void>.delayed(Duration.zero);
+    final metaBeforeCover = metaHits;
+    await Volumes.setCover('aidMeta', '第一卷', 'https://img.example/m.jpg');
+    await Future<void>.delayed(Duration.zero);
+    expect(metaHits, metaBeforeCover); // 仅封面变化不触发 metaChanges
+
+    await Volumes.setRating('aidMeta', '第一卷', 4);
+    await Future<void>.delayed(Duration.zero);
+    expect(metaHits, metaBeforeCover + 1);
+
+    await ReadState.setRead('aidMeta', ['c1'], true);
+    await Future<void>.delayed(Duration.zero);
+    expect(metaHits, metaBeforeCover + 2);
+    subMeta.close();
+
+    // tintFrom 直接带 crop 区域采样与 cropRgba 结果一致
+    final rgba = Uint8List.fromList([255, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255, 0, 0, 255, 255]);
+    const rect = Rect.fromLTWH(0.5, 0, 0.5, 1);
+    expect(tintFrom(rgba, w: 2, h: 2, crop: rect), tintFrom(cropRgba(rgba, 2, 2, rect)));
+  });
 }

@@ -1,7 +1,10 @@
 package io.github.chenshi221.ark_novel
 
+import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProvider
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.content.res.Configuration
 import android.graphics.Bitmap
@@ -16,16 +19,18 @@ import android.net.Uri
 import android.os.Build
 import android.view.View
 import android.widget.RemoteViews
-import es.antonborri.home_widget.HomeWidgetLaunchIntent
-import es.antonborri.home_widget.HomeWidgetProvider
 import org.json.JSONArray
 
 // 桌面小组件「继续阅读」：最近读的 4 本封面，颜色跟着 App 的配色。数据由 App 写进 SharedPreferences（见 lib/next/reading_widget.dart）
-class ReadingWidget : HomeWidgetProvider() {
+class ReadingWidget : AppWidgetProvider() {
+    companion object {
+        const val PREFS_NAME = "HomeWidgetPreferences"
+    }
+
     private val covers = intArrayOf(R.id.widget_cover0, R.id.widget_cover1, R.id.widget_cover2, R.id.widget_cover3)
 
     // 解码、裁切封面放到后台线程：onUpdate 在主线程上跑，图大、设备慢时会拖慢桌面，超过 10 秒还会 ANR
-    override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray, widgetData: SharedPreferences) {
+    override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray) {
         val pending = try {
             goAsync()
         } catch (e: Exception) {
@@ -33,6 +38,7 @@ class ReadingWidget : HomeWidgetProvider() {
         }
         Thread {
             try {
+                val widgetData = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 render(context, appWidgetManager, appWidgetIds, widgetData)
             } catch (e: Exception) {
                 // 数据格式不对（例如旧版本留下的）：这次不更新，不能让 App 进程崩溃
@@ -110,7 +116,14 @@ class ReadingWidget : HomeWidgetProvider() {
         null
     }
 
-    private fun launch(context: Context, uri: String) = HomeWidgetLaunchIntent.getActivity(context, MainActivity::class.java, Uri.parse(uri))
+    private fun launch(context: Context, uri: String): PendingIntent {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            action = Intent.ACTION_VIEW
+            data = Uri.parse(uri)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        return PendingIntent.getActivity(context, uri.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    }
 
     // 小组件的图片走进程间传输，有大小上限：按高约 300 像素缩，再切圆角。[crop] 是书架上自选封面的裁剪框（左、上、宽、高，0~1 的比例）
     private fun roundedCover(path: String, crop: JSONArray?): Bitmap? = try {

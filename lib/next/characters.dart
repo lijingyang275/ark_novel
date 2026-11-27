@@ -2,7 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart' show ValueNotifier, kIsWeb;
+import 'package:flutter/foundation.dart' show ValueNotifier, kIsWeb, visibleForTesting;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:path/path.dart' as p;
@@ -162,6 +162,7 @@ class BookCharacter {
   static final _cjkPureRe = RegExp(r'^[\u4e00-\u9fff]+$');
   static final _kanjiPrefixKanaSuffixRe = RegExp(r'^([\u4e00-\u9fff]{2,3})([\u3040-\u309F\u30A0-\u30FF]{2,})$');
   static final _spaceRe = RegExp(r'[\s\u3000]+');
+  static final _midDotRe = RegExp(r'[·・]');
   static final _kanaRe = RegExp(r'[\u3040-\u309F\u30A0-\u30FF]');
   static final _latinRe = RegExp(r'^[A-Za-z0-9\s._-]+$');
 
@@ -212,7 +213,7 @@ class BookCharacter {
 
     // 1. 中点分隔的西式音译名（如 `艾莉丝·格雷拉特`）
     if (cn.contains('·') || cn.contains('・')) {
-      final parts = cn.split(RegExp(r'[·・]')).map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+      final parts = cn.split(_midDotRe).map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
       if (parts.length >= 2) {
         final given = _validCallTerm(parts.first) ? parts.first : null;
         final family = parts.length == 2 && _validCallTerm(parts.last) ? parts.last : null;
@@ -429,7 +430,11 @@ class BookCharacters {
 
   static Box get _box => Hive.box('session');
   static final changes = ValueNotifier<int>(0);
+  static final _charsCache = <String, (List<dynamic>, List<BookCharacter>)>{};
+  static final _safeAvatarIdRe = RegExp(r'[^A-Za-z0-9_-]');
   static String? _avatarDirPath;
+  static Set<String>? _avatarFiles;
+  static Future<void>? _avatarLoadFuture;
   static int _idSeq = 0;
 
   static String _newId() => 'ch_${DateTime.now().microsecondsSinceEpoch}_${++_idSeq}';
@@ -437,8 +442,15 @@ class BookCharacters {
   static List<BookCharacter> of(String aid) {
     if (!Hive.isBoxOpen('session')) return const [];
     final raw = _box.get('chars:$aid') as List?;
-    if (raw == null || raw.isEmpty) return const [];
-    return [for (final m in raw.whereType<Map>()) BookCharacter.fromMap(m, fallbackAid: aid)];
+    if (raw == null || raw.isEmpty) {
+      _charsCache.remove(aid);
+      return const [];
+    }
+    final hit = _charsCache[aid];
+    if (hit != null && identical(hit.$1, raw)) return hit.$2;
+    final parsed = List<BookCharacter>.unmodifiable([for (final m in raw.whereType<Map>()) BookCharacter.fromMap(m, fallbackAid: aid)]);
+    _charsCache[aid] = (raw, parsed);
+    return parsed;
   }
 
   static BookCharacter? byId(String aid, String id) {
@@ -468,10 +480,38 @@ class BookCharacters {
     changes.value++;
   }
 
+  /// 返回当前所有启用的高亮/变色规则 ID 集合，供列表页一次性 O(1) 判断避免 O(N×M) 重复遍历。
+  static Set<String> activeHighlightRuleIds() {
+    if (!Hive.isBoxOpen('session')) return const {};
+    return {for (final r in ReplaceRules.allView()) if (r.enabled && r.kind != RuleKind.replace) r.id};
+  }
+
   /// 判断当前人物是否实际开启了正文高亮（绑定了启用的 `ReplaceRule`）。
   static bool isHighlightActive(BookCharacter c) {
     if (c.ruleId.isEmpty || !Hive.isBoxOpen('session')) return false;
-    return ReplaceRules.all().any((r) => r.id == c.ruleId && r.enabled && r.kind != RuleKind.replace);
+    return ReplaceRules.allView().any((r) => r.id == c.ruleId && r.enabled && r.kind != RuleKind.replace);
+  }
+
+  /// 批量写入多个人物的萌娘百科中文简介（单次读取 + 单次落盘，不触发规则重写，消除并发 `upsert` 写丢失竞态）。
+  /// [onlyIfEmpty] 为 true 时跳过已有中文简介的条目，避免后台批量补全覆盖用户刚手填的内容。
+  /// 返回实际更新的人物条数。
+  static Future<int> batchUpdateCnSummaries(String aid, Map<String, String> summariesById, {bool onlyIfEmpty = false}) async {
+    if (summariesById.isEmpty || !Hive.isBoxOpen('session')) return 0;
+    final list = List<BookCharacter>.of(of(aid));
+    if (list.isEmpty) return 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var updated = 0;
+    for (var i = 0; i < list.length; i++) {
+      if (onlyIfEmpty && list[i].cnSummary.trim().isNotEmpty) continue;
+      final intro = summariesById[list[i].id]?.trim();
+      if (intro == null || intro.isEmpty || intro == list[i].cnSummary) continue;
+      list[i] = list[i].copyWith(cnSummary: intro, ts: now);
+      updated++;
+    }
+    if (updated == 0) return 0;
+    await _box.put('chars:$aid', [for (final c in list) c.toMap()]);
+    changes.value++;
+    return updated;
   }
 
   /// 计算当前书籍的阅读卷号（从 1 开始；未开始阅读返回 0）。
@@ -673,7 +713,7 @@ class BookCharacters {
   static Future<int> normalizeExisting(String aid) async {
     final list = List<BookCharacter>.of(of(aid));
     if (list.isEmpty) return 0;
-    final bgmCached = BangumiCovers.savedCharacters(aid) ?? const <BgmCharacter>[];
+    final bgmCached = await BangumiCovers.loadSavedCharacters(aid) ?? const <BgmCharacter>[];
     final spacedByBgmId = {for (final b in bgmCached) if (b.spacedName.isNotEmpty) b.id: b.spacedName};
 
     final batch = [
@@ -682,7 +722,7 @@ class BookCharacters {
           name: c.name,
           originalName: c.originalName,
           spacedName: (c.bgmId != null ? spacedByBgmId[c.bgmId!] : null) ??
-              c.aliases.firstWhere((a) => RegExp(r'[\s\u3000]').hasMatch(a), orElse: () => ''),
+              c.aliases.firstWhere((a) => BookCharacter._spaceRe.hasMatch(a), orElse: () => ''),
           role: c.role,
           aliases: c.aliases,
         ),
@@ -772,24 +812,51 @@ class BookCharacters {
 
   // ---- 本地裁剪头像（ApplicationSupport/char_avatar/）----
 
+  @visibleForTesting
+  static void resetAvatarCacheForTest() {
+    _avatarDirPath = null;
+    _avatarFiles = null;
+    _avatarLoadFuture = null;
+    _charsCache.clear();
+  }
+
   static Future<Directory> avatarDir() async {
     final path = _avatarDirPath ??= p.join((await getApplicationSupportDirectory()).path, 'char_avatar');
     return Directory(path).create(recursive: true);
   }
 
-  /// 初始化目录缓存，方便列表页同步解析本地头像文件而不闪烁。
-  static Future<void> ensureAvatarDirLoaded() async {
-    if (kIsWeb || _avatarDirPath != null) return;
-    try {
-      _avatarDirPath = p.join((await getApplicationSupportDirectory()).path, 'char_avatar');
-    } catch (_) {}
+  /// 初始化目录与文件名内存集合缓存，方便列表页同步解析本地头像而不闪烁且零 `existsSync()` 系统调用。
+  static Future<void> ensureAvatarDirLoaded() {
+    if (kIsWeb || (_avatarDirPath != null && _avatarFiles != null)) return Future.value();
+    return _avatarLoadFuture ??= _loadAvatarDir();
   }
 
-  /// 同步解析本地头像文件（未加载路径或不存在时返回 null）。
+  static Future<void> _loadAvatarDir() async {
+    try {
+      final path = _avatarDirPath ??= p.join((await getApplicationSupportDirectory()).path, 'char_avatar');
+      final dir = Directory(path);
+      final files = <String>{};
+      if (await dir.exists()) {
+        await for (final entity in dir.list()) {
+          if (entity is File) files.add(p.basename(entity.path));
+        }
+      }
+      _avatarFiles = {...?_avatarFiles, ...files};
+    } catch (_) {
+      _avatarFiles ??= <String>{};
+    } finally {
+      _avatarLoadFuture = null;
+    }
+  }
+
+  /// 同步解析本地头像文件（基于内存文件名集合，零 `existsSync()` 系统调用；未加载或不存在时返回 null）。
   static File? localAvatarFileSync(String fileName) {
     if (kIsWeb || fileName.isEmpty || _avatarDirPath == null) return null;
-    final f = File(p.join(_avatarDirPath!, p.basename(fileName)));
-    return f.existsSync() ? f : null;
+    final files = _avatarFiles;
+    if (files == null) return null;
+    final base = p.basename(fileName);
+    if (!files.contains(base)) return null;
+    return File(p.join(_avatarDirPath!, base));
   }
 
   static Future<File?> resolveLocalAvatar(String fileName) async {
@@ -799,20 +866,24 @@ class BookCharacters {
   }
 
   static Future<String> saveLocalAvatar(String charId, Uint8List bytes, {String ext = '.png'}) async {
+    await ensureAvatarDirLoaded();
     final dir = await avatarDir();
     final safeExt = ext.startsWith('.') ? ext : '.$ext';
-    final safeId = charId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    final safeId = charId.replaceAll(_safeAvatarIdRe, '_');
     final fileName = '${safeId}_${DateTime.now().millisecondsSinceEpoch}$safeExt';
     final file = File(p.join(dir.path, fileName));
     await writeFileAtomic(file, bytes);
+    (_avatarFiles ??= <String>{}).add(fileName);
     return fileName;
   }
 
   static Future<void> deleteLocalAvatar(String fileName) async {
     if (kIsWeb || fileName.isEmpty) return;
+    final base = p.basename(fileName);
     try {
-      final f = await resolveLocalAvatar(fileName);
+      final f = await resolveLocalAvatar(base);
       if (f != null && await f.exists()) await f.delete();
+      _avatarFiles?.remove(base);
     } catch (_) {}
   }
 }
@@ -832,10 +903,13 @@ class MoegirlApi {
   final Dio _dio;
 
   static final _kanaRe = RegExp(r'[\u3040-\u309F\u30A0-\u30FF\uFF66-\uFF9F]');
+  static final _wsRe = RegExp(r'\s+');
+  static final _crlfRe = RegExp(r'\r\n?');
+  static final _multiNlRe = RegExp(r'\n{3,}');
 
   /// 判断一段简介是否以日文为主（含较多平假名/片假名）。
   static bool isMostlyJapanese(String text) {
-    final compact = text.replaceAll(RegExp(r'\s+'), '');
+    final compact = text.replaceAll(_wsRe, '');
     if (compact.isEmpty) return false;
     final kana = _kanaRe.allMatches(compact).length;
     return kana >= 3 && (kana >= 6 || kana * 10 >= compact.length);
@@ -860,7 +934,7 @@ class MoegirlApi {
       if (page is! Map || page.containsKey('missing')) continue;
       final raw = (page['extract'] as String?)?.trim() ?? '';
       if (raw.isEmpty) continue;
-      final cleaned = raw.replaceAll(RegExp(r'\r\n?'), '\n').replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
+      final cleaned = raw.replaceAll(_crlfRe, '\n').replaceAll(_multiNlRe, '\n\n').trim();
       if (cleaned.isNotEmpty) return cleaned;
     }
     return null;
@@ -886,12 +960,10 @@ class MoegirlApi {
   }
 }
 
-final moegirlApiProvider = Provider<MoegirlApi>((ref) {
-  final store = ref.watch(sessionStoreProvider);
-  ref.watch(proxyProvider);
-  ref.watch(nativeNetProvider);
+final moegirlApiProvider = Provider.autoDispose<MoegirlApi>((ref) {
+  final adapter = ref.watch(sharedHttpAdapterProvider);
   final dio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 10), receiveTimeout: const Duration(seconds: 15), headers: {'User-Agent': 'ark_novel (https://github.com/chenshi221/ark_novel)'}))
-    ..httpClientAdapter = store.adapter();
+    ..httpClientAdapter = adapter;
   ref.onDispose(dio.close);
   return MoegirlApi(dio);
 });

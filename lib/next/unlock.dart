@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show gzip;
+import 'dart:isolate' show TransferableTypedData;
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
@@ -115,7 +118,7 @@ class UnlockService {
   final Ref _ref;
   final Dio Function()? apiDioBuilder;
   final Dio Function()? txtDioBuilder;
-  final _importing = <String, Future<void>>{};
+  final _importing = <String, _InflightImport>{};
   Dio? _apiDio;
   Dio? _txtDio;
 
@@ -138,9 +141,8 @@ class UnlockService {
 
   Dio _createApiDio() {
     if (apiDioBuilder != null) return apiDioBuilder!();
-    final store = _ref.read(sessionStoreProvider);
     return Dio(BaseOptions(responseType: ResponseType.bytes, connectTimeout: const Duration(seconds: 12), receiveTimeout: const Duration(seconds: 30)))
-      ..httpClientAdapter = store.adapter();
+      ..httpClientAdapter = _ref.read(sharedHttpAdapterProvider);
   }
 
   Dio _createTxtDio() {
@@ -154,7 +156,7 @@ class UnlockService {
         receiveTimeout: const Duration(seconds: 18),
         headers: {'Accept': '*/*'},
       ),
-    )..httpClientAdapter = store.adapter();
+    )..httpClientAdapter = _ref.read(sharedHttpAdapterProvider);
     dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) {
@@ -166,7 +168,10 @@ class UnlockService {
     return dio;
   }
 
-  Future<Content> chapter(String aid, String cid, Future<List<CatVolume>> Function() catalogue) async {
+  Future<Content> chapter(String aid, String cid, Future<List<CatVolume>> Function() catalogue, {CancelToken? cancelToken}) async {
+    if (cancelToken?.isCancelled == true) {
+      throw cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: 'unlock:$aid:$cid'), reason: 'cancelled');
+    }
     final addon = UnlockAddonStore.current;
     if (addon == null) {
       throw const ChapterLockedException('尚未导入妙妙小工具扩展包。');
@@ -174,8 +179,9 @@ class UnlockService {
 
     if (addon.api != null && apiEnabled) {
       try {
-        return await _fetchFromApi(addon.api!, aid, cid);
+        return await _fetchFromApi(addon.api!, aid, cid, cancelToken: cancelToken);
       } catch (e) {
+        if ((e is DioException && e.type == DioExceptionType.cancel) || cancelToken?.isCancelled == true) rethrow;
         if (addon.fullText == null) {
           if (e is ChapterLockedException) rethrow;
           throw ChapterLockedException('$e');
@@ -203,22 +209,82 @@ class UnlockService {
     final lastTs = (seen?['ts'] as int?) ?? 0;
     final stale = DateTime.now().millisecondsSinceEpoch - lastTs > const Duration(minutes: 30).inMilliseconds;
     if (had || !known || stale) {
-      await (_importing[aid] ??= _importFullText(fullText, aid, catalogue).whenComplete(() {
-        _importing.remove(aid);
-      }));
+      await _importFullTextSingleFlight(fullText, aid, catalogue, cancelToken: cancelToken);
       final c = await cached();
       if (c != null) return c;
     }
     throw ChapterLockedException(fullText.lockedMessage);
   }
 
-  Future<Content> _fetchFromApi(UnlockApiRule rule, String aid, String cid) async {
+  Future<void> _importFullTextSingleFlight(
+    UnlockFullTextRule rule,
+    String aid,
+    Future<List<CatVolume>> Function() catalogue, {
+    CancelToken? cancelToken,
+  }) {
+    if (cancelToken?.isCancelled == true) {
+      return Future.error(cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: 'unlock:txt:$aid'), reason: 'cancelled'));
+    }
+    var entry = _importing[aid];
+    if (entry != null && entry.internalCancel.isCancelled) {
+      _importing.remove(aid);
+      entry = null;
+    }
+    if (entry == null) {
+      final internalCancel = CancelToken();
+      final created = _InflightImport(internalCancel);
+      _importing[aid] = created;
+      created.future = _importFullText(rule, aid, catalogue, cancelToken: internalCancel).whenComplete(() {
+        if (identical(_importing[aid], created)) _importing.remove(aid);
+      });
+      entry = created;
+    }
+    final active = entry;
+    active.waiters++;
+    if (cancelToken == null) {
+      return active.future.whenComplete(() => active.waiters--);
+    }
+    final done = Completer<void>();
+    var released = false;
+    void release({required bool cancelled}) {
+      if (released) return;
+      released = true;
+      active.waiters--;
+      if (cancelled && active.waiters <= 0 && !active.internalCancel.isCancelled) {
+        if (identical(_importing[aid], active)) _importing.remove(aid);
+        active.internalCancel.cancel(cancelToken.cancelError?.error ?? 'cancelled');
+      }
+    }
+
+    unawaited(
+      active.future.then(
+        (_) {
+          release(cancelled: false);
+          if (!done.isCompleted) done.complete();
+        },
+        onError: (Object e, StackTrace st) {
+          release(cancelled: false);
+          if (!done.isCompleted) done.completeError(e, st);
+        },
+      ),
+    );
+    unawaited(
+      cancelToken.whenCancel.then((err) {
+        release(cancelled: true);
+        if (!done.isCompleted) done.completeError(err);
+      }),
+    );
+    return done.future;
+  }
+
+  Future<Content> _fetchFromApi(UnlockApiRule rule, String aid, String cid, {CancelToken? cancelToken}) async {
     final vars = {'aid': aid, 'cid': cid};
     final raw = await _requestApi(
       rule,
       body: renderAddonTemplate(rule.bodyTemplate, vars),
       query: rule.queryTemplate == null ? null : renderAddonTemplate(rule.queryTemplate!, vars),
       accept: (value) => value.trim().isNotEmpty,
+      cancelToken: cancelToken,
     );
     return parseApiChapter(rule, raw);
   }
@@ -228,10 +294,14 @@ class UnlockService {
     required String body,
     String? query,
     bool Function(String text)? accept,
+    CancelToken? cancelToken,
   }) async {
     final dio = _getApiDio();
     final failures = <String>[];
     for (final endpoint in rule.endpoints) {
+      if (cancelToken?.isCancelled == true) {
+        throw cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: endpoint), reason: 'cancelled');
+      }
       try {
         final targetUrl = query == null || query.isEmpty ? endpoint : (endpoint.contains('?') ? '$endpoint&$query' : '$endpoint?$query');
         final options = Options(
@@ -241,9 +311,9 @@ class UnlockService {
         );
         final Response<dynamic> response;
         if (rule.method == 'GET') {
-          response = await dio.get<dynamic>(targetUrl, options: options);
+          response = await dio.get<dynamic>(targetUrl, options: options, cancelToken: cancelToken);
         } else {
-          response = await dio.post<dynamic>(targetUrl, data: body.isEmpty ? null : body, options: options);
+          response = await dio.post<dynamic>(targetUrl, data: body.isEmpty ? null : body, options: options, cancelToken: cancelToken);
         }
         final text = _decodeResponseText(response.data, rule.responseCharset);
         if (rule.isFailureResponse(text)) {
@@ -256,6 +326,7 @@ class UnlockService {
         }
         return text;
       } on DioException catch (e) {
+        if (e.type == DioExceptionType.cancel || cancelToken?.isCancelled == true) rethrow;
         failures.add('$endpoint: ${_describeDioException(e)}');
       } catch (e) {
         failures.add('$endpoint: $e');
@@ -312,34 +383,68 @@ class UnlockService {
     return '${ok ? '接口测试成功' : '接口测试失败'}（${results.join('；')}）';
   }
 
-  Future<void> _importFullText(UnlockFullTextRule rule, String aid, Future<List<CatVolume>> Function() catalogue) async {
+  Future<void> _importFullText(
+    UnlockFullTextRule rule,
+    String aid,
+    Future<List<CatVolume>> Function() catalogue, {
+    CancelToken? cancelToken,
+  }) async {
     final cat = await catalogue();
+    if (cancelToken?.isCancelled == true) {
+      throw cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: 'unlock:txt:$aid'), reason: 'cancelled');
+    }
     final all = [for (final v in cat) ...v.chapters];
     final tickets = {for (final c in all) c.cid: ChapterCache.ticket(aid, c.cid)};
     final bookTicket = ChapterCache.ticket(aid, '').$1;
-    final bytes = await _fetchFullTextBytes(rule, aid);
-    final (texts, title) = await compute(_splitFullTextTask, (
-      bytes: bytes,
-      catalogue: cat,
-      charset: rule.charset,
-      decodeEntities: rule.decodeEntities,
-      titlePattern: rule.titlePattern,
-      separatorPattern: rule.separatorPattern,
-      bannerContainsAny: rule.bannerContainsAny,
-    ));
-    if (texts.isEmpty) {
+    final bytes = await _fetchFullTextBytes(rule, aid, cancelToken: cancelToken);
+    if (cancelToken?.isCancelled == true) {
+      throw cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: 'unlock:txt:$aid'), reason: 'cancelled');
+    }
+    final Map<String, ({int length, Uint8List? gzipped, String? text})> packedChapters;
+    final String? title;
+    if (kIsWeb) {
+      final (texts, t) = splitFullTextByCatalogue(
+        bytes,
+        cat,
+        charset: rule.charset,
+        decodeEntities: rule.decodeEntities,
+        titlePattern: rule.titlePattern,
+        separatorPattern: rule.separatorPattern,
+        bannerContainsAny: rule.bannerContainsAny,
+      );
+      packedChapters = {for (final e in texts.entries) e.key: (length: e.value.length, gzipped: null, text: e.value)};
+      title = t;
+    } else {
+      final transferable = TransferableTypedData.fromList([bytes]);
+      final (rawPacked, t) = await compute(_splitAndCompressFullTextTask, (
+        data: transferable,
+        catalogue: cat,
+        charset: rule.charset,
+        decodeEntities: rule.decodeEntities,
+        titlePattern: rule.titlePattern,
+        separatorPattern: rule.separatorPattern,
+        bannerContainsAny: rule.bannerContainsAny,
+      ));
+      packedChapters = {
+        for (final e in rawPacked.entries) e.key: (length: e.value.length, gzipped: e.value.gzipped.materialize().asUint8List(), text: null),
+      };
+      title = t;
+    }
+    if (packedChapters.isEmpty) {
       throw ChapterLockedException(rule.mismatchMessage);
     }
     if (ChapterCache.ticket(aid, '').$1 != bookTicket) return;
     final matchRule = UnlockAddonStore.current?.match;
-    for (final MapEntry(key: cid, value: text) in texts.entries) {
-      final ticket = tickets[cid] ?? ChapterCache.ticket(aid, cid);
-      final old = await ChapterCache.get(aid, cid);
-      final oldLocked = old != null && (matchRule?.matches(old.text, old.images) ?? false);
-      if (old == null || oldLocked) {
-        await ChapterCache.put(aid, cid, Content(text: text, images: const []), ticket: ticket);
+    final batch = <String, ({int length, List<String> images, Uint8List? gzipped, String? text})>{};
+    for (final MapEntry(key: cid, value: item) in packedChapters.entries) {
+      if (ChapterCache.has(aid, cid)) {
+        final old = await ChapterCache.get(aid, cid);
+        final oldLocked = old != null && (matchRule?.matches(old.text, old.images) ?? false);
+        if (old != null && !oldLocked) continue;
       }
+      batch[cid] = (length: item.length, images: const <String>[], gzipped: item.gzipped, text: item.text);
     }
+    await ChapterCache.putBatch(aid, batch, bookTicket: bookTicket, tickets: tickets);
     // 仅当用户已经手动开启过该书的离线缓存（meta 已存在）时才刷新 meta；单章在线试读不把整本书塞进「离线缓存」列表，也不阻止自动清理
     if (!Incognito.on && ChapterCache.offline(aid) && all.isNotEmpty) {
       final book = LibraryStore.get(aid);
@@ -348,17 +453,21 @@ class UnlockService {
       final img = [book?['img'] as String?, seen?.img].whereType<String>().where((e) => e.isNotEmpty).firstOrNull ?? Wenku8Parser.coverUrl(aid);
       await ChapterCache.setMeta(aid, name, all.length, img, all.first.cid);
     }
-    await _box.put('unlock:txt:$aid', {'m': texts.keys.toList(), 'a': [for (final c in all) c.cid], 'ts': DateTime.now().millisecondsSinceEpoch});
+    await _box.put('unlock:txt:$aid', {'m': packedChapters.keys.toList(), 'a': [for (final c in all) c.cid], 'ts': DateTime.now().millisecondsSinceEpoch});
   }
 
-  Future<Uint8List> _fetchFullTextBytes(UnlockFullTextRule rule, String aid) async {
+  Future<Uint8List> _fetchFullTextBytes(UnlockFullTextRule rule, String aid, {CancelToken? cancelToken}) async {
     final dio = _getTxtDio();
     Object? lastError;
     for (var i = 0; i < rule.urlTemplates.length; i++) {
       final url = renderAddonTemplate(rule.urlTemplates[i], {'aid': aid, 'node': '${i + 1}'});
+      if (cancelToken?.isCancelled == true) {
+        throw cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: url), reason: 'cancelled');
+      }
       try {
         final response = await dio.get<ResponseBody>(
           url,
+          cancelToken: cancelToken,
           options: Options(
             responseType: ResponseType.stream,
             headers: rule.headers.isEmpty ? null : rule.headers,
@@ -369,9 +478,7 @@ class UnlockService {
           lastError = ChapterLockedException('节点 ${i + 1} 返回空内容');
           continue;
         }
-        final builder = BytesBuilder(copy: false);
-        await body.stream.timeout(const Duration(seconds: 30)).forEach(builder.add).timeout(const Duration(seconds: 120));
-        final data = builder.takeBytes();
+        final data = await _readStreamBytes(body.stream, url, cancelToken: cancelToken);
         if (data.isEmpty) {
           lastError = ChapterLockedException('节点 ${i + 1} 返回空内容');
           continue;
@@ -382,11 +489,50 @@ class UnlockService {
           continue;
         }
         return data;
+      } on DioException catch (e) {
+        if (e.type == DioExceptionType.cancel || cancelToken?.isCancelled == true) rethrow;
+        lastError = e;
       } catch (e) {
         lastError = e;
       }
     }
     throw lastError ?? const ChapterLockedException('整本文本下载失败');
+  }
+
+  static Future<Uint8List> _readStreamBytes(Stream<Uint8List> stream, String url, {CancelToken? cancelToken}) async {
+    final builder = BytesBuilder(copy: false);
+    if (cancelToken == null) {
+      await stream.timeout(const Duration(seconds: 30)).forEach(builder.add).timeout(const Duration(seconds: 120));
+      return builder.takeBytes();
+    }
+    if (cancelToken.isCancelled) {
+      throw cancelToken.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: url), reason: 'cancelled');
+    }
+    final done = Completer<Uint8List>();
+    late final StreamSubscription<Uint8List> sub;
+    sub = stream.timeout(const Duration(seconds: 30)).listen(
+      builder.add,
+      onError: (Object err, StackTrace st) {
+        if (!done.isCompleted) done.completeError(err, st);
+      },
+      onDone: () {
+        if (!done.isCompleted) done.complete(builder.takeBytes());
+      },
+      cancelOnError: true,
+    );
+    unawaited(
+      cancelToken.whenCancel.then((err) {
+        unawaited(sub.cancel());
+        if (!done.isCompleted) done.completeError(err);
+      }),
+    );
+    return done.future.timeout(
+      const Duration(seconds: 120),
+      onTimeout: () {
+        unawaited(sub.cancel());
+        throw TimeoutException('下载整本文本超时', const Duration(seconds: 120));
+      },
+    );
   }
 
   static Content parseApiChapter(UnlockApiRule rule, String rawText) {
@@ -401,7 +547,7 @@ class UnlockService {
           });
 
     final paragraphs = <String>[];
-    for (final line in withoutImages.split(RegExp(r'\r\n|\r|\n'))) {
+    for (final line in withoutImages.split(_lineSplitRe)) {
       final value = line.trim();
       if (value.isEmpty) continue;
       if (rule.separatorRegex != null && rule.separatorRegex!.hasMatch(value)) continue;
@@ -420,8 +566,16 @@ class UnlockService {
   }
 }
 
-typedef _SplitArgs = ({
-  Uint8List bytes,
+class _InflightImport {
+  _InflightImport(this.internalCancel);
+
+  final CancelToken internalCancel;
+  late final Future<void> future;
+  int waiters = 0;
+}
+
+typedef _SplitTransferArgs = ({
+  TransferableTypedData data,
   List<CatVolume> catalogue,
   String charset,
   bool decodeEntities,
@@ -430,15 +584,28 @@ typedef _SplitArgs = ({
   List<String> bannerContainsAny,
 });
 
-(Map<String, String>, String?) _splitFullTextTask(_SplitArgs args) => splitFullTextByCatalogue(
-  args.bytes,
-  args.catalogue,
-  charset: args.charset,
-  decodeEntities: args.decodeEntities,
-  titlePattern: args.titlePattern,
-  separatorPattern: args.separatorPattern,
-  bannerContainsAny: args.bannerContainsAny,
-);
+(Map<String, ({int length, TransferableTypedData gzipped})>, String?) _splitAndCompressFullTextTask(_SplitTransferArgs args) {
+  final bytes = args.data.materialize().asUint8List();
+  final (texts, title) = splitFullTextByCatalogue(
+    bytes,
+    args.catalogue,
+    charset: args.charset,
+    decodeEntities: args.decodeEntities,
+    titlePattern: args.titlePattern,
+    separatorPattern: args.separatorPattern,
+    bannerContainsAny: args.bannerContainsAny,
+  );
+  final packed = <String, ({int length, TransferableTypedData gzipped})>{};
+  for (final e in texts.entries) {
+    final gz = Uint8List.fromList(gzip.encode(utf8.encode(e.value)));
+    packed[e.key] = (length: e.value.length, gzipped: TransferableTypedData.fromList([gz]));
+  }
+  return (packed, title);
+}
+
+final _lineSplitRe = RegExp(r'\r\n|\r|\n');
+final _fullWidthAlnumRe = RegExp('[０-９Ａ-Ｚａ-ｚ]');
+final _whitespaceRe = RegExp(r'\s+');
 
 /// 通用整本文本解码并按目录拆章：供后台 isolate 与单测复用。
 (Map<String, String>, String?) splitFullTextByCatalogue(
@@ -451,7 +618,7 @@ typedef _SplitArgs = ({
   List<String> bannerContainsAny = const [],
 }) {
   var text = decodeBytesWithCharset(bytes, charset);
-  if (decodeEntities) text = decodeNumericEntities(text);
+  if (decodeEntities && text.contains('&#')) text = decodeNumericEntities(text);
 
   final heads = <String, List<String>>{};
   for (final v in catalogue) {
@@ -469,7 +636,7 @@ typedef _SplitArgs = ({
     paragraphs.clear();
   }
 
-  for (final line in text.split(RegExp(r'\r\n|\r|\n'))) {
+  for (final line in text.split(_lineSplitRe)) {
     final t = line.trim();
     if (t.isEmpty) continue;
     if (line == line.trimLeft()) {
@@ -497,16 +664,18 @@ typedef _SplitArgs = ({
 
 final _numericEntityPattern = RegExp(r'&#([xX][0-9a-fA-F]+|\d+);');
 
-String decodeNumericEntities(String s) => s.replaceAllMapped(_numericEntityPattern, (m) {
-  final v = m[1]!;
-  final code = (v.startsWith('x') || v.startsWith('X')) ? int.tryParse(v.substring(1), radix: 16) : int.tryParse(v);
-  return code == null || code < 0 || code > 0x10FFFF ? m[0]! : String.fromCharCode(code);
-});
+String decodeNumericEntities(String s) => !s.contains('&#')
+    ? s
+    : s.replaceAllMapped(_numericEntityPattern, (m) {
+        final v = m[1]!;
+        final code = (v.startsWith('x') || v.startsWith('X')) ? int.tryParse(v.substring(1), radix: 16) : int.tryParse(v);
+        return code == null || code < 0 || code > 0x10FFFF ? m[0]! : String.fromCharCode(code);
+      });
 
-String _normalizeHeadingKey(String s) => decodeNumericEntities(s)
-    .replaceAllMapped(RegExp('[０-９Ａ-Ｚａ-ｚ]'), (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - 0xFEE0))
+String _normalizeHeadingKey(String s) => (s.contains('&#') ? decodeNumericEntities(s) : s)
+    .replaceAllMapped(_fullWidthAlnumRe, (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - 0xFEE0))
     .toLowerCase()
-    .replaceAll(RegExp(r'\s+'), '');
+    .replaceAll(_whitespaceRe, '');
 
 bool _matchesAnyLower(String line, List<String> needles) {
   if (needles.isEmpty) return false;
@@ -546,8 +715,7 @@ String _describeDioException(DioException error) {
 
 final unlockServiceProvider = Provider<UnlockService>((ref) {
   try {
-    ref.watch(proxyProvider);
-    ref.watch(nativeNetProvider);
+    ref.watch(sharedHttpAdapterProvider);
   } catch (e) {
     // 部分纯单测未覆盖 sessionStoreProvider，跳过代理监听以便照常构造服务对象
     if (e is! UnimplementedError && !e.toString().contains('UnimplementedError')) rethrow;

@@ -6,6 +6,7 @@ import 'package:local_auth/local_auth.dart';
 
 import 'app_prefs.dart';
 import 'incognito.dart';
+import 'motion.dart';
 import 'text.dart';
 
 bool get lockSupported => !kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS || defaultTargetPlatform == TargetPlatform.macOS);
@@ -132,10 +133,21 @@ class _AppGuardState extends ConsumerState<AppGuard> with WidgetsBindingObserver
               child: IgnorePointer(ignoring: _locked, child: widget.child),
             ),
           ),
+          Positioned.fill(
+            child: AppReveal(
+              visible: _locked,
+              offset: Offset.zero,
+              beginScale: 1.0,
+              // 上锁必须立刻遮挡内容防泄露，解锁时由底色柔滑淡出露出界面（锁屏控件本身即刻卸载不拦交互）
+              duration: Duration.zero,
+              reverseDuration: AppMotion.fast,
+              child: ColoredBox(color: Theme.of(context).colorScheme.surface),
+            ),
+          ),
           if (_locked)
             Positioned.fill(
               child: Material(
-                color: Theme.of(context).colorScheme.surface,
+                type: MaterialType.transparency,
                 child: Center(
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 32),

@@ -18,7 +18,15 @@ class SplashPage extends StatelessWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                ClipRRect(borderRadius: BorderRadius.circular(24), child: Image.asset('assets/images/logo.png', height: 96)),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(24),
+                  child: Builder(
+                    builder: (context) {
+                      final px = (96 * MediaQuery.devicePixelRatioOf(context)).round();
+                      return Image.asset('assets/images/logo.png', height: 96, cacheWidth: px, cacheHeight: px);
+                    },
+                  ),
+                ),
                 const SizedBox(height: 24),
                 Text('Ark Novel', style: theme.textTheme.headlineMedium),
                 const SizedBox(height: 32),

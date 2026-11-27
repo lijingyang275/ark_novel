@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart' hide Text;
+import 'motion.dart';
 import 'text.dart';
 
 /// 「遗迹·晴空」主题的美术：全部用代码画的扁平插画（天空、两层云、科林斯石柱、断墙、芥末色三角旗），
@@ -41,8 +42,22 @@ class RuinsScene extends StatefulWidget {
 }
 
 class _RuinsSceneState extends State<RuinsScene> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  // 90 秒完整周期内将视觉重绘限频至约 24fps（每 ~41.7ms 更新一次），在高刷屏上大幅削减光栅化开销。
+  static const _minFrameDelta = 1.0 / (90.0 * 24.0);
+
   late final _t = AnimationController(vsync: this, duration: const Duration(seconds: 90));
+  final _frame = ValueNotifier<double>(0);
+  double _lastEmitted = -1;
   bool _active = true;
+
+  void _onTick() {
+    final v = _t.value;
+    final delta = v >= _lastEmitted ? (v - _lastEmitted) : (1.0 - _lastEmitted + v);
+    if (_lastEmitted < 0 || delta >= _minFrameDelta) {
+      _lastEmitted = v;
+      _frame.value = v;
+    }
+  }
 
   void _syncTicker() {
     if (!mounted) return;
@@ -53,6 +68,7 @@ class _RuinsSceneState extends State<RuinsScene> with SingleTickerProviderStateM
   @override
   void initState() {
     super.initState();
+    _t.addListener(_onTick);
     WidgetsBinding.instance.addObserver(this);
   }
 
@@ -77,28 +93,49 @@ class _RuinsSceneState extends State<RuinsScene> with SingleTickerProviderStateM
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _t.removeListener(_onTick);
     _t.dispose();
+    _frame.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => RepaintBoundary(
-    child: CustomPaint(painter: _ScenePainter(RuinsColors.of(context), _t, Theme.of(context).brightness == Brightness.dark, widget.horizon, widget.ceiling), size: Size.infinite),
-  );
+  Widget build(BuildContext context) {
+    final c = RuinsColors.of(context);
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return ClipRect(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          RepaintBoundary(
+            child: CustomPaint(painter: _StaticSkyPainter(c, dark), size: Size.infinite),
+          ),
+          RepaintBoundary(
+            child: CustomPaint(painter: _DynamicCloudsPainter(c, _frame), size: Size.infinite),
+          ),
+          RepaintBoundary(
+            child: CustomPaint(painter: _StaticRuinsPainter(c, widget.horizon, widget.ceiling), size: Size.infinite),
+          ),
+          if (widget.ceiling == 0)
+            RepaintBoundary(
+              child: CustomPaint(painter: _DynamicPennantPainter(c, _frame, widget.ceiling), size: Size.infinite),
+            ),
+        ],
+      ),
+    );
+  }
 }
 
-class _ScenePainter extends CustomPainter {
-  _ScenePainter(this.c, this.t, this.dark, this.horizon, this.ceiling) : super(repaint: t);
+/// 静态背景天空层：天空色带、星星与月牙（深色）或太阳与飞鸟（浅色），不随云旗动画重绘。
+class _StaticSkyPainter extends CustomPainter {
+  _StaticSkyPainter(this.c, this.dark);
 
   final RuinsColors c;
-  final Animation<double> t;
   final bool dark;
-  final double horizon, ceiling;
 
   @override
   void paint(Canvas canvas, Size size) {
     final w = size.width, h = size.height;
-    canvas.clipRect(Offset.zero & size);
     final p = Paint()..isAntiAlias = true;
 
     // 天空：上深下浅两段，接缝藏在远云后面
@@ -125,33 +162,118 @@ class _ScenePainter extends CustomPainter {
         ..strokeCap = StrokeCap.round;
       for (final (x, y, s) in [(0.62, 0.16, 5.0), (0.67, 0.12, 4.0), (0.58, 0.22, 3.5)]) {
         final o = Offset(w * x, h * y);
-        canvas.drawPath(Path()..moveTo(o.dx - s, o.dy - s * 0.4)..quadraticBezierTo(o.dx - s * 0.4, o.dy - s * 0.6, o.dx, o.dy)..quadraticBezierTo(o.dx + s * 0.4, o.dy - s * 0.6, o.dx + s, o.dy - s * 0.4), bird);
+        canvas.drawPath(
+          Path()
+            ..moveTo(o.dx - s, o.dy - s * 0.4)
+            ..quadraticBezierTo(o.dx - s * 0.4, o.dy - s * 0.6, o.dx, o.dy)
+            ..quadraticBezierTo(o.dx + s * 0.4, o.dy - s * 0.6, o.dx + s, o.dy - s * 0.4),
+          bird,
+        );
       }
     }
+  }
 
+  @override
+  bool shouldRepaint(_StaticSkyPainter old) => old.c != c || old.dark != dark;
+}
+
+/// 动态双层云带：预缓存完整平铺周期的 [Path]，重绘时仅按水平偏移平移并复用同一 [Paint]，零逐帧 Path 分配。
+class _DynamicCloudsPainter extends CustomPainter {
+  _DynamicCloudsPainter(this.c, this.t) : super(repaint: t);
+
+  final RuinsColors c;
+  final ValueNotifier<double> t;
+
+  static final _paint = Paint()..isAntiAlias = true;
+  static final _pathCache = <(int, int, int, int), (double, Path)>{};
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width, h = size.height;
+    if (w <= 0 || h <= 0) return;
     final drift = t.value * w;
     // 远处一层淡紫的云，飘得慢；近处奶油色的云带一层偏紫的阴影，飘得快一点
-    _cloudBand(canvas, size, h * 0.6, h * 0.17, c.cloudBack, c.cloudBack, drift * 0.35, 3);
-    _cloudBand(canvas, size, h * 0.46, h * 0.15, c.cloud, c.cloudShade, drift * 0.7, 11);
+    _cloudBand(canvas, w, h * 0.6, h * 0.17, c.cloudBack, c.cloudBack, drift * 0.35, 3);
+    _cloudBand(canvas, w, h * 0.46, h * 0.15, c.cloud, c.cloudShade, drift * 0.7, 11);
+  }
+
+  /// 一排起伏的云：底边平，顶上一串大小不一的圆，阴影层整体往右下偏一点；横向循环平移。
+  void _cloudBand(Canvas canvas, double w, double base, double r, Color fill, Color shade, double dx, int seed) {
+    final key = (w.round(), base.round(), r.round(), seed);
+    var cached = _pathCache.remove(key);
+    if (cached == null) {
+      if (_pathCache.length >= 16) _pathCache.remove(_pathCache.keys.first);
+      final rnd = math.Random(seed);
+      final bumps = <(double, double, double)>[];
+      var x = 0.0;
+      while (x < w * 2) {
+        final rr = r * (0.55 + rnd.nextDouble() * 0.6);
+        bumps.add((x, base - rr * (0.2 + rnd.nextDouble() * 0.5), rr));
+        x += rr * 1.25;
+      }
+      final period = x;
+      final totalSpan = period + w + 20;
+      final path = Path()..addRect(Rect.fromLTWH(-10, base - r * 0.2, totalSpan + 20, r * 0.75));
+      for (final (bx, by, br) in bumps) {
+        for (final k in const [-1, 0, 1]) {
+          final cx = bx + k * period;
+          if (cx + br < -10 || cx - br > totalSpan + 10) continue;
+          path.addOval(Rect.fromCircle(center: Offset(cx, by), radius: br));
+          // 下沿也鼓出一点，云才是一团一团的
+          path.addOval(Rect.fromCircle(center: Offset(cx + br * 0.5, base + r * 0.5), radius: br * 0.5));
+        }
+      }
+      cached = (period, path);
+    }
+    _pathCache[key] = cached;
+    final (period, path) = cached;
+    final shift = dx % period;
+    canvas.save();
+    if (shade != fill) {
+      canvas.translate(-shift + 3, 5);
+      canvas.drawPath(path, _paint..color = shade);
+      canvas.translate(-3, -5);
+    } else {
+      canvas.translate(-shift, 0);
+    }
+    canvas.drawPath(path, _paint..color = fill);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_DynamicCloudsPainter old) => old.c != c || old.t != t;
+}
+
+/// 静态建筑遗迹层：科林斯石柱与前景断墙，独立 RepaintBoundary 缓存，不随动画重绘。
+class _StaticRuinsPainter extends CustomPainter {
+  _StaticRuinsPainter(this.c, this.horizon, this.ceiling);
+
+  final RuinsColors c;
+  final double horizon, ceiling;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width, h = size.height;
+    final p = Paint()..isAntiAlias = true;
+    final flute = Paint()
+      ..color = c.stoneShade.withValues(alpha: 0.55)
+      ..strokeWidth = 1;
+    final joint = Paint()
+      ..color = c.stoneShade
+      ..strokeWidth = 1.2;
+    final leaf = Paint()..color = c.stoneShade.withValues(alpha: 0.7);
 
     // 石柱：两边高的、左中一根断柱（旗子插在上面）、右中一根矮一点的
     final ground = h * horizon;
     final cw = math.min(h * 0.19, w * 0.085);
     double top(double f) => h * (ceiling + f * (1 - ceiling)); // 有 ceiling 时整体压低，高低错落还在
-    final brokenTop = top(0.5);
     for (final (x, f, broken) in [(0.07, 0.08, false), (0.3, 0.5, true), (0.72, 0.16, false), (0.94, 0.04, false)]) {
-      _column(canvas, Offset(w * x, top(f)), ground + 2, cw, broken);
+      _column(canvas, Offset(w * x, top(f)), ground + 2, cw, broken, p, flute, joint, leaf);
     }
 
-    // 三角旗：杆子斜插在断柱顶上，长长的旗面往右下垂，随时间轻轻摆
-    final from = Offset(w * 0.3 - cw * 0.2, brokenTop + cw * 0.4);
-    final to = Offset(w * 0.47, math.max(brokenTop - h * 0.34, h * 0.06));
-    if (ceiling == 0) _pennant(canvas, from, to, t.value, h); // 顶栏上有按钮时不画旗子，免得挡住
-
     // 断墙：一排石块，顶上一道亮色压顶
-    final p2 = Paint();
-    canvas.drawRect(Rect.fromLTWH(0, ground, w, h - ground), p2..color = c.wall);
-    canvas.drawRect(Rect.fromLTWH(0, ground, w, 3), p2..color = c.stoneLight);
+    canvas.drawRect(Rect.fromLTWH(0, ground, w, h - ground), p..color = c.wall);
+    canvas.drawRect(Rect.fromLTWH(0, ground, w, 3), p..color = c.stoneLight);
     final line = Paint()
       ..color = c.mortar
       ..strokeWidth = 1.2;
@@ -162,48 +284,8 @@ class _ScenePainter extends CustomPainter {
     }
   }
 
-  static final _bumpCache = <(int, int, int, int), (double, List<(double, double, double)>)>{};
-
-  /// 一排起伏的云：底边平，顶上一串大小不一的圆，阴影层整体往右下偏一点；横向循环平移。
-  void _cloudBand(Canvas canvas, Size size, double base, double r, Color fill, Color shade, double dx, int seed) {
-    final w = size.width;
-    final key = (w.round(), base.round(), r.round(), seed);
-    var cached = _bumpCache[key];
-    if (cached == null) {
-      if (_bumpCache.length > 24) _bumpCache.remove(_bumpCache.keys.first);
-      final rnd = math.Random(seed);
-      final bumps = <(double, double, double)>[];
-      var x = 0.0;
-      while (x < w * 2) {
-        final rr = r * (0.55 + rnd.nextDouble() * 0.6);
-        bumps.add((x, base - rr * (0.2 + rnd.nextDouble() * 0.5), rr));
-        x += rr * 1.25;
-      }
-      cached = _bumpCache[key] = (x, bumps);
-    }
-    final (period, bumps) = cached;
-    Path band(double ox, double oy) {
-      final path = Path()..addRect(Rect.fromLTWH(-10, base + oy - r * 0.2, w + 20, r * 0.75));
-      for (final (bx, by, br) in bumps) {
-        for (final k in [-1, 0, 1]) {
-          final cx = (bx - dx % period) + k * period + ox;
-          if (cx + br < -10 || cx - br > w + 10) continue;
-          path.addOval(Rect.fromCircle(center: Offset(cx, by + oy), radius: br));
-          // 下沿也鼓出一点，云才是一团一团的
-          path.addOval(Rect.fromCircle(center: Offset(cx + br * 0.5, base + oy + r * 0.5), radius: br * 0.5));
-        }
-      }
-      return path;
-    }
-
-    final p = Paint()..isAntiAlias = true;
-    if (shade != fill) canvas.drawPath(band(3, 5), p..color = shade);
-    canvas.drawPath(band(0, 0), p..color = fill);
-  }
-
   /// 科林斯柱：基座两级、柱身带竖槽（左亮右暗）、柱头一圈涡卷。[broken] 时柱顶是斜着断开的、没有柱头。
-  void _column(Canvas canvas, Offset top, double bottom, double width, bool broken) {
-    final p = Paint()..isAntiAlias = true;
+  void _column(Canvas canvas, Offset top, double bottom, double width, bool broken, Paint p, Paint flute, Paint joint, Paint leaf) {
     final shaft = width * 0.72;
     final left = top.dx - shaft / 2;
     final capH = width * 0.55;
@@ -226,14 +308,11 @@ class _ScenePainter extends CustomPainter {
     canvas.clipPath(body);
     canvas.drawRect(Rect.fromLTRB(left, shaftTop - width, left + shaft * 0.22, bottom), p..color = c.stoneLight);
     canvas.drawRect(Rect.fromLTRB(left + shaft * 0.74, shaftTop - width, left + shaft, bottom), p..color = c.stoneShade);
-    final flute = Paint()
-      ..color = c.stoneShade.withValues(alpha: 0.55)
-      ..strokeWidth = 1;
-    for (final f in [0.38, 0.56]) {
+    for (final f in const [0.38, 0.56]) {
       canvas.drawLine(Offset(left + shaft * f, shaftTop - width), Offset(left + shaft * f, bottom), flute);
     }
     // 柱身中段一道石块接缝
-    canvas.drawLine(Offset(left, (shaftTop + bottom) / 2), Offset(left + shaft, (shaftTop + bottom) / 2), Paint()..color = c.stoneShade..strokeWidth = 1.2);
+    canvas.drawLine(Offset(left, (shaftTop + bottom) / 2), Offset(left + shaft, (shaftTop + bottom) / 2), joint);
     canvas.restore();
 
     if (!broken) {
@@ -247,52 +326,70 @@ class _ScenePainter extends CustomPainter {
         ..lineTo(top.dx - shaft / 2, y + capH)
         ..close();
       canvas.drawPath(cap, p..color = c.stone);
-      for (final s in [-1, 1]) {
+      for (final s in const [-1, 1]) {
         canvas.drawCircle(Offset(top.dx + s * width * 0.48, y + capH * 0.42), width * 0.12, p..color = c.stoneLight);
         canvas.drawCircle(Offset(top.dx + s * width * 0.48, y + capH * 0.42), width * 0.05, p..color = c.stoneShade);
       }
-      final leaf = Paint()..color = c.stoneShade.withValues(alpha: 0.7);
-      for (final f in [-0.22, 0.0, 0.22]) {
+      for (final f in const [-0.22, 0.0, 0.22]) {
         final lx = top.dx + f * width;
         canvas.drawPath(Path()..moveTo(lx - width * 0.08, y + capH)..quadraticBezierTo(lx, y + capH * 0.35, lx + width * 0.08, y + capH)..close(), leaf);
       }
     }
   }
 
-  void _pennant(Canvas canvas, Offset from, Offset to, double t, double h) {
-    canvas.drawLine(
-      from,
-      to,
-      Paint()
-        ..color = c.pole
-        ..strokeWidth = 2.4
-        ..strokeCap = StrokeCap.round,
-    );
+  @override
+  bool shouldRepaint(_StaticRuinsPainter old) => old.c != c || old.horizon != horizon || old.ceiling != ceiling;
+}
+
+/// 动态前景三角旗层：随限频帧轻摆，复用静态 [Paint] 减少每帧对象分配。
+class _DynamicPennantPainter extends CustomPainter {
+  _DynamicPennantPainter(this.c, this.t, this.ceiling) : super(repaint: t);
+
+  final RuinsColors c;
+  final ValueNotifier<double> t;
+  final double ceiling;
+
+  static final _fillPaint = Paint()..isAntiAlias = true;
+  static final _polePaint = Paint()
+    ..isAntiAlias = true
+    ..strokeWidth = 2.4
+    ..strokeCap = StrokeCap.round;
+  static final _creasePaint = Paint()
+    ..isAntiAlias = true
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.3
+    ..strokeCap = StrokeCap.round;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width, h = size.height;
+    final cw = math.min(h * 0.19, w * 0.085);
+    final brokenTop = h * (ceiling + 0.5 * (1 - ceiling));
+    final from = Offset(w * 0.3 - cw * 0.2, brokenTop + cw * 0.4);
+    final to = Offset(w * 0.47, math.max(brokenTop - h * 0.34, h * 0.06));
+
+    canvas.drawLine(from, to, _polePaint..color = c.pole);
     // 旗面挂在杆子上面那 45%，旗尾往右下拖得很长
     final a = Offset.lerp(from, to, 0.55)!;
-    final wave = math.sin(t * math.pi * 2 * 30);
+    final wave = math.sin(t.value * math.pi * 2 * 30);
     final tail = to + Offset(h * 0.95, h * 0.5 + wave * h * 0.03);
     final flag = Path()
       ..moveTo(to.dx, to.dy)
       ..cubicTo(to.dx + h * 0.35, to.dy + h * 0.02 + wave * 3, tail.dx - h * 0.35, tail.dy - h * 0.18, tail.dx, tail.dy)
       ..cubicTo(tail.dx - h * 0.4, tail.dy - h * 0.02, a.dx + h * 0.3, a.dy + h * 0.06 - wave * 3, a.dx, a.dy)
       ..close();
-    canvas.drawPath(flag, Paint()..color = c.flag);
+    canvas.drawPath(flag, _fillPaint..color = c.flag);
     // 两道折痕阴影，让旗子有布料感
-    final crease = Paint()
-      ..color = c.flagShade
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.3
-      ..strokeCap = StrokeCap.round;
-    for (final k in [0.35, 0.6]) {
+    _creasePaint.color = c.flagShade;
+    for (final k in const [0.35, 0.6]) {
       final s0 = Offset.lerp(a, to, k)!;
-      canvas.drawPath(Path()..moveTo(s0.dx, s0.dy)..quadraticBezierTo(s0.dx + h * 0.3, s0.dy + h * 0.12, tail.dx - h * 0.25 * k, tail.dy - h * 0.08), crease);
+      canvas.drawPath(Path()..moveTo(s0.dx, s0.dy)..quadraticBezierTo(s0.dx + h * 0.3, s0.dy + h * 0.12, tail.dx - h * 0.25 * k, tail.dy - h * 0.08), _creasePaint);
     }
-    canvas.drawCircle(to, 2.6, Paint()..color = c.pole);
+    canvas.drawCircle(to, 2.6, _fillPaint..color = c.pole);
   }
 
   @override
-  bool shouldRepaint(_ScenePainter old) => old.c != c || old.dark != dark || old.horizon != horizon || old.ceiling != ceiling;
+  bool shouldRepaint(_DynamicPennantPainter old) => old.c != c || old.t != t || old.ceiling != ceiling;
 }
 
 /// 底部导航图标：0 发现（折叠地图）、1 书架（石柱）、2 更新（三角旗）、3 我的（骑士头盔）。
@@ -308,7 +405,8 @@ class RuinsNavIcon extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     return AnimatedScale(
       scale: selected ? 1.1 : 1,
-      duration: const Duration(milliseconds: 160),
+      duration: AppMotion.dur(context, AppMotion.fast),
+      curve: AppMotion.snappy,
       child: CustomPaint(size: const Size(26, 26), painter: _NavPainter(index, selected, scheme.primary, scheme.secondary, scheme.onSurfaceVariant, scheme.surface)),
     );
   }
@@ -413,13 +511,15 @@ class PennantBadge extends StatelessWidget {
   final Color textColor;
 
   @override
-  Widget build(BuildContext context) => CustomPaint(
-    painter: _PennantPainter(color),
-    child: Padding(
-      padding: const EdgeInsets.fromLTRB(5, 3, 5, 10),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minWidth: 12),
-        child: Text(text, textAlign: TextAlign.center, style: TextStyle(fontSize: 11, height: 1.2, fontWeight: FontWeight.w700, color: textColor)),
+  Widget build(BuildContext context) => RepaintBoundary(
+    child: CustomPaint(
+      painter: _PennantPainter(color),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(5, 3, 5, 10),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 12),
+          child: Text(text, textAlign: TextAlign.center, style: TextStyle(fontSize: 11, height: 1.2, fontWeight: FontWeight.w700, color: textColor)),
+        ),
       ),
     ),
   );
@@ -440,8 +540,9 @@ class _PennantPainter extends CustomPainter {
       ..lineTo(w / 2, h - 6)
       ..lineTo(0, h)
       ..close();
-    canvas.drawShadow(path, Colors.black, 1.5, false);
-    canvas.drawPath(path, Paint()..color = color);
+    final paint = Paint()..color = const Color(0x33000000);
+    canvas.drawPath(path.shift(const Offset(0, 1.5)), paint);
+    canvas.drawPath(path, paint..color = color);
   }
 
   @override
@@ -457,7 +558,7 @@ class PennantRule extends StatelessWidget {
   final double width;
 
   @override
-  Widget build(BuildContext context) => CustomPaint(size: Size(width, 10), painter: _RulePainter(line, flag));
+  Widget build(BuildContext context) => RepaintBoundary(child: CustomPaint(size: Size(width, 10), painter: _RulePainter(line, flag)));
 }
 
 class _RulePainter extends CustomPainter {

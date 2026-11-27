@@ -1,6 +1,9 @@
 package io.github.chenshi221.ark_novel
 
 import android.Manifest
+import android.appwidget.AppWidgetManager
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -18,7 +21,9 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : AudioServiceFragmentActivity() {
     private val intentChannelName = "ark/system_intents"
     private val readerVolumeChannelName = "ark/reader_volume_keys"
+    private val widgetChannelName = "ark/widget"
     private var readerVolumeChannel: MethodChannel? = null
+    private var widgetChannel: MethodChannel? = null
     private var readerVolumeKeyHandlingEnabled = false
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
@@ -97,6 +102,53 @@ class MainActivity : AudioServiceFragmentActivity() {
             }
         }
 
+        // 桌面小组件「继续阅读」：批量写 SharedPreferences、触发刷新及回传小组件点击链接
+        widgetChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, widgetChannelName)
+        widgetChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "saveAll" -> {
+                    val data = call.arguments as? Map<*, *>
+                    if (data == null) {
+                        result.error("ARG_ERROR", "arguments must be a map", null)
+                        return@setMethodCallHandler
+                    }
+                    val editor = getSharedPreferences(ReadingWidget.PREFS_NAME, Context.MODE_PRIVATE).edit()
+                    for ((k, v) in data) {
+                        val key = k as? String ?: continue
+                        if (v == null) editor.remove(key) else editor.putString(key, v.toString())
+                    }
+                    editor.apply()
+                    result.success(null)
+                }
+
+                "updateWidget" -> {
+                    val manager = AppWidgetManager.getInstance(this)
+                    val ids = manager.getAppWidgetIds(ComponentName(this, ReadingWidget::class.java))
+                    if (ids.isNotEmpty()) {
+                        val updateIntent = Intent(this, ReadingWidget::class.java).apply {
+                            action = AppWidgetManager.ACTION_APPWIDGET_UPDATE
+                            putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, ids)
+                        }
+                        sendBroadcast(updateIntent)
+                    }
+                    result.success(null)
+                }
+
+                "getInitialUri" -> {
+                    val data = intent?.data
+                    if (data?.scheme == "ark") {
+                        val uriString = intent?.dataString
+                        intent?.data = null
+                        result.success(uriString)
+                    } else {
+                        result.success(null)
+                    }
+                }
+
+                else -> result.notImplemented()
+            }
+        }
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, intentChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -159,11 +211,23 @@ class MainActivity : AudioServiceFragmentActivity() {
             }
     }
 
-    // 点桌面小组件时 App 可能刚被系统重建，Dart 那边还没开始监听，home_widget 会把这次的 intent 丢掉；
-    // 换成当前 intent，App 启动后用 initiallyLaunchedFromHomeWidget 自己来取
+    // 点桌面小组件时若 Dart 已就绪则直接推送；若 Dart 还未连接则保留 intent 由后续 getInitialUri 兜底
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        val uri = intent.data
+        if (uri?.scheme == "ark") {
+            val uriString = intent.dataString ?: return
+            widgetChannel?.invokeMethod("onWidgetClick", uriString, object : MethodChannel.Result {
+                override fun success(result: Any?) {
+                    if (this@MainActivity.intent?.data == uri) this@MainActivity.intent?.data = null
+                }
+
+                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {}
+
+                override fun notImplemented() {}
+            })
+        }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {

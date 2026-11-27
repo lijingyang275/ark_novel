@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart' show CancelToken, DioException, DioExceptionType;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -10,11 +11,31 @@ import '../session.dart';
 import '../widgets.dart';
 import '../text.dart';
 
+/// 单页书评请求：离页或刷新时自动 cancel 对应 Dio 请求。
+final commentsProvider = FutureProvider.autoDispose.family<List<CommentItem>, (String aid, int page)>((ref, arg) {
+  final (aid, page) = arg;
+  final cancelToken = CancelToken();
+  ref.onDispose(() {
+    if (!cancelToken.isCancelled) cancelToken.cancel('disposed');
+  });
+  return ref.watch(apiProvider).comments(aid, page, cancelToken: cancelToken);
+});
+
+/// 单页回复请求：离页或刷新时自动 cancel 对应 Dio 请求。
+final repliesProvider = FutureProvider.autoDispose.family<List<ReplyItem>, (String rid, int page)>((ref, arg) {
+  final (rid, page) = arg;
+  final cancelToken = CancelToken();
+  ref.onDispose(() {
+    if (!cancelToken.isCancelled) cancelToken.cancel('disposed');
+  });
+  return ref.watch(apiProvider).replies(rid, page, cancelToken: cancelToken);
+});
+
 /// 分页加载书评 / 回复的通用列表，底部输入框发表。
 class _ThreadList<T> extends ConsumerStatefulWidget {
-  const _ThreadList({super.key, required this.fetch, required this.itemBuilder, required this.send, required this.hint});
+  const _ThreadList({super.key, required this.providerFor, required this.itemBuilder, required this.send, required this.hint});
 
-  final Future<List<T>> Function(int page) fetch;
+  final FutureProvider<List<T>> Function(int page) providerFor;
   final Widget Function(BuildContext, T) itemBuilder;
   final Future<void> Function(String text) send;
   final String hint;
@@ -26,6 +47,8 @@ class _ThreadList<T> extends ConsumerStatefulWidget {
 class _ThreadListState<T> extends ConsumerState<_ThreadList<T>> {
   final _items = <T>[];
   final _input = TextEditingController();
+  ProviderSubscription<Future<List<T>>>? _inflightSub;
+  int _loadGen = 0;
   int _page = 0;
   bool _loading = false, _end = false, _sending = false;
   Object? _error;
@@ -38,20 +61,30 @@ class _ThreadListState<T> extends ConsumerState<_ThreadList<T>> {
 
   @override
   void dispose() {
+    _loadGen++;
+    _inflightSub?.close();
+    _inflightSub = null;
     _input.dispose();
     super.dispose();
   }
 
   Future<void> _load({bool reset = false}) async {
-    if (_loading || (!reset && _end)) return;
+    if ((_loading && !reset) || (!reset && _end)) return;
+    final gen = ++_loadGen;
+    _inflightSub?.close();
+    _inflightSub = null;
     setState(() {
       _loading = true;
       _error = null;
     });
+    final next = reset ? 1 : _page + 1;
+    final provider = widget.providerFor(next);
+    if (reset) ref.invalidate(provider);
+    final sub = ref.listenManual(provider.future, (_, _) {});
+    _inflightSub = sub;
     try {
-      final next = reset ? 1 : _page + 1;
-      final list = await widget.fetch(next);
-      if (!mounted) return;
+      final list = await sub.read();
+      if (!mounted || gen != _loadGen) return;
       setState(() {
         if (reset) {
           _items.clear();
@@ -61,16 +94,23 @@ class _ThreadListState<T> extends ConsumerState<_ThreadList<T>> {
         _page = next;
         if (list.isEmpty) _end = true;
       });
+    } on DioException catch (e) {
+      if (e.type == DioExceptionType.cancel) return;
+      if (mounted && gen == _loadGen) setState(() => _error = e);
     } catch (e) {
-      if (mounted) setState(() => _error = e);
+      if (mounted && gen == _loadGen) setState(() => _error = e);
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (identical(_inflightSub, sub)) {
+        sub.close();
+        _inflightSub = null;
+      }
+      if (mounted && gen == _loadGen) setState(() => _loading = false);
     }
   }
 
   Future<void> _send() async {
     if (ref.read(sessionProvider) is! SessionLoggedIn) {
-      context.push(Routes.login);
+      await context.push(Routes.login);
       return;
     }
     final text = _input.text.trim();
@@ -89,7 +129,7 @@ class _ThreadListState<T> extends ConsumerState<_ThreadList<T>> {
 
   @override
   Widget build(BuildContext context) {
-    final loggedIn = ref.watch(sessionProvider) is SessionLoggedIn;
+    final loggedIn = ref.watch(sessionProvider.select((s) => s is SessionLoggedIn));
     final theme = Theme.of(context);
     final hintStyle = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
     Widget footer() {
@@ -189,13 +229,13 @@ class CommentsPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final api = ref.watch(apiProvider);
     return Scaffold(
       appBar: AppBar(title: const Text('书评')),
       body: _ThreadList<CommentItem>(
-        fetch: (page) => api.comments(aid, page),
+        key: ValueKey('comments:$aid'),
+        providerFor: (page) => commentsProvider((aid, page)),
         hint: '写下你的书评',
-        send: (text) => api.sendComment(aid, text.length > 20 ? text.substring(0, 20) : text, text),
+        send: (text) => ref.read(apiProvider).sendComment(aid, text.length > 20 ? text.substring(0, 20) : text, text),
         itemBuilder: (context, c) => _card(context, user: c.userName, time: c.time, body: c.content, footer: '回复 ${c.replyCount}　查看 ${c.viewCount}', onTap: () => context.push(Routes.replies(aid, c.rid))),
       ),
     );
@@ -210,13 +250,13 @@ class RepliesPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final api = ref.watch(apiProvider);
     return Scaffold(
       appBar: AppBar(title: const Text('回复')),
       body: _ThreadList<ReplyItem>(
-        fetch: (page) => api.replies(rid, page),
+        key: ValueKey('replies:$rid'),
+        providerFor: (page) => repliesProvider((rid, page)),
         hint: '写下你的回复',
-        send: (text) => api.sendReply(aid, rid, text),
+        send: (text) => ref.read(apiProvider).sendReply(aid, rid, text),
         itemBuilder: (context, r) => _card(context, user: r.userName, time: r.time, body: r.content),
       ),
     );

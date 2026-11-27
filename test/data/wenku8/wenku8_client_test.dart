@@ -176,4 +176,17 @@ void main() {
     await client.restoreCookie('a b=1; ok=2', ['https://www.wenku8.net']);
     expect(await client.exportCookies('https://www.wenku8.net'), {'ok': '2'});
   });
+
+  test('重定向清理 Location 首尾空白，并将主站明文 http 跳转自动升级为 https', () async {
+    final adapter = _FakeAdapter({
+      '/modules/article/toplist.php': () => _redirect('  http://www.wenku8.net/login.php?jumpurl=1  '),
+      '/login.php': () => _page([0xB5, 0xC7, 0xC2, 0xBC]),
+    });
+
+    final html = await _client(adapter).getPage('https://www.wenku8.cc/modules/article/toplist.php', charsetParam: false);
+    expect(html, '登录');
+    expect(adapter.requested.last.scheme, 'https');
+    expect(adapter.requested.last.host, 'www.wenku8.net');
+    expect(adapter.requested.last.path, '/login.php');
+  });
 }

@@ -83,7 +83,7 @@ Uri resolveVerifyTargetUri(Uri initialUri, Uri? currentUri) {
   return chosen.scheme == 'http' ? chosen.replace(scheme: 'https') : chosen;
 }
 
-/// 计算「去验证」页默认打开的目标地址：主站默认打开 `/login.php` 停留在当前线路，避免 `/` 直接踢去 `http://www.wenku8.net/login.php`。
+/// 计算「去验证」页默认打开的目标地址：主站默认打开当前线路首页 `/index.php`（而非 `/login.php`），避免未触发人机验证时把登录表单误呈现给用户。
 String defaultVerifyUrl({required String? url, required String? host, required Wenku8Node node}) {
   if (url != null && url.isNotEmpty) {
     final parsed = Uri.tryParse(url);
@@ -91,9 +91,9 @@ String defaultVerifyUrl({required String? url, required String? host, required W
     return (upgraded ?? parsed)?.toString() ?? url;
   }
   if (host != null && host.isNotEmpty) {
-    return isMainSiteHost(host) ? 'https://$host/login.php' : 'https://$host/';
+    return isMainSiteHost(host) ? 'https://$host/index.php' : 'https://$host/';
   }
-  return '${siteBase(node)}/login.php';
+  return '${siteBase(node)}/index.php';
 }
 
 class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
@@ -109,6 +109,7 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
   bool _done = false;
   bool _submitted = false;
   int _progress = 0;
+  int _checkSeq = 0;
   String? _ua;
   final _events = <String>[]; // 最近的页面加载 / 报错记录，复制诊断信息时带上
 
@@ -321,7 +322,38 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
     } else if (names.contains('cf_clearance')) {
       await _finish(c, uri);
     } else if (mounted) {
-      setState(() => _hint = '页面已加载，若已正常显示网站内容可点右上角「完成」返回');
+      // 未出现 Cloudflare 质询页且未下发 cf_clearance：稍候 650ms 复检，若仍无质询且已加载正常站点内容则自动回写 cookie/UA 返回，避免把网页登录页晾给用户
+      final seq = ++_checkSeq;
+      setState(() => _hint = '正在检查验证状态…');
+      Future<void>.delayed(const Duration(milliseconds: 650), () async {
+        if (!mounted || _done || seq != _checkSeq) return;
+        final curUri = await c.getUrl() ?? uri;
+        if (!mounted || _done || seq != _checkSeq) return;
+        if (await _finishIfVerifyCleared(c, curUri)) return;
+        final nextGuard = await _guardState(c);
+        if (!mounted || _done || seq != _checkSeq) return;
+        if (nextGuard == _GuardState.challenge) {
+          setState(() {
+            _blocked = false;
+            _hint = '请点击完成页面中的 Cloudflare 人机验证，通过后将自动继续…${_appleProxyNote()}';
+          });
+          return;
+        }
+        if (nextGuard == _GuardState.blocked) {
+          setState(() {
+            _blocked = true;
+            _hint = '当前网络/IP 已被 Cloudflare 拒绝访问（403 封锁页），无法通过点击验证解除，请尝试切换网络、更换代理节点或切换站点线路';
+          });
+          return;
+        }
+        final hasContent = await c.evaluateJavascript(source: "((document.body?.innerText || '').trim().length > 0 || (document.title || '').trim().length > 0)");
+        if (!mounted || _done || seq != _checkSeq) return;
+        if (hasContent == true) {
+          await _finish(c, curUri);
+        } else {
+          setState(() => _hint = '页面已加载，若已正常显示网站内容可点右上角「完成」返回');
+        }
+      });
     }
   }
 
@@ -431,7 +463,7 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
   InAppWebViewController? _controller;
 }
 
-/// "去验证"路由页：打开目标地址/域名（主站默认当前线路登录页，避免 `/` 重定向到另一域名的明文 HTTP）过 Cloudflare 验证，通过后写回 cookie 并返回 `true` 供原页面自动重试。
+/// "去验证"路由页：打开目标地址/域名（主站默认当前线路首页 `/index.php`）过 Cloudflare 验证，通过后写回 cookie 并返回 `true` 供原页面自动重试。
 class VerifyPage extends ConsumerWidget {
   const VerifyPage({super.key, this.url, this.host});
 

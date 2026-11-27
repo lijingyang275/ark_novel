@@ -263,6 +263,37 @@ void main() {
     expect(challengeCalls, 1);
   });
 
+  test('后台 prefetch 撞 403 不拉起无头 WebView 过盾，前景 load 仍正常触发过盾', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final dir = await Directory.systemTemp.createTemp('imgstore_prefetch_no_cf');
+    addTearDown(() => dir.delete(recursive: true));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'), (_) async => dir.path);
+
+    var challengeCalls = 0;
+    final net = _FakeAdapter((o) async => ResponseBody.fromBytes(const [], 403));
+    final c = ProviderContainer(
+      overrides: [
+        imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net),
+        imageChallengeProvider.overrideWithValue((url) async {
+          challengeCalls++;
+          return Uint8List.fromList(_jpeg(9));
+        }),
+      ],
+    );
+    addTearDown(c.dispose);
+    final store = c.read(imageStoreProvider);
+
+    const targetUrl = 'https://pic.wenku8.com/pictures/1/1/prefetch_only.jpg';
+    store.prefetch([targetUrl]);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(challengeCalls, 0);
+    expect(await store.cached(targetUrl), isNull);
+
+    final loaded = await store.load(targetUrl);
+    expect(challengeCalls, 1);
+    expect(loaded, isNotEmpty);
+  });
+
   test('cancelPrefetch 取消尚未开始的低优预取，且可见图加载优先于预取队列', () async {
     TestWidgetsFlutterBinding.ensureInitialized();
     final dir = await Directory.systemTemp.createTemp('imgstore_priority');
@@ -271,9 +302,12 @@ void main() {
 
     final gates = <String, Completer<void>>{};
     final started = <String>[];
+    const slots = ImageStore.maxNet;
+    final allSlotsStarted = Completer<void>();
     final net = _FakeAdapter((o) async {
       final name = o.uri.pathSegments.last;
       started.add(name);
+      if (started.length == slots && !allSlotsStarted.isCompleted) allSlotsStarted.complete();
       final gate = gates[name];
       if (gate != null) await gate.future;
       return ResponseBody.fromBytes(_jpeg(started.length), 200);
@@ -283,17 +317,16 @@ void main() {
     final store = c.read(imageStoreProvider);
 
     // 先占满全部网络槽位（ImageStore.maxNet == 6），再排 2 个低优预取与 1 个高优可见加载
-    const slots = ImageStore.maxNet;
     for (var i = 1; i <= slots; i++) {
       gates['slot$i.jpg'] = Completer<void>();
     }
     final slotFutures = [for (var i = 1; i <= slots; i++) store.load('https://img.example/slot$i.jpg')];
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await allSlotsStarted.future.timeout(const Duration(seconds: 5));
     expect(started, hasLength(slots));
 
     store.prefetch(['https://img.example/pre1.jpg', 'https://img.example/pre2.jpg']);
     final visibleFuture = store.load('https://img.example/visible.jpg');
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
 
     // 取消未开始的预取，仅保留 visible.jpg
     store.cancelPrefetch(['https://img.example/pre1.jpg', 'https://img.example/pre2.jpg']);
@@ -406,9 +439,13 @@ void main() {
 
     final gates = <String, Completer<void>>{};
     final started = <String>[];
+    final allSlotsStarted = Completer<void>();
+    Completer<void>? nextStart;
     final net = _FakeAdapter((o) async {
       final name = o.uri.pathSegments.last;
       started.add(name);
+      if (started.length == ImageStore.maxNet && !allSlotsStarted.isCompleted) allSlotsStarted.complete();
+      if (nextStart case final ns? when !ns.isCompleted) ns.complete();
       final gate = gates[name];
       if (gate != null) await gate.future;
       return ResponseBody.fromBytes(_jpeg(started.length), 200);
@@ -421,21 +458,26 @@ void main() {
       gates['s$i.jpg'] = Completer<void>();
     }
     final slotFutures = [for (var i = 1; i <= ImageStore.maxNet; i++) store.load('https://img.example/s$i.jpg')];
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await allSlotsStarted.future.timeout(const Duration(seconds: 5));
     started.clear();
 
-    // 高优按 h1 → h2 → h3 入队，低优按 l1 → l2 入队
+    // 高优按 h1 → h2 → h3 依次入队，低优按 l1 → l2 依次入队（间隔避开异步 File.exists 线程池乱序）
     final h1 = store.load('https://img.example/h1.jpg');
+    await Future<void>.delayed(const Duration(milliseconds: 25));
     final h2 = store.load('https://img.example/h2.jpg');
+    await Future<void>.delayed(const Duration(milliseconds: 25));
     final h3 = store.load('https://img.example/h3.jpg');
+    await Future<void>.delayed(const Duration(milliseconds: 25));
     final l1 = store.loadWithPriority('https://img.example/l1.jpg', lowPriority: true);
+    await Future<void>.delayed(const Duration(milliseconds: 25));
     final l2 = store.loadWithPriority('https://img.example/l2.jpg', lowPriority: true);
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await Future<void>.delayed(const Duration(milliseconds: 25));
 
-    // 逐个释放槽位，验证高优按 LIFO（h3, h2, h1）唤醒，随后低优按 FIFO（l1, l2）唤醒
+    // 逐个释放槽位并等待下一条确定唤醒，验证高优按 LIFO（h3, h2, h1）唤醒，随后低优按 FIFO（l1, l2）唤醒
     for (var i = 1; i <= 5; i++) {
+      nextStart = Completer<void>();
       gates['s$i.jpg']!.complete();
-      await Future<void>.delayed(const Duration(milliseconds: 15));
+      await nextStart.future.timeout(const Duration(seconds: 5));
     }
     gates['s6.jpg']!.complete();
     await Future.wait([...slotFutures, h1, h2, h3, l1, l2]);
@@ -458,11 +500,13 @@ void main() {
       final gate = gates[name];
       if (gate != null) {
         var wasCancelled = false;
-        cancelFuture?.then((_) {
-          wasCancelled = true;
-          cancelledUrls.add(name);
-          if (!gate.isCompleted) gate.complete();
-        });
+        unawaited(
+          cancelFuture?.then((_) {
+            wasCancelled = true;
+            cancelledUrls.add(name);
+            if (!gate.isCompleted) gate.complete();
+          }),
+        );
         await gate.future;
         if (wasCancelled) throw DioException.requestCancelled(requestOptions: o, reason: 'cancelled');
       }
@@ -513,5 +557,65 @@ void main() {
       gates['b$i.jpg']!.complete();
     }
     await Future.wait(blockers.skip(1));
+  });
+
+  test('ImageStore 磁盘损坏图自愈、15 分钟确定性负缓存与 forceRetry 绕过、trim 冷却与 force 强制清理', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final dir = await Directory.systemTemp.createTemp('imgstore_resilience');
+    addTearDown(() => dir.delete(recursive: true));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'), (_) async => dir.path);
+    await Hive.close();
+    Hive.init(dir.path);
+    await Hive.openBox('session');
+    await ChapterCache.open();
+    addTearDown(Hive.close);
+
+    var fail404 = true;
+    final net = _FakeAdapter((o) async {
+      if (o.uri.path.endsWith('missing.jpg')) {
+        return fail404 ? ResponseBody.fromBytes(const [], 404) : ResponseBody.fromBytes(_jpeg(3), 200);
+      }
+      return ResponseBody.fromBytes(_jpeg(2), 200);
+    });
+    final c = ProviderContainer(overrides: [imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net)]);
+    addTearDown(c.dispose);
+    final store = c.read(imageStoreProvider);
+
+    // 1. 404 写入负缓存，第二次不发网；显式 forceRetry: true 可绕过负缓存重下
+    const missingUrl = 'https://img.example/missing.jpg';
+    await expectLater(store.load(missingUrl), throwsA(isA<DioException>()));
+    expect(net.urls.length, 1);
+    await expectLater(store.load(missingUrl), throwsA(isA<DioException>()));
+    expect(net.urls.length, 1); // 命中内存负缓存
+
+    fail404 = false;
+    expect(await store.loadWithPriority(missingUrl, forceRetry: true), _jpeg(3));
+    expect(net.urls.length, 2);
+
+    // 2. 损坏磁盘缓存自动删除并回源重下
+    final cacheDir = Directory('${dir.path}/imgcache');
+    final files = cacheDir.listSync().whereType<File>().toList();
+    expect(files, hasLength(1));
+    await files.first.writeAsBytes('corrupted'.codeUnits);
+
+    final c2 = ProviderContainer(overrides: [imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net)]);
+    addTearDown(c2.dispose);
+    final store2 = c2.read(imageStoreProvider);
+    expect(await store2.load(missingUrl), _jpeg(3));
+    expect(net.urls.length, 3);
+
+    // 3. trim() 冷却：首次执行后 24h 内且写入 < 50MB 时跳过，传 force: true 立即执行
+    const extra1 = 'https://img.example/e1.jpg';
+    const extra2 = 'https://img.example/e2.jpg';
+    await store2.load(extra1);
+    await store2.trim(maxBytes: 1); // 首次 trim 执行，清空未保留文件
+    expect(cacheDir.listSync().whereType<File>(), isEmpty);
+
+    await store2.load(extra2);
+    expect(cacheDir.listSync().whereType<File>(), hasLength(1));
+    await store2.trim(maxBytes: 1); // 冷却期内跳过
+    expect(cacheDir.listSync().whereType<File>(), hasLength(1));
+    await store2.trim(maxBytes: 1, force: true); // 手动强制清理生效
+    expect(cacheDir.listSync().whereType<File>(), isEmpty);
   });
 }

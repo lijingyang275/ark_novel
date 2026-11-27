@@ -6,6 +6,7 @@ import '../../data/wenku8/wenku8_parser.dart';
 import '../bookmarks.dart';
 import '../cache.dart';
 import '../library.dart' show LibraryStore;
+import '../motion.dart';
 import '../reader/reader_page.dart' show bookmarkPage;
 import '../routes.dart';
 import '../stats.dart';
@@ -87,7 +88,10 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
                         (final p, final n) => '第 $p / $n 页',
                         _ => len == null || len == 0 ? '' : '本章 ${(b.offset * 100 ~/ len).clamp(0, 100)}%',
                       };
-                      return Text(text, style: theme.textTheme.labelMedium?.copyWith(color: scheme.primary));
+                      return AppCrossfade(
+                        duration: AppMotion.fast,
+                        child: Text(text, key: ValueKey(text), style: theme.textTheme.labelMedium?.copyWith(color: scheme.primary, fontFeatures: const [FontFeature.tabularFigures()])),
+                      );
                     },
                   ),
                   IconButton(

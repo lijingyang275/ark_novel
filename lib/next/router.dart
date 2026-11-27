@@ -2,6 +2,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'motion.dart';
+
 import 'pages/bookmarks_page.dart';
 import 'pages/bookshelf_page.dart';
 import 'pages/categories_page.dart';
@@ -71,11 +73,11 @@ final routerProvider = Provider<GoRouter>((ref) {
       // 卷册：整页只淡入淡出，让从书架飞过来的封面和摊开的各卷当主角
       GoRoute(
         path: '/volumes/:aid',
-        pageBuilder: (_, state) => CustomTransitionPage(
+        pageBuilder: (context, state) => CustomTransitionPage(
           key: state.pageKey,
-          transitionDuration: const Duration(milliseconds: 450),
-          reverseTransitionDuration: const Duration(milliseconds: 380),
-          transitionsBuilder: (_, animation, _, child) => FadeTransition(opacity: CurveTween(curve: Curves.easeOut).animate(animation), child: child),
+          transitionDuration: AppMotion.dur(context, const Duration(milliseconds: 420)),
+          reverseTransitionDuration: AppMotion.dur(context, AppMotion.expressive),
+          transitionsBuilder: (_, animation, _, child) => FadeTransition(opacity: CurveTween(curve: AppMotion.curve).animate(animation), child: child),
           child: VolumesPage(aid: state.pathParameters['aid']!),
         ),
       ),
@@ -86,7 +88,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: Routes.history, builder: (_, _) => const HistoryPage()),
       GoRoute(path: Routes.cache, builder: (_, _) => const CachePage()),
       GoRoute(path: Routes.storage, builder: (_, _) => const StoragePage()),
-      GoRoute(path: Routes.settings, builder: (_, _) => const SettingsPage()),
       GoRoute(
         path: '/settings/:section',
         builder: (_, state) => SettingsSectionPage(
@@ -120,6 +121,9 @@ final routerProvider = Provider<GoRouter>((ref) {
           ),
           StatefulShellBranch(
             routes: [GoRoute(path: Routes.profile, builder: (_, _) => const ProfilePage())],
+          ),
+          StatefulShellBranch(
+            routes: [GoRoute(path: Routes.settings, builder: (_, _) => const SettingsPage())],
           ),
         ],
       ),

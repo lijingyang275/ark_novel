@@ -251,7 +251,8 @@ void main() {
       expect(formatVolumeEta(null), '');
     });
 
-    testWidgets('ReaderBackground 内置 4 档纹理均可正常渲染', (t) async {
+    testWidgets('ReaderBackground 内置 4 档纹理均可正常渲染并支持 evictTextureCache', (t) async {
+      addTearDown(ReaderBackground.evictTextureCache);
       for (final texture in const [0, 1, 2, 3]) {
         await t.pumpWidget(
           MaterialApp(
@@ -268,6 +269,39 @@ void main() {
         );
         expect(t.takeException(), isNull, reason: 'texture=$texture');
       }
+      ReaderBackground.evictTextureCache();
+      await t.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+      expect(t.takeException(), isNull);
+    });
+
+    testWidgets('ReaderAutoTurnProgressBar 使用独立 RepaintBoundary + CustomPaint 绘制进度条', (t) async {
+      final ctrl = ReaderAutoScrollController(initialMode: 3, initialTurnSeconds: 10);
+      addTearDown(ctrl.dispose);
+      ctrl.start(mode: 3);
+      ctrl.stepDelta(const Duration(seconds: 4));
+
+      await t.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.bottomCenter,
+              child: ReaderAutoTurnProgressBar(
+                controller: ctrl,
+                palette: const ReaderPalette(Color(0xFFF6F1E7), Color(0xFF2B2A27)),
+                accent: Colors.teal,
+              ),
+            ),
+          ),
+        ),
+      );
+      await t.pump();
+      expect(find.descendant(of: find.byType(ReaderAutoTurnProgressBar), matching: find.byType(CustomPaint)), findsOneWidget);
+      expect(find.descendant(of: find.byType(ReaderAutoTurnProgressBar), matching: find.byType(FractionallySizedBox)), findsNothing);
+      ctrl.stepDelta(const Duration(seconds: 2));
+      await t.pump();
+      ctrl.stop();
+      await t.pumpAndSettle();
+      expect(t.takeException(), isNull);
     });
 
     testWidgets('ReaderChromeRow 正确渲染自定义字段组合', (t) async {

@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show ValueNotifier, VoidCallback, defaultTargetPlatform, kIsWeb, TargetPlatform;
+import 'package:flutter/foundation.dart' show ValueNotifier, VoidCallback, defaultTargetPlatform, kIsWeb, TargetPlatform, visibleForTesting;
 import 'package:flutter/services.dart' show MethodChannel;
 import 'package:flutter_tts/flutter_tts.dart';
 
@@ -154,6 +154,7 @@ class SystemTtsNoticePort implements TtsNoticePort {
 class ReaderTtsController {
   ReaderTtsController({
     TtsEngine? engine,
+    TtsEngine Function()? engineFactory,
     TtsNoticePort? notice,
     DateTime Function()? now,
     VoidCallback? requestNotificationPermission,
@@ -163,12 +164,12 @@ class ReaderTtsController {
     this.onAdvanceChapter,
     this.onError,
     this.onListeningChanged,
-  }) : _engine = engine ?? FlutterTtsEngine(),
+  }) : _engine = engine,
+       _engineFactory = engineFactory ?? FlutterTtsEngine.new,
        _notice = notice ?? SystemTtsNoticePort(),
        _now = now ?? DateTime.now,
        _requestNotificationPermission = requestNotificationPermission ?? _defaultRequestPermission {
-    _engine.setCompletionHandler(_onEngineCompleted);
-    _engine.setErrorHandler(_onEngineError);
+    if (engine != null) _bindEngine(engine);
   }
 
   static const _ttsChannel = MethodChannel('ark/tts');
@@ -179,10 +180,30 @@ class ReaderTtsController {
     }
   }
 
-  final TtsEngine _engine;
+  TtsEngine? _engine;
+  final TtsEngine Function() _engineFactory;
   final TtsNoticePort _notice;
   final DateTime Function() _now;
   final VoidCallback _requestNotificationPermission;
+
+  /// 底层语音引擎是否已初始化（默认仅在首次开始朗读或查询音色时按需拉起系统 TTS 服务）。
+  @visibleForTesting
+  bool get isEngineInitialized => _engine != null;
+
+  TtsEngine _ensureEngine() {
+    var eng = _engine;
+    if (eng == null) {
+      eng = _engineFactory();
+      _engine = eng;
+      _bindEngine(eng);
+    }
+    return eng;
+  }
+
+  void _bindEngine(TtsEngine eng) {
+    eng.setCompletionHandler(_onEngineCompleted);
+    eng.setErrorHandler(_onEngineError);
+  }
 
   final ReaderPrefs Function()? readPrefs;
   final Future<({String book, String chapter, String? cover})?> Function()? resolveNoticeMeta;
@@ -278,7 +299,7 @@ class ReaderTtsController {
     active.value = true;
     paused.value = false;
     if (!wasListening) onListeningChanged?.call();
-    refreshNotice();
+    unawaited(refreshNotice());
     await applyPrefs();
     if (gen != _speakGen || _disposed || !isSpeaking || isPaused) return true;
     await _speakNext();
@@ -287,15 +308,16 @@ class ReaderTtsController {
 
   Future<void> applyPrefs() async {
     if (_disposed) return;
+    final eng = _ensureEngine();
     final prefs = _prefs;
-    await _engine.setLanguage('zh-CN');
-    await _engine.setSpeechRate(prefs.ttsRate);
-    await _engine.setPitch(prefs.ttsPitch);
+    await eng.setLanguage('zh-CN');
+    await eng.setSpeechRate(prefs.ttsRate);
+    await eng.setPitch(prefs.ttsPitch);
     if (prefs.ttsVoice.isNotEmpty) {
       try {
-        final voices = await _engine.zhVoices();
+        final voices = await eng.zhVoices();
         final locale = voices.where((v) => v.name == prefs.ttsVoice).firstOrNull?.locale ?? 'zh-CN';
-        await _engine.setVoice({'name': prefs.ttsVoice, 'locale': locale});
+        await eng.setVoice({'name': prefs.ttsVoice, 'locale': locale});
       } catch (_) {}
     }
   }
@@ -322,7 +344,7 @@ class ReaderTtsController {
     paused.value = true;
     _speakGen++;
     _startingSpeech = false;
-    _engine.stop();
+    _engine?.stop();
     onListeningChanged?.call();
     refreshNotice();
   }
@@ -402,9 +424,10 @@ class ReaderTtsController {
       _saveProgress(s);
       _startingSpeech = true;
       try {
-        if (interrupt) await _engine.stop();
+        final eng = _ensureEngine();
+        if (interrupt) await eng.stop();
         if (gen != _speakGen || _disposed || !isSpeaking || isPaused) return;
-        await _engine.speak(_ttsText.substring(s, e).trim());
+        await eng.speak(_ttsText.substring(s, e).trim());
       } finally {
         if (gen == _speakGen) _startingSpeech = false;
       }
@@ -447,12 +470,13 @@ class ReaderTtsController {
     highlight.value = null;
     active.value = false;
     if (wasListening || wasActive) onListeningChanged?.call();
-    await _engine.stop();
+    final eng = _engine;
+    if (eng != null) await eng.stop();
     _notice.clearCallbacks();
     if (wasActive) await _notice.hide();
   }
 
-  Future<List<TtsVoice>> zhVoices() => _engine.zhVoices();
+  Future<List<TtsVoice>> zhVoices() => _ensureEngine().zhVoices();
 
   void dispose() {
     if (_disposed) return;
@@ -460,9 +484,12 @@ class ReaderTtsController {
     _disposed = true;
     _speakGen++;
     _turnTimer?.cancel();
-    _engine.setCompletionHandler(() {});
-    _engine.setErrorHandler((_) {});
-    _engine.stop();
+    final eng = _engine;
+    if (eng != null) {
+      eng.setCompletionHandler(() {});
+      eng.setErrorHandler((_) {});
+      eng.stop();
+    }
     _notice.clearCallbacks();
     if (wasActive) _notice.hide();
     active.dispose();

@@ -63,4 +63,10 @@ void main() {
     expect(r.left, closeTo(0.51, 0.001));
     expect(r.right, 1);
   });
+
+  test('trimAsync 通过 TransferableTypedData 跨 Isolate 去白边与同步结果一致', () async {
+    final px = _image(100, 140, const Rect.fromLTRB(8, 6, 92, 134));
+    final asyncRect = await px.trimAsync(full);
+    expect(asyncRect, px.trim(full));
+  });
 }

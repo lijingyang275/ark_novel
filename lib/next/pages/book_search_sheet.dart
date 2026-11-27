@@ -7,7 +7,7 @@ import '../../models/cat_volume.dart';
 import '../book_search.dart';
 import '../cache.dart';
 import '../hant.dart';
-import '../local_books.dart';
+import '../motion.dart';
 import '../reader/reader_sheets.dart';
 import '../settings.dart';
 import '../text.dart';
@@ -101,27 +101,35 @@ class _BookSearchSheet extends ConsumerStatefulWidget {
 }
 
 class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
+  static const _progressThrottle = Duration(milliseconds: 110);
+
   late final TextEditingController _controller = TextEditingController(text: widget.initialQuery);
   late BookSearchScope _scope;
   late bool _isRegex = widget.initialRegex;
   Timer? _debounce;
+  Timer? _progressTimer;
+  DateTime? _lastProgressFlushAt;
+  BookSearchProgress? _pendingProgress;
+  final List<BookSearchHit> _pendingHits = [];
   BookSearchCancelToken? _cancel;
   bool _searching = false;
   int _scanned = 0;
   int _total = 0;
   int _totalHits = 0;
+  bool _truncated = false;
   String? _error;
-  List<BookSearchHit> _hits = const [];
-  List<_SearchRow> _rows = const [];
+  final List<BookSearchHit> _hits = [];
+  final List<_SearchRow> _rows = [];
+  String? _lastGroupCid;
+  int _lastGroupHeaderIndex = -1;
+  int _lastGroupCount = 0;
 
   bool get _hasCurrent => widget.currentCid != null && widget.currentCid!.isNotEmpty;
-  bool get _isLocal => isLocalAid(widget.aid);
 
   @override
   void initState() {
     super.initState();
-    final totalCat = widget.catalogue.fold<int>(0, (a, v) => a + v.chapters.length);
-    final available = _isLocal ? totalCat : ChapterCache.count(widget.aid);
+    final available = ChapterCache.count(widget.aid);
     _scope = _hasCurrent
         ? (widget.initialScope ?? (available > 1 ? BookSearchScope.allCached : BookSearchScope.currentChapter))
         : BookSearchScope.allCached;
@@ -135,6 +143,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
   @override
   void dispose() {
     _debounce?.cancel();
+    _clearPendingProgress();
     _cancel?.cancel();
     _controller.dispose();
     super.dispose();
@@ -147,26 +156,65 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
     });
   }
 
-  List<_SearchRow> _buildRows(List<BookSearchHit> hits) {
-    final rows = <_SearchRow>[];
-    var i = 0;
-    while (i < hits.length) {
-      final first = hits[i];
-      var j = i + 1;
-      while (j < hits.length && hits[j].cid == first.cid) {
-        j++;
+  void _clearPendingProgress() {
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    _pendingProgress = null;
+    _pendingHits.clear();
+    _lastProgressFlushAt = null;
+  }
+
+  void _resetResults() {
+    _hits.clear();
+    _rows.clear();
+    _lastGroupCid = null;
+    _lastGroupHeaderIndex = -1;
+    _lastGroupCount = 0;
+  }
+
+  /// 按章节分组 O(Δ) 增量追加新命中行，不重扫历史命中与历史分组。
+  void _appendHits(List<BookSearchHit> newHits) {
+    if (newHits.isEmpty) return;
+    for (final hit in newHits) {
+      _hits.add(hit);
+      if (_lastGroupCid == hit.cid && _lastGroupHeaderIndex >= 0) {
+        _lastGroupCount++;
+        final prev = _rows[_lastGroupHeaderIndex] as _GroupHeaderRow;
+        _rows[_lastGroupHeaderIndex] = _GroupHeaderRow(volTitle: prev.volTitle, chapterTitle: prev.chapterTitle, count: _lastGroupCount);
+      } else {
+        _lastGroupCid = hit.cid;
+        _lastGroupHeaderIndex = _rows.length;
+        _lastGroupCount = 1;
+        _rows.add(_GroupHeaderRow(volTitle: hit.volTitle, chapterTitle: hit.chapterTitle, count: 1));
       }
-      rows.add(_GroupHeaderRow(volTitle: first.volTitle, chapterTitle: first.chapterTitle, count: j - i));
-      for (var k = i; k < j; k++) {
-        rows.add(_HitRow(hits[k]));
-      }
-      i = j;
+      _rows.add(_HitRow(hit));
     }
-    return rows;
+  }
+
+  void _flushPendingProgress() {
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    final p = _pendingProgress;
+    if (p == null && _pendingHits.isEmpty) return;
+    _pendingProgress = null;
+    final batch = _pendingHits.isEmpty ? const <BookSearchHit>[] : List<BookSearchHit>.of(_pendingHits);
+    _pendingHits.clear();
+    _lastProgressFlushAt = DateTime.now();
+    if (!mounted) return;
+    setState(() {
+      if (p != null) {
+        _scanned = p.scannedChapters;
+        _total = p.totalChapters;
+        _totalHits = p.totalHits;
+        _truncated = p.truncated;
+      }
+      _appendHits(batch);
+    });
   }
 
   Future<void> _runSearch() async {
     _debounce?.cancel();
+    _clearPendingProgress();
     _cancel?.cancel();
     final q = _controller.text.trim();
     if (q.isEmpty) {
@@ -175,9 +223,9 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
         _scanned = 0;
         _total = 0;
         _totalHits = 0;
+        _truncated = false;
         _error = null;
-        _hits = const [];
-        _rows = const [];
+        _resetResults();
       });
       return;
     }
@@ -190,8 +238,8 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
       _scanned = 0;
       _total = 0;
       _totalHits = 0;
-      _hits = const [];
-      _rows = const [];
+      _truncated = false;
+      _resetResults();
     });
 
     Hant? hant;
@@ -214,25 +262,39 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
       cancelToken: token,
       onProgress: (p) {
         if (!mounted || token.isCancelled) return;
-        setState(() {
-          _scanned = p.scannedChapters;
-          _total = p.totalChapters;
-          _totalHits = p.totalHits;
-          _hits = p.hits;
-          _rows = _buildRows(p.hits);
-        });
+        _pendingProgress = p;
+        if (p.newHits.isNotEmpty) _pendingHits.addAll(p.newHits);
+        final now = DateTime.now();
+        final last = _lastProgressFlushAt;
+        if (last == null || now.difference(last) >= _progressThrottle) {
+          _flushPendingProgress();
+        } else if (_progressTimer == null) {
+          final remain = _progressThrottle - now.difference(last);
+          _progressTimer = Timer(remain, () {
+            if (!mounted || token.isCancelled) return;
+            _flushPendingProgress();
+          });
+        }
       },
     );
 
     if (!mounted || token.isCancelled) return;
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    _pendingProgress = null;
+    final leftover = _pendingHits.isEmpty ? const <BookSearchHit>[] : List<BookSearchHit>.of(_pendingHits);
+    _pendingHits.clear();
     setState(() {
       _searching = false;
       _scanned = result.scannedChapters;
       _total = result.totalChapters;
       _totalHits = result.totalHits;
+      _truncated = result.truncated;
       _error = result.error;
-      _hits = result.hits;
-      _rows = _buildRows(result.hits);
+      if (leftover.isNotEmpty) _appendHits(leftover);
+      if (_hits.length < result.hits.length) {
+        _appendHits(result.hits.sublist(_hits.length));
+      }
     });
   }
 
@@ -265,25 +327,29 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final totalCat = widget.catalogue.fold<int>(0, (a, v) => a + v.chapters.length);
-    final cachedCount = _isLocal ? totalCat : ChapterCache.count(widget.aid);
+    final cachedCount = ChapterCache.count(widget.aid);
     final q = _controller.text.trim();
 
     String statusText;
     if (_searching) {
       statusText = _scope == BookSearchScope.currentChapter
           ? '正在搜索当前章，已找到 $_totalHits 处…'
-          : (_isLocal ? '正在搜索 $_scanned/$_total 章，已找到 $_totalHits 处…' : '正在搜索 $_scanned/$_total 章已缓存章节，已找到 $_totalHits 处…');
+          : '正在搜索 $_scanned/$_total 章已缓存章节，已找到 $_totalHits 处…';
     } else if (_error != null) {
       statusText = _error!;
     } else if (q.isEmpty) {
       statusText = _scope == BookSearchScope.currentChapter
           ? '输入关键词搜索当前章节'
-          : (_isLocal ? '全书共 $totalCat 章，输入关键词检索正文' : '全书已缓存 $cachedCount/$totalCat 章，输入关键词检索正文');
+          : '全书已缓存 $cachedCount/$totalCat 章，输入关键词检索正文';
     } else if (_scope == BookSearchScope.currentChapter) {
-      statusText = '当前章共找到 $_totalHits 处';
+      statusText = _truncated
+          ? '当前章已找到 $_totalHits+ 处（仅展示前 ${_hits.length} 处）'
+          : (_hits.length < _totalHits ? '当前章共找到 $_totalHits 处（仅展示前 ${_hits.length} 处）' : '当前章共找到 $_totalHits 处');
     } else {
-      final capHint = _hits.length < _totalHits ? '（显示前 ${_hits.length} 处）' : '';
-      statusText = _isLocal ? '已搜索 $_scanned/$_total 章，共找到 $_totalHits 处$capHint' : '已搜索 $_scanned/$_total 章已缓存章节，共找到 $_totalHits 处$capHint';
+      final countLabel = _truncated
+          ? '$_totalHits+ 处（仅展示前 ${_hits.length} 处）'
+          : '$_totalHits 处${_hits.length < _totalHits ? '（显示前 ${_hits.length} 处）' : ''}';
+      statusText = '已搜索 $_scanned/$_total 章已缓存章节，共找到 $countLabel';
     }
 
     return SafeArea(
@@ -305,16 +371,21 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
                 isDense: true,
                 prefixIcon: const Icon(Icons.search, size: 20),
                 hint: Text(_isRegex ? '输入正则表达式（如 角色A|别名B）' : '搜索书内正文关键词', maxLines: 1, overflow: TextOverflow.ellipsis),
-                suffixIcon: q.isEmpty
-                    ? null
-                    : IconButton(
-                        tooltip: hz(context, '清空'),
-                        icon: const Icon(Icons.close, size: 18),
-                        onPressed: () {
-                          _controller.clear();
-                          _runSearch();
-                        },
-                      ),
+                suffixIcon: AppReveal(
+                  visible: q.isNotEmpty,
+                  offset: Offset.zero,
+                  beginScale: 0.72,
+                  duration: AppMotion.fast,
+                  reverseDuration: AppMotion.instant,
+                  child: IconButton(
+                    tooltip: hz(context, '清空'),
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: () {
+                      _controller.clear();
+                      _runSearch();
+                    },
+                  ),
+                ),
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               ),
             ),
@@ -336,7 +407,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
                   ),
                   const SizedBox(width: 8),
                   ChoiceChip(
-                    label: Text(_isLocal ? '全书' : '全书已缓存'),
+                    label: const Text('全书已缓存'),
                     selected: _scope == BookSearchScope.allCached,
                     showCheckmark: false,
                     onSelected: (_) {
@@ -357,18 +428,23 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
                   },
                 ),
                 const Spacer(),
-                if (_searching)
-                  TextButton(
+                AppCollapse(
+                  visible: _searching,
+                  axis: Axis.horizontal,
+                  duration: AppMotion.fast,
+                  child: TextButton(
                     onPressed: () {
                       _cancel?.cancel();
+                      _flushPendingProgress();
                       setState(() => _searching = false);
                     },
                     child: const Text('停止'),
                   ),
+                ),
               ],
             ),
           ),
-          if (_searching) const LinearProgressIndicator(minHeight: 2),
+          AppCollapse(visible: _searching, duration: AppMotion.fast, reverseDuration: AppMotion.fast, child: const LinearProgressIndicator(minHeight: 2)),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 6),
             child: Align(
@@ -381,67 +457,73 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
           ),
           const Divider(height: 1),
           Expanded(
-            child: _rows.isEmpty
-                ? ListView(
-                    controller: widget.scrollController,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 64, 24, 24),
-                        child: Text(
-                          q.isEmpty
-                              ? (_scope == BookSearchScope.allCached && cachedCount == 0
-                                    ? '还没有已缓存的章节。\n可先在书籍详情页缓存章节或阅读后再搜全书。'
-                                    : '支持关键词检索与正则多词检索（例如：角色名|别名）。')
-                              : (_searching
-                                    ? '正在检索中…'
-                                    : (_error != null
-                                          ? '请检查正则表达式语法。'
-                                          : (_scope == BookSearchScope.allCached && cachedCount == 0
-                                                ? '未找到结果（当前暂无已缓存章节）。'
-                                                : '未找到匹配内容。'))),
-                          textAlign: TextAlign.center,
-                          style: theme.textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant, height: 1.6),
+            child: AppCrossfade(
+              fill: true,
+              duration: AppMotion.fast,
+              child: _rows.isEmpty
+                  ? ListView(
+                      key: const ValueKey('book-search-empty'),
+                      controller: widget.scrollController,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(24, 64, 24, 24),
+                          child: Text(
+                            q.isEmpty
+                                ? (_scope == BookSearchScope.allCached && cachedCount == 0
+                                      ? '还没有已缓存的章节。\n可先在书籍详情页缓存章节或阅读后再搜全书。'
+                                      : '支持关键词检索与正则多词检索（例如：角色名|别名）。')
+                                : (_searching
+                                      ? '正在检索中…'
+                                      : (_error != null
+                                            ? '请检查正则表达式语法。'
+                                            : (_scope == BookSearchScope.allCached && cachedCount == 0 && _scanned == 0
+                                                  ? '未找到结果（当前暂无已缓存章节）。'
+                                                  : '未找到匹配内容。'))),
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant, height: 1.6),
+                          ),
                         ),
-                      ),
-                    ],
-                  )
-                : ListView.builder(
-                    controller: widget.scrollController,
-                    padding: const EdgeInsets.only(bottom: 24),
-                    itemCount: _rows.length,
-                    itemBuilder: (context, i) {
-                      final row = _rows[i];
-                      if (row is _GroupHeaderRow) {
-                        final heading = row.volTitle.isNotEmpty && row.chapterTitle.isNotEmpty
-                            ? '${row.volTitle} · ${row.chapterTitle}'
-                            : (row.chapterTitle.isNotEmpty ? row.chapterTitle : row.volTitle);
-                        return Container(
-                          color: scheme.surfaceContainerLow,
-                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(heading, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelLarge?.copyWith(color: scheme.onSurfaceVariant)),
-                              ),
-                              const SizedBox(width: 8),
-                              Text('${row.count} 处', style: theme.textTheme.labelSmall?.copyWith(color: scheme.primary)),
-                            ],
+                      ],
+                    )
+                  : ListView.builder(
+                      key: const ValueKey('book-search-results'),
+                      controller: widget.scrollController,
+                      padding: const EdgeInsets.only(bottom: 24),
+                      itemCount: _rows.length,
+                      itemBuilder: (context, i) {
+                        final row = _rows[i];
+                        if (row is _GroupHeaderRow) {
+                          final heading = row.volTitle.isNotEmpty && row.chapterTitle.isNotEmpty
+                              ? '${row.volTitle} · ${row.chapterTitle}'
+                              : (row.chapterTitle.isNotEmpty ? row.chapterTitle : row.volTitle);
+                          return Container(
+                            color: scheme.surfaceContainerLow,
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(heading, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelLarge?.copyWith(color: scheme.onSurfaceVariant)),
+                                ),
+                                const SizedBox(width: 8),
+                                Text('${row.count} 处', style: theme.textTheme.labelSmall?.copyWith(color: scheme.primary)),
+                              ],
+                            ),
+                          );
+                        }
+                        final hit = (row as _HitRow).hit;
+                        return InkWell(
+                          onTap: () {
+                            Navigator.pop(context);
+                            widget.onSelectHit(hit);
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                            child: _snippetText(hit, theme),
                           ),
                         );
-                      }
-                      final hit = (row as _HitRow).hit;
-                      return InkWell(
-                        onTap: () {
-                          Navigator.pop(context);
-                          widget.onSelectHit(hit);
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                          child: _snippetText(hit, theme),
-                        ),
-                      );
-                    },
-                  ),
+                      },
+                    ),
+            ),
           ),
         ],
       ),

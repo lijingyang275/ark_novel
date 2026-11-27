@@ -118,6 +118,8 @@ class Wenku8Client {
     if (!gate.isCompleted) gate.complete();
   }
 
+  static final _cookieEscapeRe = RegExp(r'[ ",;\\]');
+
   /// 把 `a=1;b=2` 形式的 cookie 字符串解析成 [Cookie] 列表，转义 `dart:io` 不接受的字符。
   static List<Cookie> parseCookieString(String cookie) {
     final cookies = <Cookie>[];
@@ -125,7 +127,7 @@ class Wenku8Client {
       final kv = e.split('=');
       try {
         // dart:io 的 Cookie 不允许值里有空格、引号、逗号、分号、反斜杠（例如阅读记录 cookie 里的逗号），转义后再放进去
-        cookies.add(Cookie(kv[0].trim(), kv.sublist(1).join('=').replaceAllMapped(RegExp(r'[ ",;\\]'), (m) => '%${m[0]!.codeUnitAt(0).toRadixString(16).toUpperCase()}')));
+        cookies.add(Cookie(kv[0].trim(), kv.sublist(1).join('=').replaceAllMapped(_cookieEscapeRe, (m) => '%${m[0]!.codeUnitAt(0).toRadixString(16).toUpperCase()}')));
       } on FormatException {
         // 名字里有 dart:io 不认的字符：只跳过这一个，别让整批都放不进去
       }
@@ -153,14 +155,22 @@ class Wenku8Client {
   /// [referer] 给目录、正文请求带上来源页，和浏览器行为一致。
   /// [cancelToken] 支持在排队或传输阶段取消请求，释放节流槽位。
   /// [retryTransient] 为 true 时对幂等 GET 的瞬态连接错误/502/504 最多重试 1 次（绝不重试 403/CF/4xx），并发相同 `(url, referer)` 自动去重合并。
-  Future<String> getPage(String url, {bool charsetParam = true, String? referer, CancelToken? cancelToken, bool retryTransient = true}) async {
+  /// [allowChallengeFallback] 为 false（如阅读器后台章节预加载）时遇到 403/CF 直接快速失败，绝不静默拉起无头 WebView。
+  Future<String> getPage(
+    String url, {
+    bool charsetParam = true,
+    String? referer,
+    CancelToken? cancelToken,
+    bool retryTransient = true,
+    bool allowChallengeFallback = true,
+  }) async {
     if (cancelToken?.isCancelled == true) {
       throw cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: url), reason: 'cancelled');
     }
     final currentCharset = charset();
     final target = charsetParam || currentCharset != CharsetType.gbk ? Wenku8Charset.withCharsetParam(url, currentCharset) : url;
     if (!retryTransient) {
-      return _fetchPage(target, currentCharset, referer, cancelToken, retryTransient: false);
+      return _fetchPage(target, currentCharset, referer, cancelToken, retryTransient: false, allowChallengeFallback: allowChallengeFallback);
     }
 
     final key = (target, referer);
@@ -168,6 +178,9 @@ class Wenku8Client {
     if (entry != null && entry.internalCancel.isCancelled) {
       _inflight.remove(key);
       entry = null;
+    }
+    if (entry == null && !allowChallengeFallback) {
+      return _fetchPage(target, currentCharset, referer, cancelToken, retryTransient: true, allowChallengeFallback: false);
     }
     if (entry == null) {
       final internalCancel = CancelToken();
@@ -215,14 +228,29 @@ class Wenku8Client {
     return done.future;
   }
 
-  Future<String> _fetchPage(String target, CharsetType currentCharset, String? referer, CancelToken? cancelToken, {required bool retryTransient}) async {
+  Future<String> _fetchPage(
+    String target,
+    CharsetType currentCharset,
+    String? referer,
+    CancelToken? cancelToken, {
+    required bool retryTransient,
+    bool allowChallengeFallback = true,
+  }) async {
     final targetHost = Uri.tryParse(target)?.host.toLowerCase() ?? '';
     final requestStarted = DateTime.now();
     final gateBox = <Completer<void>?>[null];
     final gateHostBox = <String?>[null];
     final Uint8List bytes;
     try {
-      bytes = await _getRetrying(target, referer, cancelToken, retryTransient: retryTransient, gateBox: gateBox, gateHostBox: gateHostBox);
+      bytes = await _getRetrying(
+        target,
+        referer,
+        cancelToken,
+        retryTransient: retryTransient,
+        allowChallengeFallback: allowChallengeFallback,
+        gateBox: gateBox,
+        gateHostBox: gateHostBox,
+      );
     } on DioException catch (e) {
       final ownedGate = gateBox[0];
       // 若经过 301/302 跳转（例如 wenku8.cc -> wenku8.net），实际触发 CF 的是跳转后的域名，门控与冷却必须按该域名一致维护
@@ -234,7 +262,7 @@ class Wenku8Client {
         _releaseGate(cfHost, ownedGate);
         rethrow;
       }
-      final fallback = challengeFallback;
+      final fallback = allowChallengeFallback ? challengeFallback : null;
       if (fallback == null || e.requestOptions.extra['cfCooldownHit'] == true) {
         _releaseGate(cfHost, ownedGate);
         rethrow;
@@ -320,6 +348,7 @@ class Wenku8Client {
     String? referer,
     CancelToken? cancelToken, {
     required bool retryTransient,
+    bool allowChallengeFallback = true,
     List<Completer<void>?>? gateBox,
     List<String?>? gateHostBox,
   }) async {
@@ -329,7 +358,7 @@ class Wenku8Client {
       if (cancelToken?.isCancelled == true) {
         throw cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: target), reason: 'cancelled');
       }
-      final extra = <String, dynamic>{'cfFallback': challengeFallback != null};
+      final extra = <String, dynamic>{'cfFallback': allowChallengeFallback && challengeFallback != null};
       try {
         final response = await dio.get(
           target,
@@ -403,18 +432,27 @@ class Wenku8Client {
     if (status >= 400) throw Wenku8HttpException(status);
   }
 
+  static bool _isMainSiteHost(String host) {
+    final h = host.toLowerCase();
+    return h == 'wenku8.net' || h.endsWith('.wenku8.net') || h == 'wenku8.cc' || h.endsWith('.wenku8.cc');
+  }
+
   /// wenku8 会用 3xx 跳转（例如跳到登录页）。dio 关闭了自动跳转，这里手动跟随，
   /// 好让解析层拿到最终页面并判断出"未登录"等情况。
   /// - location 可能是相对路径（`userdetail.php`、`/login.php`）或绝对地址，基于当前请求地址解析
+  /// - 主站明文 `http://` 跳转自动升级为 `https://`，避免丢掉 `Secure` cookie 或触发明文拦截
   /// - 最多跟随 [maxRedirects] 次，防止重定向死循环
   Future<Uint8List> _followRedirect(Response response, {int maxRedirects = 5, bool submitting = false, CancelToken? cancelToken, Map<String, dynamic>? extra}) async {
     var current = response;
     for (var i = 0; i < maxRedirects; i++) {
       final status = current.statusCode;
       if (status == null || status < 300 || status >= 400) break;
-      final location = current.headers.value('location');
+      final location = current.headers.value('location')?.trim();
       if (location == null || location.isEmpty) break;
-      final target = current.requestOptions.uri.resolve(location);
+      var target = current.requestOptions.uri.resolve(location);
+      if (target.scheme == 'http' && _isMainSiteHost(target.host)) {
+        target = target.replace(scheme: 'https');
+      }
       if (submitting && target.path.toLowerCase().endsWith('/login.php')) throw const Wenku8UnexpectedPageException('登录已失效，请重新登录后再提交');
       // 307/308 要保留 POST 方法和请求体，不能改成 GET，也不自动重发可能已有副作用的请求。
       if (submitting && (status == 307 || status == 308)) throw const Wenku8UnexpectedPageException('提交请求被重定向，结果未确认，请刷新后检查');
@@ -588,7 +626,7 @@ class _ThrottleInterceptor extends Interceptor {
         final err = gate == null ? cooldownError?.call(host, options) : null;
         if (gate != null || err != null) {
           _busy = false;
-          Future.microtask(_dispatch);
+          unawaited(Future.microtask(_dispatch));
           if (err != null) {
             handler.reject(err);
             return;
@@ -600,7 +638,7 @@ class _ThrottleInterceptor extends Interceptor {
     }
 
     options.extra['throttled'] = true;
-    options.cancelToken?.whenCancel.whenComplete(() => _release(options));
+    unawaited(options.cancelToken?.whenCancel.whenComplete(() => _release(options)));
     handler.next(options);
   }
 
@@ -696,9 +734,11 @@ class _ThrottleInterceptor extends Interceptor {
     return diff > const Duration(seconds: 120) ? const Duration(seconds: 120) : diff;
   }
 
+  static final _httpDateRe = RegExp(r'^[A-Za-z]{3},\s+(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+GMT$');
+
   static DateTime? _parseHttpDate(String s) {
     // RFC 7231 IMF-fixdate: "Sun, 06 Nov 1994 08:49:37 GMT"
-    final m = RegExp(r'^[A-Za-z]{3},\s+(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+GMT$').firstMatch(s);
+    final m = _httpDateRe.firstMatch(s);
     if (m == null) return null;
     const months = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12};
     final month = months[m[2]!.toLowerCase()];

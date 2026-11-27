@@ -7,6 +7,7 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import 'cache.dart';
 import 'library.dart';
+import 'meta_cache.dart';
 import 'session.dart';
 import 'stats.dart';
 
@@ -501,34 +502,38 @@ class BangumiCovers {
 
   final Dio _dio;
   final Duration rateLimitBase;
-  final _running = <String, Future<BgmSeries?>>{};
-  final _runningInfo = <String, Future<BgmSubjectInfo?>>{};
-  final _runningChars = <String, Future<List<BgmCharacter>>>{};
+  final _running = <String, _InflightCall<BgmSeries?>>{};
+  final _runningInfo = <String, _InflightCall<BgmSubjectInfo?>>{};
+  final _runningChars = <String, _InflightCall<List<BgmCharacter>>>{};
+  final _revalidatingSeries = <String>{};
+  // 短期复用同一次会话里刚拉取过的 /subjects/{id}/subjects，避免 series() 与 subjectInfo() 连续重复请求
+  final _recentRelations = <int, (DateTime at, List<Map> data)>{};
+  static const _relationsCacheTtl = Duration(minutes: 5);
   // 全局并发上限：最多同时查 2 本书 / 4 条 HTTP 请求，防止文库熔断时瞬间触发百级并发
   final _bookSem = _Semaphore(2);
   final _reqSem = _Semaphore(4);
   DateTime _pausedUntil = DateTime.fromMillisecondsSinceEpoch(0);
   int _consecutive429 = 0;
 
-  static Box get _box => Hive.box('session');
+  static bool get _boxOpen => MetaCache.isOpen;
   static const _api = 'https://api.bgm.tv/v0';
 
   /// 条目详情与角色列表缓存有效期（7 天）
   static const infoCacheTtl = Duration(days: 7);
 
+  /// 系列封面缓存 stale-while-revalidate 有效期（30 天）
+  static const seriesCacheTtl = Duration(days: 30);
+
   /// 网站上的原书名（不是自己改的显示名）：书架、统计、离线缓存里有哪个用哪个
   static String? bookTitle(String aid) =>
       (Hive.isBoxOpen('session') ? (LibraryStore.get(aid)?['title'] as String?) ?? ReadingStats.meta(aid)?.title : null) ??
-      (Hive.isBoxOpen('chapter_index') ? ChapterCache.books()[aid]?.$1 : null);
+      (Hive.isBoxOpen('chapter_index') ? ChapterCache.metaOf(aid)?.$1 : null);
 
-  /// 存下来的结果，没查过或没找到为 null（不联网）
-  static BgmSeries? saved(String aid) {
-    if (!Hive.isBoxOpen('session')) return null;
-    final m = _box.get('bgm:$aid') as Map?;
-    if (m == null || m['id'] == 0) return null;
+  static BgmSeries? _parseSeries(Map? m) {
+    if (m == null || (m['id'] as num?)?.toInt() == 0) return null;
     List<BgmVol> vols(Object? l) => [for (final v in ((l as List?) ?? const []).cast<Map>()) (name: v['n'] as String, img: v['i'] as String)];
     return (
-      id: m['id'] as int,
+      id: (m['id'] as num).toInt(),
       name: m['name'] as String,
       vols: vols(m['vols']),
       extras: [
@@ -537,13 +542,29 @@ class BangumiCovers {
     );
   }
 
-  /// 本地缓存的 Bangumi 条目详情（不联网，未查过或未命中返回 null）。
-  static BgmSubjectInfo? savedInfo(String aid) {
-    if (!Hive.isBoxOpen('session')) return null;
-    final m = _box.get('bgm_info:$aid') as Map?;
+  static BgmSubjectInfo? _parseInfo(Map? m) {
     if (m == null || (m['id'] as num?)?.toInt() == 0) return null;
     return BgmSubjectInfo.fromMap(m);
   }
+
+  static List<BgmCharacter>? _parseCharacters(Map? m) {
+    if (m == null) return null;
+    final list = m['list'];
+    if (list is! List) return null;
+    return [for (final item in list.whereType<Map>()) BgmCharacter.fromMap(item)];
+  }
+
+  /// 存下来的结果（同步查热点缓存或回退 Box），没查过或没找到为 null（不联网）
+  static BgmSeries? saved(String aid) => _boxOpen ? _parseSeries(MetaCache.peekMap('bgm:$aid')) : null;
+
+  /// 异步从本地缓存读取系列结果（含 LazyBox 磁盘按需加载，不联网）
+  static Future<BgmSeries?> loadSaved(String aid) async => _boxOpen ? _parseSeries(await MetaCache.getMap('bgm:$aid')) : null;
+
+  /// 本地缓存的 Bangumi 条目详情（同步查热点缓存或回退 Box，不联网）。
+  static BgmSubjectInfo? savedInfo(String aid) => _boxOpen ? _parseInfo(MetaCache.peekMap('bgm_info:$aid')) : null;
+
+  /// 异步从本地缓存读取 Bangumi 条目详情（含 LazyBox 磁盘按需加载，不联网）。
+  static Future<BgmSubjectInfo?> loadSavedInfo(String aid) async => _boxOpen ? _parseInfo(await MetaCache.getMap('bgm_info:$aid')) : null;
 
   /// 判断缓存的条目详情是否超过 7 天需要按需刷新。
   static bool isInfoExpired(BgmSubjectInfo info, {DateTime? now}) {
@@ -551,53 +572,155 @@ class BangumiCovers {
     return elapsed < 0 || elapsed >= infoCacheTtl.inMilliseconds;
   }
 
-  /// 本地缓存的 Bangumi 角色列表（不联网）。
-  static List<BgmCharacter>? savedCharacters(String aid) {
-    if (!Hive.isBoxOpen('session')) return null;
-    final m = _box.get('bgm_chars:$aid') as Map?;
-    if (m == null) return null;
-    final list = m['list'];
-    if (list is! List) return null;
-    return [for (final item in list.whereType<Map>()) BgmCharacter.fromMap(item)];
+  /// 本地缓存的 Bangumi 角色列表（同步查热点缓存或回退 Box，不联网）。
+  static List<BgmCharacter>? savedCharacters(String aid) => _boxOpen ? _parseCharacters(MetaCache.peekMap('bgm_chars:$aid')) : null;
+
+  /// 异步从本地缓存读取 Bangumi 角色列表（含 LazyBox 磁盘按需加载，不联网）。
+  static Future<List<BgmCharacter>?> loadSavedCharacters(String aid) async =>
+      _boxOpen ? _parseCharacters(await MetaCache.getMap('bgm_chars:$aid')) : null;
+
+  /// 同一本书同时要几次（几卷一起补、信息卡与封面队列并发）只查一次；全局最多同时查 2 本书。
+  Future<BgmSeries?> series(String aid) => _seriesSingleFlight(aid);
+
+  /// 通用引用计数单飞合并：多调用方并发共享同一在途任务，全部取消时才取消底层 `internalCancel`。
+  /// 若已有无标题任务正在执行而本次携带标题，或本次 `forceRefresh == true` 而旧任务非强刷，均不复用旧任务。
+  Future<T> _runSingleFlight<T>(
+    Map<String, _InflightCall<T>> inflight,
+    String key,
+    Future<T> Function(CancelToken internalCancel) start, {
+    bool hasTitle = true,
+    bool forceRefresh = false,
+    CancelToken? cancelToken,
+    String cancelPath = '',
+  }) {
+    if (cancelToken?.isCancelled == true) {
+      return Future.error(cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: cancelPath), reason: 'cancelled'));
+    }
+    var entry = inflight[key];
+    if (entry != null && entry.internalCancel.isCancelled) {
+      inflight.remove(key);
+      entry = null;
+    }
+    if (entry != null && !entry.hasTitle && hasTitle) {
+      entry = null;
+    }
+    if (entry != null && forceRefresh && !entry.forceRefresh) {
+      entry = null;
+    }
+    if (entry == null) {
+      final internalCancel = CancelToken();
+      entry = _InflightCall<T>(internalCancel, hasTitle: hasTitle, forceRefresh: forceRefresh);
+      inflight[key] = entry;
+      final current = entry;
+      current.future = start(internalCancel).whenComplete(() {
+        if (identical(inflight[key], current)) inflight.remove(key);
+      });
+    }
+    final active = entry;
+    active.waiters++;
+    if (cancelToken == null) {
+      return active.future.whenComplete(() => active.waiters--);
+    }
+    final done = Completer<T>();
+    var released = false;
+    void release({required bool cancelled}) {
+      if (released) return;
+      released = true;
+      active.waiters--;
+      if (cancelled && active.waiters <= 0 && !active.internalCancel.isCancelled) {
+        if (identical(inflight[key], active)) inflight.remove(key);
+        active.internalCancel.cancel(cancelToken.cancelError?.error ?? 'cancelled');
+      }
+    }
+
+    unawaited(
+      active.future.then(
+        (v) {
+          release(cancelled: false);
+          if (!done.isCompleted) done.complete(v);
+        },
+        onError: (Object e, StackTrace st) {
+          release(cancelled: false);
+          if (!done.isCompleted) done.completeError(e, st);
+        },
+      ),
+    );
+    unawaited(
+      cancelToken.whenCancel.then((err) {
+        release(cancelled: true);
+        if (!done.isCompleted) done.completeError(err);
+      }),
+    );
+    return done.future;
   }
 
-  /// 同一本书同时要几次（几卷一起补）只查一次；全局最多同时查 2 本书。
-  Future<BgmSeries?> series(String aid) => _running[aid] ??= _bookSem.run(() => _series(aid)).whenComplete(() {
-    _running.remove(aid);
-  });
+  /// 在已有单飞任务时直接复用；统一在单飞层获取 `_bookSem`，避免外层持锁等待内部信号量产生 AB-BA 死锁。
+  Future<BgmSeries?> _seriesSingleFlight(
+    String aid, {
+    String? fallbackTitle,
+    CancelToken? cancelToken,
+  }) {
+    final hasFallback = fallbackTitle != null && fallbackTitle.trim().isNotEmpty;
+    final hasTitle = hasFallback || (bookTitle(aid)?.trim().isNotEmpty ?? false);
+    return _runSingleFlight<BgmSeries?>(
+      _running,
+      aid,
+      (internalCancel) => _bookSem.run(() => _series(aid, fallbackTitle: fallbackTitle, cancelToken: internalCancel)),
+      hasTitle: hasTitle,
+      cancelToken: cancelToken,
+      cancelPath: 'bgm:$aid',
+    );
+  }
 
   /// 拉取并缓存 Bangumi 条目详情（`bgm_info:$aid`，7 天内直接复用缓存；网络失败时回退旧缓存）。
   Future<BgmSubjectInfo?> subjectInfo(String aid, {String? fallbackTitle, CancelToken? cancelToken}) {
-    final cachedMap = Hive.isBoxOpen('session') ? _box.get('bgm_info:$aid') as Map? : null;
+    final hotMap = _boxOpen ? MetaCache.peekMap('bgm_info:$aid') : null;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    if (cachedMap != null) {
-      final t = (cachedMap['t'] as num?)?.toInt() ?? 0;
+    if (hotMap != null) {
+      final t = (hotMap['t'] as num?)?.toInt() ?? 0;
       if (nowMs - t >= 0 && nowMs - t < infoCacheTtl.inMilliseconds) {
-        return Future.value((cachedMap['id'] as num?)?.toInt() == 0 ? null : BgmSubjectInfo.fromMap(cachedMap));
+        return Future.value(_parseInfo(hotMap));
       }
     }
-    return _runningInfo[aid] ??= _bookSem.run(() => _subjectInfo(aid, fallbackTitle: fallbackTitle, cancelToken: cancelToken)).whenComplete(() {
-      _runningInfo.remove(aid);
-    });
+    final hasFallback = fallbackTitle != null && fallbackTitle.trim().isNotEmpty;
+    final hasTitle = hasFallback || (bookTitle(aid)?.trim().isNotEmpty ?? false);
+    return _runSingleFlight<BgmSubjectInfo?>(
+      _runningInfo,
+      aid,
+      (internalCancel) => _subjectInfo(aid, fallbackTitle: fallbackTitle, cancelToken: internalCancel),
+      hasTitle: hasTitle,
+      cancelToken: cancelToken,
+      cancelPath: 'bgm_info:$aid',
+    );
   }
 
   Future<BgmSubjectInfo?> _subjectInfo(String aid, {String? fallbackTitle, CancelToken? cancelToken}) async {
-    final stale = savedInfo(aid);
+    final cachedMap = _boxOpen ? await MetaCache.getMap('bgm_info:$aid') : null;
+    if (cachedMap != null) {
+      final t = (cachedMap['t'] as num?)?.toInt() ?? 0;
+      final elapsed = DateTime.now().millisecondsSinceEpoch - t;
+      if (elapsed >= 0 && elapsed < infoCacheTtl.inMilliseconds) {
+        return _parseInfo(cachedMap);
+      }
+    }
+    final stale = _parseInfo(cachedMap);
     try {
-      final s = await _series(aid, fallbackTitle: fallbackTitle, cancelToken: cancelToken);
+      final s = await _seriesSingleFlight(aid, fallbackTitle: fallbackTitle, cancelToken: cancelToken);
       if (s == null) {
-        if (Hive.isBoxOpen('session')) await _box.put('bgm_info:$aid', {'id': 0, 't': DateTime.now().millisecondsSinceEpoch});
+        if (_boxOpen) await MetaCache.putMap('bgm_info:$aid', {'id': 0, 't': DateTime.now().millisecondsSinceEpoch});
         return null;
       }
-      final results = await Future.wait<Object?>([
-        _request(() => _dio.get<Map>('$_api/subjects/${s.id}', cancelToken: cancelToken)),
-        _relations(s.id, cancelToken: cancelToken),
-      ]);
-      final subj = ((results[0] as Response<Map>).data ?? const {});
-      final rels = results[1] as List<Map>;
-      final info = BgmSubjectInfo.fromApi(subj, rels);
-      if (Hive.isBoxOpen('session')) await _box.put('bgm_info:$aid', info.toMap());
-      return info;
+      return await _bookSem.run(() async {
+        final results = await Future.wait<Object?>([
+          _request(() => _dio.get<Map>('$_api/subjects/${s.id}', cancelToken: cancelToken)),
+          _relations(s.id, cancelToken: cancelToken),
+        ]);
+        final subj = ((results[0] as Response<Map>).data ?? const {});
+        final rels = results[1] as List<Map>;
+        final info = BgmSubjectInfo.fromApi(subj, rels);
+        if (_boxOpen) await MetaCache.putMap('bgm_info:$aid', info.toMap());
+        return info;
+      });
     } catch (_) {
       if (stale != null) return stale;
       rethrow;
@@ -606,52 +729,73 @@ class BangumiCovers {
 
   /// 拉取并缓存 Bangumi 角色列表（`bgm_chars:$aid`）；若小说条目角色少于 3 个且有关联动画，自动合并首个关联动画条目的角色。
   Future<List<BgmCharacter>> characters(String aid, {String? fallbackTitle, bool forceRefresh = false, CancelToken? cancelToken}) {
-    if (!forceRefresh && Hive.isBoxOpen('session')) {
-      final m = _box.get('bgm_chars:$aid') as Map?;
+    if (!forceRefresh && _boxOpen) {
+      final m = MetaCache.peekMap('bgm_chars:$aid');
       if (m != null) {
         final t = (m['t'] as num?)?.toInt() ?? 0;
         final elapsed = DateTime.now().millisecondsSinceEpoch - t;
         if (elapsed >= 0 && elapsed < infoCacheTtl.inMilliseconds) {
-          final list = m['list'];
-          if (list is List) return Future.value([for (final item in list.whereType<Map>()) BgmCharacter.fromMap(item)]);
+          final parsed = _parseCharacters(m);
+          if (parsed != null) return Future.value(parsed);
         }
       }
     }
-    return _runningChars[aid] ??= _bookSem.run(() => _characters(aid, fallbackTitle: fallbackTitle, cancelToken: cancelToken)).whenComplete(() {
-      _runningChars.remove(aid);
-    });
+    final hasFallback = fallbackTitle != null && fallbackTitle.trim().isNotEmpty;
+    final hasTitle = hasFallback || (bookTitle(aid)?.trim().isNotEmpty ?? false);
+    return _runSingleFlight<List<BgmCharacter>>(
+      _runningChars,
+      aid,
+      (internalCancel) => _characters(aid, fallbackTitle: fallbackTitle, forceRefresh: forceRefresh, cancelToken: internalCancel),
+      hasTitle: hasTitle,
+      forceRefresh: forceRefresh,
+      cancelToken: cancelToken,
+      cancelPath: 'bgm_chars:$aid',
+    );
   }
 
-  Future<List<BgmCharacter>> _characters(String aid, {String? fallbackTitle, CancelToken? cancelToken}) async {
-    final s = await _series(aid, fallbackTitle: fallbackTitle, cancelToken: cancelToken);
-    if (s == null) return const [];
-    final raw = ((await _request(() => _dio.get<List>('$_api/subjects/${s.id}/characters', cancelToken: cancelToken))).data ?? const []).whereType<Map>().toList();
-    final chars = <BgmCharacter>[];
-    final seen = <int>{};
-    for (final m in raw) {
-      final c = BgmCharacter.fromSubjectApi(m);
-      if (c.id > 0 && seen.add(c.id)) chars.add(c);
-    }
-    if (chars.length < 3) {
-      try {
-        final rels = savedInfo(aid)?.relations ?? BgmSubjectInfo.fromApi({'id': s.id}, await _relations(s.id, cancelToken: cancelToken)).relations;
-        final firstAnime = rels.where((r) => r.type == 2).firstOrNull;
-        if (firstAnime != null) {
-          final animeRaw = ((await _request(() => _dio.get<List>('$_api/subjects/${firstAnime.id}/characters', cancelToken: cancelToken))).data ?? const []).whereType<Map>().toList();
-          for (final m in animeRaw) {
-            final c = BgmCharacter.fromSubjectApi(m);
-            if (c.id > 0 && seen.add(c.id)) chars.add(c);
-          }
+  Future<List<BgmCharacter>> _characters(String aid, {String? fallbackTitle, bool forceRefresh = false, CancelToken? cancelToken}) async {
+    if (!forceRefresh && _boxOpen) {
+      final m = await MetaCache.getMap('bgm_chars:$aid');
+      if (m != null) {
+        final t = (m['t'] as num?)?.toInt() ?? 0;
+        final elapsed = DateTime.now().millisecondsSinceEpoch - t;
+        if (elapsed >= 0 && elapsed < infoCacheTtl.inMilliseconds) {
+          final parsed = _parseCharacters(m);
+          if (parsed != null) return parsed;
         }
-      } catch (_) {}
+      }
     }
-    if (Hive.isBoxOpen('session')) {
-      await _box.put('bgm_chars:$aid', {
-        't': DateTime.now().millisecondsSinceEpoch,
-        'list': [for (final c in chars) c.toMap()],
-      });
-    }
-    return chars;
+    final s = await _seriesSingleFlight(aid, fallbackTitle: fallbackTitle, cancelToken: cancelToken);
+    if (s == null) return const [];
+    return _bookSem.run(() async {
+      final raw = ((await _request(() => _dio.get<List>('$_api/subjects/${s.id}/characters', cancelToken: cancelToken))).data ?? const []).whereType<Map>().toList();
+      final chars = <BgmCharacter>[];
+      final seen = <int>{};
+      for (final m in raw) {
+        final c = BgmCharacter.fromSubjectApi(m);
+        if (c.id > 0 && seen.add(c.id)) chars.add(c);
+      }
+      if (chars.length < 3) {
+        try {
+          final rels = (await loadSavedInfo(aid))?.relations ?? BgmSubjectInfo.fromApi({'id': s.id}, await _relations(s.id, cancelToken: cancelToken)).relations;
+          final firstAnime = rels.where((r) => r.type == 2).firstOrNull;
+          if (firstAnime != null) {
+            final animeRaw = ((await _request(() => _dio.get<List>('$_api/subjects/${firstAnime.id}/characters', cancelToken: cancelToken))).data ?? const []).whereType<Map>().toList();
+            for (final m in animeRaw) {
+              final c = BgmCharacter.fromSubjectApi(m);
+              if (c.id > 0 && seen.add(c.id)) chars.add(c);
+            }
+          }
+        } catch (_) {}
+      }
+      if (_boxOpen) {
+        await MetaCache.putMap('bgm_chars:$aid', {
+          't': DateTime.now().millisecondsSinceEpoch,
+          'list': [for (final c in chars) c.toMap()],
+        });
+      }
+      return chars;
+    });
   }
 
   /// 按需拉取单个角色详情 `GET /v0/characters/{cid}`，合并 `infobox` 中的简体中文名、别名和简介。
@@ -689,8 +833,8 @@ class BangumiCovers {
       }));
       onProgress?.call(done, pendingIdx.length, List<BgmCharacter>.unmodifiable(updated));
     }
-    if (Hive.isBoxOpen('session') && cancelToken?.isCancelled != true) {
-      await _box.put('bgm_chars:$aid', {
+    if (_boxOpen && cancelToken?.isCancelled != true) {
+      await MetaCache.putMap('bgm_chars:$aid', {
         't': DateTime.now().millisecondsSinceEpoch,
         'list': [for (final c in updated) c.toMap()],
       });
@@ -722,14 +866,46 @@ class BangumiCovers {
     }
   }
 
-  Future<BgmSeries?> _series(String aid, {String? fallbackTitle, CancelToken? cancelToken}) async {
-    final m = Hive.isBoxOpen('session') ? _box.get('bgm:$aid') as Map? : null;
-    if (m != null && m['id'] != 0) {
-      // 加外传之前存的只有主系列：补查一次外传
-      if (m['x'] == null) await _box.put('bgm:$aid', {...m, 'x': await _extras(await _relations(m['id'] as int, cancelToken: cancelToken), cancelToken: cancelToken)});
-      return saved(aid);
+  Future<void> _revalidateSeries(String aid, int subjectId, Map baseRecord) async {
+    if (!_revalidatingSeries.add(aid)) return;
+    try {
+      await _bookSem.run(() async {
+        final rel = await _relations(subjectId);
+        final vols = _vols(rel);
+        final extras = await _extras(rel);
+        final updated = <String, Object?>{
+          ...baseRecord.map((k, v) => MapEntry('$k', v)),
+          if (vols.isNotEmpty) 'vols': vols,
+          'x': extras,
+          't': DateTime.now().millisecondsSinceEpoch,
+        };
+        if (_boxOpen) await MetaCache.putMap('bgm:$aid', updated);
+      });
+    } catch (_) {
+      // 后台 stale-while-revalidate 静默失败，保留旧缓存
+    } finally {
+      _revalidatingSeries.remove(aid);
     }
-    if (m != null && DateTime.now().millisecondsSinceEpoch - (m['t'] as int) < const Duration(days: 30).inMilliseconds) return null;
+  }
+
+  Future<BgmSeries?> _series(String aid, {String? fallbackTitle, CancelToken? cancelToken}) async {
+    var m = _boxOpen ? await MetaCache.getMap('bgm:$aid') : null;
+    if (m != null && (m['id'] as num?)?.toInt() != 0) {
+      final id = (m['id'] as num).toInt();
+      // 加外传之前存的只有主系列：补查一次外传
+      if (m['x'] == null) {
+        m = {...m, 'x': await _extras(await _relations(id, cancelToken: cancelToken), cancelToken: cancelToken), 't': DateTime.now().millisecondsSinceEpoch};
+        if (_boxOpen) await MetaCache.putMap('bgm:$aid', m);
+      } else {
+        final t = (m['t'] as num?)?.toInt() ?? 0;
+        final elapsed = DateTime.now().millisecondsSinceEpoch - t;
+        if (t <= 0 || elapsed < 0 || elapsed >= seriesCacheTtl.inMilliseconds) {
+          unawaited(_revalidateSeries(aid, id, m));
+        }
+      }
+      return _parseSeries(m);
+    }
+    if (m != null && DateTime.now().millisecondsSinceEpoch - ((m['t'] as num?)?.toInt() ?? 0) < seriesCacheTtl.inMilliseconds) return null;
     final title = bookTitle(aid) ?? fallbackTitle;
     if (title == null || title.trim().isEmpty) return null;
     // 有两个译名时先用拆开的（Bangumi 上的中文名多是其中一个），再用整个书名；
@@ -748,7 +924,7 @@ class BangumiCovers {
     if (fallbackSingle != null) {
       return _saveSeriesHit(aid, fallbackSingle, cancelToken: cancelToken);
     }
-    if (Hive.isBoxOpen('session')) await _box.put('bgm:$aid', {'id': 0, 't': DateTime.now().millisecondsSinceEpoch});
+    if (_boxOpen) await MetaCache.putMap('bgm:$aid', {'id': 0, 't': DateTime.now().millisecondsSinceEpoch});
     return null;
   }
 
@@ -759,27 +935,26 @@ class BangumiCovers {
     // 单卷小说没有「单行本」子条目，兜底把自身封面作为第 1 卷
     final resolvedVols = vols.isEmpty && _img(hit).isNotEmpty ? [{'n': (hit['name'] as String?) ?? '', 'i': _img(hit)}] : vols;
     final extras = await _extras(rel, cancelToken: cancelToken);
-    if (Hive.isBoxOpen('session')) {
-      await _box.put('bgm:$aid', {'id': id, 'name': _nameOf(hit), 'vols': resolvedVols, 'x': extras, 't': DateTime.now().millisecondsSinceEpoch});
-      return saved(aid);
-    }
-    return (
-      id: id,
-      name: _nameOf(hit),
-      vols: [for (final v in resolvedVols) (name: v['n'] as String, img: v['i'] as String)],
-      extras: [
-        for (final x in extras)
-          (name: x['n'] as String, cn: x['c'] as String, img: x['i'] as String, vols: [for (final v in ((x['v'] as List?) ?? const []).cast<Map>()) (name: v['n'] as String, img: v['i'] as String)]),
-      ],
-    );
+    final record = {'id': id, 'name': _nameOf(hit), 'vols': resolvedVols, 'x': extras, 't': DateTime.now().millisecondsSinceEpoch};
+    if (_boxOpen) await MetaCache.putMap('bgm:$aid', record);
+    return _parseSeries(record);
   }
 
   static String _nameOf(Map s) => (s['name_cn'] as String?)?.isNotEmpty ?? false ? s['name_cn'] as String : s['name'] as String;
 
   static String _img(Map s) => (s['images'] as Map?)?['large'] as String? ?? '';
 
-  Future<List<Map>> _relations(int id, {CancelToken? cancelToken}) async =>
-      ((await _request(() => _dio.get<List>('$_api/subjects/$id/subjects', cancelToken: cancelToken))).data ?? const []).cast<Map>();
+  Future<List<Map>> _relations(int id, {CancelToken? cancelToken}) async {
+    final hit = _recentRelations[id];
+    if (hit != null && DateTime.now().difference(hit.$1) < _relationsCacheTtl) {
+      return hit.$2;
+    }
+    final data = ((await _request(() => _dio.get<List>('$_api/subjects/$id/subjects', cancelToken: cancelToken))).data ?? const []).cast<Map>();
+    _recentRelations.remove(id);
+    _recentRelations[id] = (DateTime.now(), data);
+    if (_recentRelations.length > 32) _recentRelations.remove(_recentRelations.keys.first);
+    return data;
+  }
 
   static List<Map> _vols(List<Map> rel) => [
     for (final s in rel)
@@ -810,13 +985,21 @@ class BangumiCovers {
   }
 }
 
+class _InflightCall<T> {
+  _InflightCall(this.internalCancel, {required this.hasTitle, this.forceRefresh = false});
+
+  final CancelToken internalCancel;
+  final bool hasTitle;
+  final bool forceRefresh;
+  late final Future<T> future;
+  int waiters = 0;
+}
+
 final bangumiProvider = Provider<BangumiCovers>((ref) {
-  final store = ref.watch(sessionStoreProvider);
-  ref.watch(proxyProvider);
-  ref.watch(nativeNetProvider);
+  final adapter = ref.watch(sharedHttpAdapterProvider);
   // Bangumi 要求带上说明是哪个程序的 User-Agent
   final dio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 10), receiveTimeout: const Duration(seconds: 20), headers: {'User-Agent': 'ark_novel (https://github.com/chenshi221/ark_novel)'}))
-    ..httpClientAdapter = store.adapter();
+    ..httpClientAdapter = adapter;
   ref.onDispose(() => dio.close(force: true));
   return BangumiCovers(dio);
 });

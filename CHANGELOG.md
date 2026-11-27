@@ -1,5 +1,64 @@
 # Changelog
 
+## [1.9.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.8.1...ark_novel-v1.9.0) (2026-11-26)
+
+
+### Features
+
+* 优化全书搜索后台响应速度与长篇插图 EPUB 流式导出 ([f392377](https://github.com/chenshi221/ark_novel/commit/f3923777a8d389b607e72b1b427349ea3cf9edd2))
+* 优化冷启动速度、阅读器翻页与排版引擎及滚动朗读流畅度 ([4e392cd](https://github.com/chenshi221/ark_novel/commit/4e392cd62f6ebdcca51e564e94e4312f3f535ab0))
+* 优化多层缓存、网页压缩存储、WebDAV 增量同步与网络请求取消 ([ded4ece](https://github.com/chenshi221/ark_novel/commit/ded4ece374ef6509364857996cbe0b9757235c4e))
+* 原生重写安卓桌面小组件并压缩内置主题与繁简词表，显著缩小安装包体积 ([c4bbeb0](https://github.com/chenshi221/ark_novel/commit/c4bbeb064393b7797568d4b4c934c9816c840b6c))
+
+
+### Bug Fixes
+
+* 优化书架与统计页渲染流畅度、降低图片显存峰值并修复多处动画内存泄漏 ([f684115](https://github.com/chenshi221/ark_novel/commit/f6841152261e8cfd5f962a9258ef99af5068da29))
+
+## [1.8.1](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.8.0...ark_novel-v1.8.1) (2026-11-25)
+
+
+### Features
+
+* 统一页面过渡与按压回弹动效并支持减弱动态效果 ([81f46a2](https://github.com/chenshi221/ark_novel/commit/81f46a230862cd2cd0a979590f936ba143581ca8))
+
+
+### Bug Fixes
+
+* 修复书架书脊视图两侧点击不切换与封面书名接缝闪烁 ([a726709](https://github.com/chenshi221/ark_novel/commit/a7267095abc46979cb439a795a5aeddae3ddf5c6))
+* 小幅优化图片缓存与阅读页内存占用 ([1ba0ba7](https://github.com/chenshi221/ark_novel/commit/1ba0ba7c3359a726c2a7c6d0b1def7c7785f3cd8))
+
+## [1.8.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.7.0...ark_novel-v1.8.0) (2026-11-24)
+
+
+### Features
+
+* Mac 宽屏改为带文字的侧栏，资料库和账号直接放在侧栏里 ([f9ed3b3](https://github.com/chenshi221/ark_novel/commit/f9ed3b304a98408d8d064d900146a08df98128f4))
+* 新增书脊书架模式并优化立体书架交互、分类计数与单行顶栏 ([7b5d5c4](https://github.com/chenshi221/ark_novel/commit/7b5d5c42fae9733b5c5265aa646323027c3ef377))
+* 立体书架与分卷页新增方向性滚筒字幕、桌面 3D 视差倾转与悬停抬升 ([f35223e](https://github.com/chenshi221/ark_novel/commit/f35223e9be88873adb7d4870d7039d6794d70732))
+* 重新调整全部配色，卡片与分隔线层次更清晰 ([6797c6c](https://github.com/chenshi221/ark_novel/commit/6797c6c09bb95c6998a4c91606ee5bd252648071))
+* 重构宽屏侧边栏并支持打开设置保留侧栏与双栏布局 ([de06ab0](https://github.com/chenshi221/ark_novel/commit/de06ab0e7e24aca8ed4ed381dd1b6416c69e4f80))
+
+
+### Bug Fixes
+
+* 修复网络拦截点击验证时默认进入登录页的问题 ([cdba087](https://github.com/chenshi221/ark_novel/commit/cdba0875294d5165694fcf11647a50aa9a8854a3))
+* 修复苹果端网络栈 -1000 异常回落、重定向 HTTPS 升级与切节点自动刷新 ([5b77aea](https://github.com/chenshi221/ark_novel/commit/5b77aeae5a43809174b65e6a597c5e228795c933))
+
+## [1.7.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.6.0...ark_novel-v1.7.0) (2026-11-24)
+
+
+### Features
+
+* 优化冷启动缓存隔离、图片与超分调度并开启 Android R8 瘦身 ([3f8d64e](https://github.com/chenshi221/ark_novel/commit/3f8d64ec84e4307ad533594bc01dd068841ad49b))
+* 新增启动自愈与脱敏诊断日志、同步诊断面板及桌面端原生菜单 ([923d2bf](https://github.com/chenshi221/ark_novel/commit/923d2bf3ac7d344026386709eb52ade5384bf3c4))
+* 阅读器新增字间距与段间距、自由划线摘录（支持导出 Markdown）与跳转撤销条 ([107cb46](https://github.com/chenshi221/ark_novel/commit/107cb46e77c3801085cea7769d2bb86c44237eb1))
+
+
+### Bug Fixes
+
+* 移除本地书籍导入功能（保留在线书导出）并修复规则、人物与搜索稳定性问题 ([21d1d63](https://github.com/chenshi221/ark_novel/commit/21d1d63d5d038b3f1bc2e82674eecd7f27aae9f9))
+
 ## [1.6.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.5.0...ark_novel-v1.6.0) (2026-11-23)
 
 

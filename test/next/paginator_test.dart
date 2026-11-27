@@ -132,5 +132,141 @@ void main() {
       equals(referencePaginate(megaPara, style, const Size(260, 380), strut: strut)),
     );
   });
+
+  test('段间距分页短单行快路径：26 组多样样本与逐段 TextPainter 参考实现 100% 逐元素一致', () {
+    List<int> referencePaginateParagraphs(
+      String text,
+      TextStyle style,
+      Size size, {
+      StrutStyle? strut,
+      double firstTop = 0,
+      required double paragraphSpacing,
+    }) {
+      if (text.isEmpty) return [0];
+      final starts = <int>[0];
+      var pageTop = -firstTop;
+      var yOffset = 0.0;
+      var pStart = 0;
+      final len = text.length;
+      while (pStart < len) {
+        final nl = text.indexOf('\n', pStart);
+        final pEnd = nl < 0 ? len : nl;
+        final para = text.substring(pStart, pEnd);
+        final painter = TextPainter(
+          text: TextSpan(text: para.isEmpty ? ' ' : para, style: style),
+          textDirection: TextDirection.ltr,
+          strutStyle: strut,
+        )..layout(maxWidth: size.width);
+        final lines = painter.computeLineMetrics();
+        for (final line in lines) {
+          final top = yOffset + line.baseline - line.ascent;
+          final bottom = yOffset + line.baseline + line.descent;
+          if (bottom - pageTop > size.height && top > pageTop) {
+            pageTop = top;
+            final localOffset = para.isEmpty ? 0 : painter.getPositionForOffset(Offset(0, (line.baseline - line.ascent) + line.height / 2)).offset;
+            final offset = pStart + localOffset;
+            if (offset > starts.last) starts.add(offset);
+          }
+        }
+        if (lines.isNotEmpty) {
+          yOffset += lines.last.baseline + lines.last.descent;
+        } else if (painter.height > 0) {
+          yOffset += painter.height;
+        }
+        painter.dispose();
+        if (nl < 0) break;
+        yOffset += paragraphSpacing;
+        pStart = nl + 1;
+      }
+      return starts;
+    }
+
+    final dialogue = List.generate(80, (i) => i.isEven ? '　　「好。」' : '　　「嗯，我知道了！」').join('\n');
+    final mixedLen = List.generate(
+      60,
+      (i) => i % 3 == 0
+          ? '　　「走吧。」'
+          : (i % 3 == 1
+                ? '　　第$i段：在漫长的夜色里，Hero-0$i 穿过石阶与长廊，回望身后的灯火与山谷，轻声说道「明天见」。'
+                : '　　短句 $i。'),
+    ).join('\n');
+    final cjkEngMix = List.generate(50, (i) => '　　Chapter $i: 勇者 Lv.${i + 1} HP=100% [OK]').join('\n');
+    final fullwidthPunct = List.generate(50, (i) => '　　「……！？——『测试』」').join('\n');
+    final withEmpties = List.generate(60, (i) => i % 4 == 0 ? '' : '　　第$i行短句').join('\n');
+    final leadingTrailingNl = '\n\n${List.generate(40, (i) => '　　段落$i').join('\n')}\n\n';
+    final japaneseKana = List.generate(45, (i) => '　　「ありがとう！カタカナ$i」').join('\n');
+    final asciiSymbols = List.generate(50, (i) => '  (a+b)*c = ${i * 3} / [x-y]').join('\n');
+    final withEmoji = List.generate(40, (i) => i % 3 == 0 ? '　　微笑😀第$i段' : '　　普通短段$i').join('\n');
+    final withTabs = List.generate(40, (i) => i % 3 == 0 ? '　　甲\t乙\t$i' : '　　普通$i').join('\n');
+    final withRtl = List.generate(35, (i) => i % 4 == 0 ? '　　مرحبا $i' : '　　你好$i').join('\n');
+    final boundaryWidths = List.generate(50, (i) => '　　${'字' * (5 + (i % 15))}').join('\n');
+    final singleChars = List.generate(90, (i) => '一二三四五六七八九十'[i % 10]).join('\n');
+
+    final cases = <({String name, String text, TextStyle style, Size size, double spacing, double firstTop, bool useStrut})>[
+      (name: '1.纯短对话-常规屏', text: dialogue, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(340, 520), spacing: 12, firstTop: 0, useStrut: true),
+      (name: '2.纯短对话-宽屏', text: dialogue, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(520, 600), spacing: 16, firstTop: 0, useStrut: true),
+      (name: '3.长短混排-常规', text: mixedLen, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(320, 480), spacing: 10, firstTop: 0, useStrut: true),
+      (name: '4.长短混排-窄屏', text: mixedLen, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(140, 320), spacing: 8, firstTop: 0, useStrut: true),
+      (name: '5.长短混排-带标题', text: mixedLen, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(320, 480), spacing: 14, firstTop: headingHeight('第一章 序幕', const TextStyle(fontSize: 18, height: 1.8), 320), useStrut: true),
+      (name: '6.中英混排-小字号', text: cjkEngMix, style: const TextStyle(fontSize: 14, height: 1.3), size: const Size(360, 400), spacing: 6, firstTop: 0, useStrut: true),
+      (name: '7.中英混排-大字号', text: cjkEngMix, style: const TextStyle(fontSize: 28, height: 2.2), size: const Size(420, 640), spacing: 20, firstTop: 0, useStrut: true),
+      (name: '8.全角标点密集', text: fullwidthPunct, style: const TextStyle(fontSize: 20, height: 1.7), size: const Size(360, 450), spacing: 12, firstTop: 0, useStrut: true),
+      (name: '9.含连续空段', text: withEmpties, style: const TextStyle(fontSize: 16, height: 1.6), size: const Size(300, 360), spacing: 10, firstTop: 0, useStrut: true),
+      (name: '10.首尾多换行', text: leadingTrailingNl, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(320, 400), spacing: 12, firstTop: 0, useStrut: true),
+      (name: '11.日文假名混排', text: japaneseKana, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(380, 440), spacing: 12, firstTop: 0, useStrut: true),
+      (name: '12.ASCII符号数字', text: asciiSymbols, style: const TextStyle(fontSize: 16, height: 1.5), size: const Size(420, 360), spacing: 8, firstTop: 0, useStrut: true),
+      (name: '13.含代理对Emoji回退', text: withEmoji, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(340, 420), spacing: 10, firstTop: 0, useStrut: true),
+      (name: '14.含制表符回退', text: withTabs, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(340, 420), spacing: 10, firstTop: 0, useStrut: true),
+      (name: '15.含RTL阿语回退', text: withRtl, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(340, 420), spacing: 10, firstTop: 0, useStrut: true),
+      (name: '16.正字间距2.5', text: dialogue, style: const TextStyle(fontSize: 18, height: 1.8, letterSpacing: 2.5), size: const Size(340, 480), spacing: 12, firstTop: 0, useStrut: true),
+      (name: '17.负字间距-0.5', text: dialogue, style: const TextStyle(fontSize: 18, height: 1.8, letterSpacing: -0.5), size: const Size(340, 480), spacing: 12, firstTop: 0, useStrut: true),
+      (name: '18.大段间距24', text: dialogue, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(360, 420), spacing: 24, firstTop: 0, useStrut: true),
+      (name: '19.小段间距4', text: dialogue, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(360, 420), spacing: 4, firstTop: 0, useStrut: true),
+      (name: '20.临界宽度段', text: boundaryWidths, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(260, 420), spacing: 10, firstTop: 0, useStrut: true),
+      (name: '21.单字短段', text: singleChars, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(240, 300), spacing: 12, firstTop: 0, useStrut: true),
+      (name: '22.超高单页', text: dialogue, style: const TextStyle(fontSize: 16, height: 1.5), size: const Size(400, 10000), spacing: 8, firstTop: 0, useStrut: true),
+      (name: '23.极矮多页', text: dialogue, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(320, 90), spacing: 12, firstTop: 0, useStrut: true),
+      (name: '24.无strut关闭快路径', text: mixedLen, style: const TextStyle(fontSize: 18, height: 1.8), size: const Size(320, 420), spacing: 12, firstTop: 0, useStrut: false),
+      (name: '25.大标题+正字间距', text: mixedLen, style: const TextStyle(fontSize: 22, height: 2.0, letterSpacing: 1.5), size: const Size(420, 560), spacing: 16, firstTop: headingHeight('终章 很长很长的章节标题测试', const TextStyle(fontSize: 22, height: 2.0, letterSpacing: 1.5), 420), useStrut: true),
+      (name: '26.双页窄列高行距', text: boundaryWidths, style: const TextStyle(fontSize: 20, height: 2.3), size: const Size(220, 500), spacing: 14, firstTop: 0, useStrut: true),
+    ];
+
+    for (final c in cases) {
+      final strut = c.useStrut ? readerStrut(c.style) : null;
+      final actual = paginate(c.text, c.style, c.size, strut: strut, firstTop: c.firstTop, paragraphSpacing: c.spacing);
+      final expected = referencePaginateParagraphs(c.text, c.style, c.size, strut: strut, firstTop: c.firstTop, paragraphSpacing: c.spacing);
+      expect(actual, equals(expected), reason: '样本不一致：${c.name}');
+    }
+  });
+
+  test('PaginateCache 共享 LRU 缓存（上限 12 章）与 headingHeightCached、clear', () {
+    PaginateCache.clear();
+    addTearDown(PaginateCache.clear);
+    const s = TextStyle(fontSize: 18, height: 1.8, color: Color(0xFF111111));
+    const sAltColor = TextStyle(fontSize: 18, height: 1.8, color: Color(0xFFEEEEEE));
+    const sz = Size(300, 420);
+
+    final chapters = [for (var i = 0; i < 15; i++) List.generate(40, (j) => '　　第$i章第$j段正文内容测试。').join('\n')];
+
+    // 换文字颜色不失效分页缓存（内部归一化 color）
+    final first = PaginateCache.paginateCached(text: chapters[0], style: s, size: sz, title: '第0章');
+    final hitDiffColor = PaginateCache.peek(text: chapters[0], style: sAltColor, size: sz, title: '第0章');
+    expect(identical(first, hitDiffColor), isTrue);
+
+    // 写入 14 章超过上限 12：最早未访问的第 1 章会被淘汰，但刚被访问过的第 0 章按 LRU 保留策略验证
+    for (var i = 1; i < 14; i++) {
+      PaginateCache.paginateCached(text: chapters[i], style: s, size: sz, title: '第$i章');
+    }
+    expect(PaginateCache.peek(text: chapters[0], style: s, size: sz, title: '第0章'), isNull);
+    expect(PaginateCache.peek(text: chapters[13], style: s, size: sz, title: '第13章'), isNotNull);
+
+    final h1 = PaginateCache.headingHeightCached('第一章', s, 300);
+    final h2 = PaginateCache.headingHeightCached('第一章', sAltColor, 300);
+    expect(h1, h2);
+    expect(h1, greaterThan(0));
+
+    PaginateCache.clear();
+    expect(PaginateCache.peek(text: chapters[13], style: s, size: sz, title: '第13章'), isNull);
+  });
 }
 

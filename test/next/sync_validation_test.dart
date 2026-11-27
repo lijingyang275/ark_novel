@@ -30,7 +30,9 @@ void main() {
     expect(syncPreference('r.font', 4), 4);
     expect(syncPreference('r.font', 5), isNull);
     expect(syncShelfOptions({'display': 4, 'sort': 7}), {'display': 4, 'sort': 7});
-    expect(syncPreference('p.shelf.tab.auto:ongoing', {'display': 4, 'unread': 1}), {'display': 4, 'unread': 1});
+    expect(syncShelfOptions({'display': 5, 'sort': 7}), {'display': 5, 'sort': 7});
+    expect(syncShelfOptions({'display': 6}), isEmpty);
+    expect(syncPreference('p.shelf.tab.auto:ongoing', {'display': 5, 'unread': 1}), {'display': 5, 'unread': 1});
   });
 
   test('自动阅读、背景纹理/透明度、页眉页脚字段与阅读目标范围校验', () {

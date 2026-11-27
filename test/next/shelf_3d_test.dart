@@ -1,7 +1,7 @@
 import 'package:ark_novel/next/library.dart';
 import 'package:ark_novel/next/shelf_3d.dart';
 import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart' hide Text;
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -206,5 +206,136 @@ void main() {
     final scrollView = tester.widget<SingleChildScrollView>(find.byType(SingleChildScrollView));
     expect(scrollView.physics, isA<ClampingScrollPhysics>());
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('MaskedRollSwitcher：原地淡入淡出不上下位移，减弱动态时直接替换', (tester) async {
+    Widget host(String label, int dir, {bool disableAnimations = false}) => MediaQuery(
+      data: MediaQueryData(disableAnimations: disableAnimations),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: SizedBox(
+          width: 240,
+          height: 30,
+          child: MaskedRollSwitcher(
+            direction: dir,
+            child: Text(label, key: ValueKey(label)),
+          ),
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(host('A', 1));
+    await tester.pumpAndSettle();
+
+    // 正向切换：原地淡入淡出，基线完全不上下跳动
+    await tester.pumpWidget(host('B', 1));
+    await tester.pump(const Duration(milliseconds: 50));
+    final aOut = tester.getCenter(find.text('A')).dy;
+    final bIn = tester.getCenter(find.text('B')).dy;
+    expect(bIn, closeTo(aOut, 0.01));
+    expect(find.byType(SlideTransition), findsNothing);
+    expect(find.byType(FadeTransition), findsAtLeastNWidgets(1));
+    await tester.pumpAndSettle();
+    expect(find.text('B'), findsOneWidget);
+    expect(find.text('A'), findsNothing);
+
+    // 开启减弱动态效果：立即替换且无 FadeTransition
+    await tester.pumpWidget(host('C', 1, disableAnimations: true));
+    expect(find.text('C'), findsOneWidget);
+    expect(find.text('B'), findsNothing);
+    expect(find.byType(FadeTransition), findsNothing);
+  });
+
+  testWidgets('Shelf3DView：桌面鼠标悬停中央封面倾转、悬停邻书轻微抬升，离场后自动停帧', (tester) async {
+    await tester.pumpWidget(shelf(books));
+    await tester.pumpAndSettle();
+
+    final stage = tester.getRect(find.byKey(const ValueKey('shelf-3d-stage')));
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: stage.center);
+    addTearDown(mouse.removePointer);
+
+    // 移到中央封面偏右下位置，应产生倾转并在有限时间内停稳（pumpAndSettle 不超时）
+    await mouse.moveTo(Offset(stage.center.dx + 40, stage.center.dy + 30));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    // 移到右侧相邻封面上：应触发悬停抬升并平滑停稳
+    await mouse.moveTo(Offset(stage.right - 20, stage.center.dy));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    // 移出舞台：归位并停帧
+    await mouse.moveTo(Offset(stage.right + 100, stage.bottom + 100));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Shelf3DView：开启减弱动态效果时不走滑动动画，点邻书直接切换', (tester) async {
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(size: Size(390, 620), disableAnimations: true),
+        child: shelf(books),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('狼与香辛料'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('shelf-3d-dot-2')));
+    await tester.pump();
+    expect(find.text('败北女角太多了！'), findsOneWidget);
+    expect(find.text('狼与香辛料'), findsNothing);
+    expect(find.descendant(of: find.byKey(const ValueKey('shelf-3d-info')), matching: find.byType(SlideTransition)), findsNothing);
+  });
+
+  testWidgets('Shelf3DView：宽屏 3 本书在中央或首本位置点击左右任意可见封面均精准切换', (tester) async {
+    tester.view.physicalSize = const Size(1280, 760);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    String? focused;
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 1280,
+              height: 760,
+              child: Shelf3DView(
+                books: books,
+                initialAid: '2',
+                onFocusChanged: (aid) => focused = aid,
+                selected: const {},
+                heroEnabled: true,
+                coverOf: (_) => '',
+                badgeOf: (_) => null,
+                subtitleOf: (b) => 'sub-${b.aid}',
+                actionOf: (_) => (label: '继续读', cid: '101'),
+                onOpen: (_) {},
+                onRead: (_, _) {},
+                onToggleSelect: (_) {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final stage = tester.getRect(find.byKey(const ValueKey('shelf-3d-stage')));
+    final w = Shelf3DLayout.coverWidth(1280, 760 - Shelf3DLayout.infoHeight(1.0));
+
+    // 点左侧第 1 本封面 -> 切换到 1
+    await tester.tapAt(Offset(stage.center.dx + Shelf3DLayout.pose(-1, w).dx, stage.center.dy));
+    await tester.pumpAndSettle();
+    expect(focused, '1');
+
+    // 停在第 1 本时点右侧第 3 本（d = +2 紧缩错位处）露出部分 -> 直接切换到 3，不误触第 2 本
+    final pose2 = Shelf3DLayout.pose(2, w);
+    await tester.tapAt(Offset(stage.center.dx + pose2.dx + w * pose2.scale * 0.35, stage.center.dy));
+    await tester.pumpAndSettle();
+    expect(focused, '3');
   });
 }

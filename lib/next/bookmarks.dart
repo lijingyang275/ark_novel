@@ -24,31 +24,93 @@ class Bookmarks {
 
   static Box get _box => Hive.box('session');
 
-  static List<Bookmark> all([String? aid]) {
-    final list = ((_box.get('bookmarks') as List?) ?? const []).cast<Map>().map((e) {
-      return Bookmark(aid: e['aid'] as String, book: e['book'] as String, cid: e['cid'] as String, chapter: e['chapter'] as String, offset: e['offset'] as int, excerpt: e['excerpt'] as String, time: DateTime.fromMillisecondsSinceEpoch(e['time'] as int));
-    });
-    return (aid == null ? list : list.where((b) => b.aid == aid)).toList();
+  static final _unset = Object();
+  static Object? _cachedRaw = _unset;
+  static List<Bookmark> _cachedAll = const [];
+  static Map<String, List<Bookmark>> _cachedByAid = const {};
+  static Map<(String, String), List<int>> _cachedByChapter = const {};
+  static Set<String> _cachedAids = const {};
+  static Map<String, Set<String>> _cachedCidsByAid = const {};
+
+  static void _ensureCache() {
+    if (!Hive.isBoxOpen('session')) {
+      _cachedRaw = _unset;
+      _cachedAll = const [];
+      _cachedByAid = const {};
+      _cachedByChapter = const {};
+      _cachedAids = const {};
+      _cachedCidsByAid = const {};
+      return;
+    }
+    final raw = _box.get('bookmarks');
+    if (identical(raw, _cachedRaw)) return;
+    final all = <Bookmark>[];
+    final byAid = <String, List<Bookmark>>{};
+    final byChapter = <(String, String), List<int>>{};
+    final aids = <String>{};
+    final cidsByAid = <String, Set<String>>{};
+    for (final e in ((raw as List?) ?? const []).cast<Map>()) {
+      final aid = e['aid'] as String;
+      final cid = e['cid'] as String;
+      final offset = e['offset'] as int;
+      final b = Bookmark(
+        aid: aid,
+        book: e['book'] as String,
+        cid: cid,
+        chapter: e['chapter'] as String,
+        offset: offset,
+        excerpt: e['excerpt'] as String,
+        time: DateTime.fromMillisecondsSinceEpoch(e['time'] as int),
+      );
+      all.add(b);
+      (byAid[aid] ??= <Bookmark>[]).add(b);
+      (byChapter[(aid, cid)] ??= <int>[]).add(offset);
+      aids.add(aid);
+      (cidsByAid[aid] ??= <String>{}).add(cid);
+    }
+    _cachedRaw = raw;
+    _cachedAll = List<Bookmark>.unmodifiable(all);
+    _cachedByAid = {for (final e in byAid.entries) e.key: List<Bookmark>.unmodifiable(e.value)};
+    _cachedByChapter = {for (final e in byChapter.entries) e.key: List<int>.unmodifiable(e.value)};
+    _cachedAids = Set<String>.unmodifiable(aids);
+    _cachedCidsByAid = {for (final e in cidsByAid.entries) e.key: Set<String>.unmodifiable(e.value)};
   }
 
-  static Future<void> _save(List<Bookmark> list) => _box.put('bookmarks', [
-    for (final b in list) {'aid': b.aid, 'book': b.book, 'cid': b.cid, 'chapter': b.chapter, 'offset': b.offset, 'excerpt': b.excerpt, 'time': b.time.millisecondsSinceEpoch},
-  ]);
+  static List<Bookmark> all([String? aid]) {
+    _ensureCache();
+    return List<Bookmark>.of(aid == null ? _cachedAll : (_cachedByAid[aid] ?? const []));
+  }
+
+  static Future<void> _save(List<Bookmark> list) {
+    _cachedRaw = _unset;
+    return _box.put('bookmarks', [
+      for (final b in list) {'aid': b.aid, 'book': b.book, 'cid': b.cid, 'chapter': b.chapter, 'offset': b.offset, 'excerpt': b.excerpt, 'time': b.time.millisecondsSinceEpoch},
+    ]);
+  }
 
   static bool _near(Bookmark b, String aid, String cid, int offset) => b.aid == aid && b.cid == cid && (b.offset - offset).abs() <= 40;
 
-  static bool has(String aid, String cid, int offset) => all(aid).any((b) => _near(b, aid, cid, offset));
+  static bool has(String aid, String cid, int offset) {
+    _ensureCache();
+    final offsets = _cachedByChapter[(aid, cid)];
+    if (offsets == null) return false;
+    for (var i = 0; i < offsets.length; i++) {
+      if ((offsets[i] - offset).abs() <= 40) return true;
+    }
+    return false;
+  }
 
   /// 有书签的书号集合（书架筛选直接查，不逐本构造对象）。
-  static Set<String> bookmarkedAids() => {
-    for (final e in ((_box.get('bookmarks') as List?) ?? const []).cast<Map>()) '${e['aid']}',
-  };
+  static Set<String> bookmarkedAids() {
+    _ensureCache();
+    return _cachedAids;
+  }
 
   /// 指定书中有书签的章节 cid 集合（目录列表渲染图标用）。
-  static Set<String> bookmarkedCids(String aid) => {
-    for (final e in ((_box.get('bookmarks') as List?) ?? const []).cast<Map>())
-      if (e['aid'] == aid) '${e['cid']}',
-  };
+  static Set<String> bookmarkedCids(String aid) {
+    _ensureCache();
+    return _cachedCidsByAid[aid] ?? const <String>{};
+  }
 
   /// 已有就删除，没有就添加；返回添加后是否存在。
   static Future<bool> toggle(String aid, String book, String cid, String chapter, int offset, String excerpt) async {

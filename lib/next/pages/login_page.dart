@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../models/common/wenku8_node.dart';
 import '../env.dart';
+import '../motion.dart';
 import '../routes.dart';
 import '../session.dart';
 import 'login_webview_page.dart';
@@ -114,14 +115,30 @@ class _LoginPageState extends ConsumerState<LoginPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Align(alignment: Alignment.centerLeft, child: ClipRRect(borderRadius: BorderRadius.circular(18), child: Image.asset('assets/images/logo.png', height: 72))),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(18),
+                      child: Builder(
+                        builder: (context) {
+                          final px = (72 * MediaQuery.devicePixelRatioOf(context)).round();
+                          return Image.asset('assets/images/logo.png', height: 72, cacheWidth: px, cacheHeight: px);
+                        },
+                      ),
+                    ),
+                  ),
                   const SizedBox(height: 28),
                   Text('登录', style: theme.textTheme.displaySmall),
                   const SizedBox(height: 10),
                   Text('登录轻小说文库账号后继续阅读。', style: theme.textTheme.bodyLarge?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                   const SizedBox(height: 32),
                   ..._form(theme),
-                  if (notice != null) ...[const SizedBox(height: 16), _Notice(text: notice)],
+                  AppCollapse(
+                    visible: notice != null,
+                    duration: AppMotion.standard,
+                    reverseDuration: AppMotion.fast,
+                    child: notice == null ? const SizedBox.shrink() : Padding(padding: const EdgeInsets.only(top: 16), child: _Notice(text: notice)),
+                  ),
                 ],
               ),
             ),
@@ -155,7 +172,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                 label: const Text('密码'),
                 suffixIcon: IconButton(
                   tooltip: hz(context, _showPassword ? '隐藏密码' : '显示密码'),
-                  icon: Icon(_showPassword ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 20),
+                  icon: AppIconSwap(child: Icon(_showPassword ? Icons.visibility_off_outlined : Icons.visibility_outlined, key: ValueKey(_showPassword), size: 20)),
                   onPressed: _busy ? null : () => setState(() => _showPassword = !_showPassword),
                 ),
               ),
@@ -216,7 +233,17 @@ class _LoginPageState extends ConsumerState<LoginPage> {
       const SizedBox(height: 24),
       SizedBox(
         width: double.infinity,
-        child: FilledButton(onPressed: _busy ? null : _submit, child: _busy ? const _ButtonSpinner() : const Text('登录')),
+        child: AppPressScale(
+          scale: 0.975,
+          enabled: !_busy,
+          child: FilledButton(
+            onPressed: _busy ? null : _submit,
+            child: AppCrossfade(
+              duration: AppMotion.fast,
+              child: _busy ? const _ButtonSpinner(key: ValueKey('spin')) : const Text('登录', key: ValueKey('lbl')),
+            ),
+          ),
+        ),
       ),
       const SizedBox(height: 8),
       Center(
@@ -240,7 +267,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 }
 
 class _ButtonSpinner extends StatelessWidget {
-  const _ButtonSpinner();
+  const _ButtonSpinner({super.key});
 
   @override
   Widget build(BuildContext context) => SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Theme.of(context).colorScheme.onPrimary));

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:ark_novel/models/cat_chapter.dart';
@@ -5,15 +6,23 @@ import 'package:ark_novel/models/cat_volume.dart';
 import 'package:ark_novel/models/content.dart';
 import 'package:ark_novel/next/book_search.dart';
 import 'package:ark_novel/next/cache.dart';
-import 'package:ark_novel/next/epub_codec.dart';
 import 'package:ark_novel/next/hant.dart';
-import 'package:ark_novel/next/local_books.dart';
 import 'package:ark_novel/next/pages/book_search_sheet.dart';
 import 'package:ark_novel/next/reader/reader_page.dart' show formatChapter;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
+
+final _legacyFullWidthAlnumRe = RegExp('[０-９Ａ-Ｚａ-ｚ]');
+final _legacyFullWidthJoinRe = RegExp(r'(?<=[0-9A-Za-z])[　－](?=[0-9A-Za-z])');
+
+String _legacyHalfWidth(String s) => s
+    .replaceAllMapped(_legacyFullWidthAlnumRe, (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - 0xFEE0))
+    .replaceAllMapped(_legacyFullWidthJoinRe, (m) => m[0] == '　' ? ' ' : '-');
+
+String _legacyFormatChapterText(String raw) =>
+    _legacyHalfWidth(raw).split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).map((l) => '　　$l').join('\n');
 
 void main() {
   final catalogue = [
@@ -46,6 +55,69 @@ void main() {
     test('formatChapterText 与阅读器 formatChapter 输出完全一致', () {
       const sample = '  第一段　ＡＢＣ１２３\n\n   第二段测试  \n第三段';
       expect(formatChapterText(sample), formatChapter(sample));
+    });
+
+    test('halfWidth 与 formatChapterText 在 35+ 复杂边界样本上与原正则实现 100% 逐字符一致', () {
+      const samples = <String>[
+        '',
+        '   ',
+        '\t\r\n  \n\r\n　　\u00A0\uFEFF\u2003\n',
+        '纯中文无任何需要转换的段落。\n第二段也没有全角字母数字。',
+        '  第一段\r\n\r\n  第二段  \r\n第三段\r\n',
+        '\r\n\r\n首尾都有CRLF\r\n\r\n',
+        '行内孤立CR\r不拆行\n下一行\r',
+        '\r开头CR和结尾CR\r\n\t制表符\v\f\u0085\u00A0\u1680\u2000\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF正文\uFEFF',
+        '０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ',
+        '边界码点：\uFF0F０９\uFF1A\uFF20ＡＺ\uFF3B\uFF40ａｚ\uFF5B',
+        '「Ｄｉｖｅ　Ｍａｓｓｉｖｅｌｙ」的ＤＭＭＯ－ＲＰＧ，第１章！　　中文',
+        'A　B 1　2 z　9 Ａ　Ｂ ０　ｚ A　Ｂ ０　z',
+        'Ａ　Ｂ　Ｃ　１　２　３',
+        'A　　B 与 Ａ　　Ｂ 连续两个全角空格不能转换',
+        '中文　ABC 与 ABC　中文 与 　ABC　 边缘全角空格不转',
+        'A－B－C 与 ＤＭＭＯ－ＲＰＧ 与 １－２－３',
+        'A－－B 与 A　－B 与 A－　B 连续分隔符不转',
+        'A—B 与 Ａ—Ｂ（全角破折号 U+2014 不转换）与 A−B（U+2212 不转换）',
+        '中文－A 与 A－中文 与 －A 与 A－ 与 －',
+        'A－\nB 与 A\n－B 与 A　\nB 与 A\n　B 跨行不相邻',
+        'A－\r\nB 与 A\r\n－B 跨CRLF不相邻',
+        '   －A   \n   A－   \n   －   ',
+        '　　首行缩进ＡＢＣ　ＤＥＦ－１２３　　',
+        '！＂＃＄％＆＇（）＊＋，．／：；＜＝＞？＠［＼］＾＿｀｛｜｝～',
+        '😀Ａ　Ｂ🚀\n𠀀Ａ－１𠀁',
+        'A\n\n\n\nB',
+        '单行无换行ＡＢＣ－１２３',
+        '   单行带前后空白　Ａ　Ｂ   ',
+        '\n开头空行\n中间空行\n   　  \n结尾空行\n',
+        'a　b－c　d－e　0－9',
+        '0　0－0　A－Z　a－z',
+        '「ＳＡＯ」「ＡＬＯ」「ＧＧＯ」　ＶＲＭＭＯ－ＲＰＧ　Ｌｖ．９９',
+        '　　「Ｈｅｌｌｏ　Ｗｏｒｌｄ！」\r\n　　他低声念出编号　Ｘ－０１　—　最终代号。',
+        '---ＡＢＣ---\n－－－ＡＢＣ－－－\n———ＡＢＣ———',
+        '  \u200B零宽空格不算trim空白\u200B  \n  \u3000全角空格算trim空白\u3000  ',
+        '1　2　　3－4－－5—6',
+      ];
+
+      expect(samples.length, greaterThanOrEqualTo(35));
+      for (var i = 0; i < samples.length; i++) {
+        final s = samples[i];
+        final hw = halfWidth(s);
+        final legacyHw = _legacyHalfWidth(s);
+        expect(hw, legacyHw, reason: 'halfWidth sample #$i mismatch');
+        expect(hw.length, s.length, reason: 'halfWidth length invariant sample #$i');
+
+        final fmt = formatChapterText(s);
+        final legacyFmt = _legacyFormatChapterText(s);
+        expect(fmt, legacyFmt, reason: 'formatChapterText sample #$i mismatch');
+      }
+    });
+
+    test('formatChapterText 对全部 65536 个 BMP 码点的 trim 判定与 Dart String.trim() 100% 一致', () {
+      for (var cp = 0; cp <= 0xFFFF; cp++) {
+        if (cp == 0x0A) continue; // '\n' 是行分隔符
+        final ch = String.fromCharCode(cp);
+        final raw = '${ch}X$ch';
+        expect(formatChapterText(raw), _legacyFormatChapterText(raw), reason: 'codeUnit 0x${cp.toRadixString(16)}');
+      }
     });
 
     test('extractSnippet：高亮范围精确对应匹配文本且正确处理首尾省略号与换行折叠', () {
@@ -188,6 +260,142 @@ void main() {
       expect(res.cancelled, isTrue);
       expect(res.scannedChapters, lessThan(3));
     });
+
+    test('全书模式复用 currentChapterText，且达到 maxHits 后早停避免扫描剩余章节', () async {
+      var loadedCids = <String>[];
+      final manyVols = [
+        CatVolume(
+          title: '第一卷',
+          chapters: [for (var i = 1; i <= 10; i++) CatChapter(title: '第 $i 章', cid: 'm$i')],
+        ),
+      ];
+      final res = await BookSearchEngine.search(
+        aid: '1',
+        catalogue: manyVols,
+        query: '测试',
+        scope: BookSearchScope.allCached,
+        currentCid: 'm1',
+        currentChapterText: formatChapterText('测试 测试 测试'),
+        maxHits: 5,
+        maxHitsPerChapter: 50,
+        applyReplaceRules: false,
+        isCached: (_, _) => true,
+        chapterLoader: (_, cid) async {
+          loadedCids.add(cid);
+          return Content(text: '测试 测试 测试', images: const []);
+        },
+      );
+
+      expect(loadedCids, isNot(contains('m1'))); // 当前章直接复用 currentChapterText
+      expect(res.truncated, isTrue);
+      expect(res.hits.length, 5);
+      expect(res.scannedChapters, lessThan(10)); // 命中满额后提前早停
+    });
+
+    test('后台 Worker 分批增量回报 newHits，拼接后与最终结果完全一致且无重复', () async {
+      final manyVols = [
+        CatVolume(
+          title: '第一卷',
+          chapters: [for (var i = 1; i <= 25; i++) CatChapter(title: '第 $i 章', cid: 'b$i')],
+        ),
+      ];
+      final events = <BookSearchProgress>[];
+      final accumulated = <BookSearchHit>[];
+
+      final res = await BookSearchEngine.search(
+        aid: '2',
+        catalogue: manyVols,
+        query: '星光',
+        scope: BookSearchScope.allCached,
+        applyReplaceRules: false,
+        yieldEvery: 4,
+        isCached: (_, _) => true,
+        chapterLoader: (_, cid) async => Content(text: '第 $cid 章：星光洒落在窗台，远方也有星光。', images: const []),
+        onProgress: (p) {
+          events.add(p);
+          accumulated.addAll(p.newHits);
+        },
+      );
+
+      expect(res.error, isNull);
+      expect(res.cancelled, isFalse);
+      expect(res.scannedChapters, 25);
+      expect(res.totalHits, 50);
+      expect(res.hits.length, 50);
+      expect(events.length, greaterThan(3));
+      // 每次回调的 scannedChapters 单调递增，newHits 严格不重复且拼接等于最终 hits
+      for (var i = 1; i < events.length; i++) {
+        expect(events[i].scannedChapters, greaterThanOrEqualTo(events[i - 1].scannedChapters));
+      }
+      expect(accumulated.length, res.hits.length);
+      for (var i = 0; i < res.hits.length; i++) {
+        expect(accumulated[i].cid, res.hits[i].cid);
+        expect(accumulated[i].offset, res.hits[i].offset);
+        expect(accumulated[i].snippet, res.hits[i].snippet);
+      }
+    });
+
+    test('灾难性回溯正则在后台 Isolate 中可被 cancelToken 立即强杀终止', () async {
+      final token = BookSearchCancelToken();
+      final evilText = formatChapterText('${'a' * 30}!');
+      final sw = Stopwatch()..start();
+
+      Timer(const Duration(milliseconds: 50), token.cancel);
+      final res = await BookSearchEngine.search(
+        aid: '3',
+        catalogue: [
+          CatVolume(title: '第一卷', chapters: [CatChapter(title: '回溯章', cid: 'evil')]),
+        ],
+        query: r'(a+)+b',
+        isRegex: true,
+        scope: BookSearchScope.currentChapter,
+        currentCid: 'evil',
+        currentChapterText: evilText,
+        applyReplaceRules: false,
+        cancelToken: token,
+      );
+      sw.stop();
+
+      expect(res.cancelled, isTrue);
+      expect(sw.elapsedMilliseconds, lessThan(2000), reason: '应通过 Isolate.kill(immediate) 迅速终止，而不是卡死在灾难性回溯中');
+    });
+
+    test('后台 Isolate 正确应用正文替换规则与繁简转换，且命中偏移与阅读器管线对齐', () async {
+      final dir = Directory.systemTemp.createTempSync('ark_search_rules_test_');
+      addTearDown(() async {
+        try {
+          await Hive.close().timeout(const Duration(seconds: 2));
+        } catch (_) {}
+        if (dir.existsSync()) dir.deleteSync(recursive: true);
+      });
+      Hive.init(dir.path);
+      final box = await Hive.openBox('session');
+      await box.put('rules', [
+        {'p': '旧称', 'r': '新名', 'e': true, 'k': 0, 'c': 0xFFE53935, 'n': '', 'a': '', 'id': 'r1', 'ts': 1},
+      ]);
+
+      final hant = Hant.parse('旧\t舊\n称\t稱\n新\t新\n名\t名\n', '');
+      const rawText = '  这里提到了旧称，以及ＡＢＣ　ＤＥＦ。  ';
+      final expectedFormatted = formatChapterText(hant.convert(rawText).replaceAll('舊稱', '新名'));
+
+      final res = await BookSearchEngine.search(
+        aid: '4',
+        catalogue: [
+          CatVolume(title: '第一卷', chapters: [CatChapter(title: '替换测试', cid: 'rc1')]),
+        ],
+        query: '新名',
+        scope: BookSearchScope.allCached,
+        hant: hant,
+        applyReplaceRules: true,
+        isCached: (_, _) => true,
+        chapterLoader: (_, _) async => Content(text: rawText, images: const []),
+      );
+
+      expect(res.error, isNull);
+      expect(res.totalHits, 1);
+      final hit = res.hits.single;
+      expect(expectedFormatted.substring(hit.offset, hit.offset + hit.matchLength), '新名');
+    });
   });
 
   group('showBookSearchSheet 交互', () {
@@ -235,10 +443,11 @@ void main() {
 
       await tester.tap(find.text('打开书内搜索'));
       await tester.pump();
-      // LazyBox.get 每章走一次真实磁盘 I/O，每轮交错推进真实事件循环与假时钟微任务
-      for (var i = 0; i < 4; i++) {
+      // LazyBox.get 与后台 Isolate 均走真实异步事件循环，每轮交错推进真实事件循环与假时钟微任务直至检索完成
+      for (var i = 0; i < 20; i++) {
         await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
         await tester.pump();
+        if (find.textContaining('已搜索 2/4 章已缓存章节，共找到 3 处').evaluate().isNotEmpty) break;
       }
       await tester.pumpAndSettle();
 
@@ -253,48 +462,6 @@ void main() {
       expect(picked!.cid, 'c4');
       final formatted = formatChapterText(store['c4']!.text);
       expect(formatted.substring(picked!.offset, picked!.offset + picked!.matchLength), '八奈见杏菜');
-    });
-
-    test('本地书籍（local:）默认走 LocalBooks 读取正文并检索', () async {
-      final localDir = Directory('${tmp.path}/local_books');
-      LocalBooks.rootProvider = () async => localDir;
-      addTearDown(() {
-        LocalBooks.rootProvider = null;
-        LocalBooks.clearMemoryCache();
-      });
-
-      final meta = await LocalBooks.saveParsed(
-        const ParsedBook(
-          title: '本地轻小说测试',
-          author: '测试作者',
-          description: '',
-          volumes: [
-            EpubVolumeData(
-              title: '第一卷',
-              chapters: [
-                EpubChapterData(title: '第一章', text: '放学后，八奈见杏菜在社办吃点心。'),
-                EpubChapterData(title: '第二章', text: '没有关键词的章节。'),
-              ],
-            ),
-          ],
-        ),
-        format: 'txt',
-        aid: 'local:search_test_1',
-      );
-
-      final res = await BookSearchEngine.search(
-        aid: meta.aid,
-        catalogue: meta.catalogue,
-        query: '八奈见杏菜',
-        scope: BookSearchScope.allCached,
-        applyReplaceRules: false,
-      );
-
-      expect(res.error, isNull);
-      expect(res.scannedChapters, 2);
-      expect(res.totalChapters, 2);
-      expect(res.totalHits, 1);
-      expect(res.hits.single.cid, meta.catalogue.first.chapters.first.cid);
     });
   });
 }

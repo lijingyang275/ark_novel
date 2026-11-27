@@ -12,7 +12,6 @@ import 'cover_trim.dart';
 import 'data.dart';
 import 'image_cache.dart';
 import 'library.dart';
-import 'local_books.dart' show isLocalAid;
 import 'unlock.dart';
 import 'volumes.dart';
 
@@ -28,6 +27,7 @@ class VolumeCoverQueue {
   static const _maxFailures = 3;
   static const _failureGap = Duration(milliseconds: 1500);
   static const _maxBgmConcurrent = 2;
+  static const _sessionCap = 512;
   final _bgmTried = <(String, String)>{}; // 这次运行里已经按 Bangumi 补过（或者对不上）的卷
   final _bgmFilling = <String>{};
   final _bgmQueue = <String>[];
@@ -43,6 +43,48 @@ class VolumeCoverQueue {
   final _officialTried = <(String, String)>{}; // 本轮已经尝试过原站取封面的卷，避免 build 反复入队
   final _failedUrls = <String>{}; // 本轮实际下载失败的封面地址（如旧缓存没命中或站点小封面被拦），刷新或重启后清空重试
   bool _netBlocked = false; // 连着几本失败时先熔断，本轮直接走 Bangumi 兜底；刷新或下次启动再试原站
+  int _bgPauseCount = 0;
+
+  static bool _addBounded<T>(Set<T> set, T value) {
+    final added = set.add(value);
+    while (set.length > _sessionCap) {
+      set.remove(set.first);
+    }
+    return added;
+  }
+
+  static void _putBounded<K, V>(Map<K, V> map, K key, V value) {
+    map.remove(key);
+    map[key] = value;
+    while (map.length > _sessionCap) {
+      map.remove(map.keys.first);
+    }
+  }
+
+  /// 清理长会话积累的辅助去重集合（保留活跃临时兜底封面），防止内存无限增长。
+  void evictSessionCaches() {
+    _bgmTried.clear();
+    _bgmFailed.clear();
+    _emptyTried.clear();
+    _tempRequested.clear();
+    _tempTried.clear();
+    _officialTried.clear();
+    _failedUrls.clear();
+  }
+
+  bool get isBackgroundPaused => _bgPauseCount > 0;
+
+  void pauseBackground() {
+    _bgPauseCount++;
+  }
+
+  void resumeBackground() {
+    if (_bgPauseCount > 0 && --_bgPauseCount == 0) {
+      if (_bg.isNotEmpty || _queue.isNotEmpty) Future.microtask(_pump);
+      if (_bgmQueue.isNotEmpty) Future.microtask(_pumpBangumi);
+      if (_tempQueue.isNotEmpty) Future.microtask(_pumpTemp);
+    }
+  }
 
   /// 后台把这些书在书架上显示的封面（第一卷的）取下来（打开 App、同步完书架后调用）。其他卷不常看，打开卷册页时再取。
   /// 若之前有书因文库失败临时用了 Bangumi 兜底，重新调用时会再尝试恢复原站封面（恢复前继续显示临时封面不闪烁）。
@@ -55,10 +97,9 @@ class VolumeCoverQueue {
     _bgmFailed.clear();
     _failedUrls.clear();
     for (final aid in aids) {
-      if (isLocalAid(aid)) continue;
       final v = Volumes.of(aid).firstOrNull;
       if (v != null && Volumes.cover(aid, v.title) == null) {
-        _officialTried.add((aid, v.title));
+        _addBounded(_officialTried, (aid, v.title));
         if (!_bg.contains((aid, v.title)) && !_queue.contains((aid, v.title))) _bg.add((aid, v.title));
       }
     }
@@ -68,22 +109,23 @@ class VolumeCoverQueue {
 
   /// 图片控件加载某张书架封面失败时通知：临时改用 Bangumi 兜底，直到下次刷新或重启再试原站。
   void reportCoverFailed(String aid, String url, {String? volumeTitle}) {
-    if (isLocalAid(aid)) return;
     final clean = splitCrop(url).url;
     if (clean.isEmpty || clean.contains('bgm.tv') || !LibraryStore.contains(aid)) return;
     final title = volumeTitle ?? Volumes.of(aid).firstOrNull?.title ?? '';
-    final added = _failedUrls.add(clean);
+    final added = _addBounded(_failedUrls, clean);
     if (!added && _tempCovers.containsKey((aid, title))) return;
     _requestTemp(aid, title);
   }
 
   /// 没加入书架的书退出详情页时：不再取它的封面，删掉挑封面时下载的图（插图章节的前几张）和封面记录，下次打开再取。
   Future<void> forget(String aid) async {
-    if (isLocalAid(aid)) return;
     _queue.removeWhere((e) => e.$1 == aid);
     _bg.removeWhere((e) => e.$1 == aid);
     _tempQueue.remove(aid);
     _bgmQueue.remove(aid);
+    _bgmFailed.remove(aid);
+    _bgmTried.removeWhere((k) => k.$1 == aid);
+    _emptyTried.removeWhere((k) => k.$1 == aid);
     _tempCovers.removeWhere((k, _) => k.$1 == aid);
     _tempRequested.removeWhere((k) => k.$1 == aid);
     _tempTried.removeWhere((k) => k.$1 == aid);
@@ -102,10 +144,6 @@ class VolumeCoverQueue {
 
   /// 这卷的封面，还没取过就排队去取（返回 null，若文库失败则返回临时 Bangumi 兜底）；没有插图、不在书架上的书也返回 null（只用网站的封面）。
   String? get(String aid, Vol v) {
-    if (isLocalAid(aid)) {
-      final url = Volumes.cover(aid, v.title);
-      return url != null && url.isNotEmpty ? url : null;
-    }
     if (!LibraryStore.contains(aid)) return null;
     final url = Volumes.cover(aid, v.title);
     if (url != null) {
@@ -120,7 +158,7 @@ class VolumeCoverQueue {
         _ref.read(imageStoreProvider).allowAutoSr(url);
         return url;
       }
-      if (v.illus != null && !_netBlocked && _emptyTried.add((aid, v.title)) && !_queue.contains((aid, v.title))) {
+      if (v.illus != null && !_netBlocked && _addBounded(_emptyTried, (aid, v.title)) && !_queue.contains((aid, v.title))) {
         _queue.add((aid, v.title));
         Future.microtask(_pump);
       }
@@ -130,7 +168,7 @@ class VolumeCoverQueue {
     final temp = _tempCovers[(aid, v.title)];
     if (_netBlocked) {
       if (temp == null) _requestTemp(aid, v.title);
-    } else if (_officialTried.add((aid, v.title)) && !_queue.contains((aid, v.title))) {
+    } else if (_addBounded(_officialTried, (aid, v.title)) && !_queue.contains((aid, v.title))) {
       _bg.remove((aid, v.title));
       _queue.add((aid, v.title));
       Future.microtask(_pump);
@@ -144,10 +182,6 @@ class VolumeCoverQueue {
 
   /// 书的封面：第一卷的卷封面（高清）；没有卷信息、还没取到、没插图时用 [fallback]（网站的小封面），文库被拦时临时用 Bangumi 兜底。
   String bookCover(String aid, String fallback) {
-    if (isLocalAid(aid)) {
-      final vols = Volumes.of(aid);
-      return (vols.isEmpty ? null : get(aid, vols.first)) ?? fallback;
-    }
     final vols = Volumes.of(aid);
     final url = vols.isEmpty ? null : get(aid, vols.first);
     if (url != null) return url;
@@ -185,6 +219,7 @@ class VolumeCoverQueue {
     }
 
     while (_queue.isNotEmpty || _bg.isNotEmpty) {
+      if (_queue.isEmpty && _bgPauseCount > 0) break;
       final (aid, title) = _queue.isNotEmpty ? _queue.removeLast() : _bg.removeAt(0);
       final v = Volumes.of(aid).where((v) => v.title == title).firstOrNull;
       final existing = Volumes.cover(aid, title);
@@ -243,7 +278,6 @@ class VolumeCoverQueue {
     final box = Hive.box('session');
     if (box.get('coverSkipDropped') == true) return;
     for (final aid in aids) {
-      if (isLocalAid(aid)) continue;
       for (final v in Volumes.of(aid)) {
         if (v.illus == null || Volumes.cover(aid, v.title) == null) continue;
         final content = await ChapterCache.get(aid, v.illus!);
@@ -255,7 +289,7 @@ class VolumeCoverQueue {
 
   void _requestTemp(String aid, String title) {
     if (!LibraryStore.contains(aid)) return;
-    _tempRequested.add((aid, title));
+    _addBounded(_tempRequested, (aid, title));
     if (_tempTried.contains((aid, title)) || _bgmFailed.contains(aid)) return;
     if (_tempFilling.contains(aid) || _tempQueue.contains(aid)) return;
     _tempQueue.add(aid);
@@ -263,6 +297,7 @@ class VolumeCoverQueue {
   }
 
   void _pumpTemp() {
+    if (_bgPauseCount > 0) return;
     while (_tempRunning < _maxBgmConcurrent && _tempQueue.isNotEmpty) {
       final aid = _tempQueue.removeAt(0);
       if (_bgmFailed.contains(aid) || _tempFilling.contains(aid)) continue;
@@ -288,7 +323,7 @@ class VolumeCoverQueue {
         final vols = Volumes.of(aid);
         final targets = {
           for (final (a, t) in _tempRequested)
-            if (a == aid && _tempTried.add((a, t))) t,
+            if (a == aid && _addBounded(_tempTried, (a, t))) t,
         };
         if (targets.isEmpty || s == null) break;
         final titles = [for (final v in vols) v.title];
@@ -302,13 +337,13 @@ class VolumeCoverQueue {
           final latest = title.isEmpty ? null : Volumes.cover(aid, title);
           if (latest != null && !_failedUrls.contains(splitCrop(latest).url)) continue;
           if (_tempCovers[(aid, title)] != url) {
-            _tempCovers[(aid, title)] = url;
+            _putBounded(_tempCovers, (aid, title), url);
             changed = true;
           }
         }
       }
     } catch (_) {
-      _bgmFailed.add(aid);
+      _addBounded(_bgmFailed, aid);
     } finally {
       _tempFilling.remove(aid);
       if (changed) Volumes.notifyAid(aid);
@@ -322,6 +357,7 @@ class VolumeCoverQueue {
   }
 
   void _pumpBangumi() {
+    if (_bgPauseCount > 0) return;
     while (_bgmRunning < _maxBgmConcurrent && _bgmQueue.isNotEmpty) {
       final aid = _bgmQueue.removeAt(0);
       if (_bgmFailed.contains(aid) || _bgmFilling.contains(aid)) continue;
@@ -346,7 +382,7 @@ class VolumeCoverQueue {
       // 补的时候又有卷变成没插图的（比如受限书一次记了一整本），接着补
       while (true) {
         final vols = Volumes.of(aid);
-        final empty = {for (final v in vols) if (Volumes.cover(aid, v.title) == '' && _bgmTried.add((aid, v.title))) v.title};
+        final empty = {for (final v in vols) if (Volumes.cover(aid, v.title) == '' && _addBounded(_bgmTried, (aid, v.title))) v.title};
         if (empty.isEmpty || s == null) break;
         // 拿所有卷去对（Bangumi 认不出卷号时要按全部正卷的顺序对），只用没插图的那些；正卷之外的（8.5 卷、外传）再按外传对
         final titles = [for (final v in vols) v.title];
@@ -357,7 +393,7 @@ class VolumeCoverQueue {
         }
       }
     } catch (_) {
-      _bgmFailed.add(aid);
+      _addBounded(_bgmFailed, aid);
     } finally {
       _bgmFilling.remove(aid);
     }
@@ -371,7 +407,6 @@ class VolumeCoverQueue {
     final store = _ref.read(imageStoreProvider);
     final manualOn = AppPrefs.read(P.coverTrim, false);
     for (final aid in aids) {
-      if (isLocalAid(aid)) continue;
       for (final MapEntry(key: title, value: saved) in Volumes.covers(aid).entries) {
         final manual = saved.contains('#crop=');
         if (saved.isEmpty || (manual && !manualOn)) continue;

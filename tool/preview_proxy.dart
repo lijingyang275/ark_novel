@@ -10,6 +10,7 @@
 //   WENKU8_TARGET   转发目标，默认 https://www.wenku8.cc
 //   PREVIEW_STATE   cookie 保存位置，默认 ~/.ark_preview_session.json
 //   https_proxy     需要的话，转发时走的上游代理
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -36,15 +37,17 @@ Future<void> main() async {
   final server = await HttpServer.bind(bind, port);
   stdout.writeln('preview proxy: http://$bind:$port -> $_target (cookies: ${_cookies.keys.join(', ')})');
   await for (final request in server) {
-    _handle(request).catchError((Object e) {
-      stderr.writeln('error ${request.method} ${request.uri}: $e');
-      try {
-        request.response
-          ..statusCode = HttpStatus.badGateway
-          ..write('preview proxy error: $e');
-        request.response.close();
-      } catch (_) {}
-    });
+    unawaited(
+      _handle(request).catchError((Object e) {
+        stderr.writeln('error ${request.method} ${request.uri}: $e');
+        try {
+          request.response
+            ..statusCode = HttpStatus.badGateway
+            ..write('preview proxy error: $e');
+          unawaited(request.response.close());
+        } catch (_) {}
+      }),
+    );
   }
 }
 

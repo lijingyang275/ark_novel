@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
@@ -37,5 +38,19 @@ void main() {
     await ChapterCache.open();
     await PageStore.put('second', 'y');
     expect(Hive.box('chapter_index').get('pt|second'), greaterThan(future));
+  });
+
+  test('PageStore 默认以 gzip Uint8List 压缩落盘，同时 100% 兼容读取老版本明文 String', () async {
+    final bigHtml = '<html><body>${'轻小说目录与简介内容' * 400}</body></html>';
+    await PageStore.put('https://www.wenku8.net/book/1.htm', bigHtml);
+    final rawStored = await Hive.lazyBox('pages').get('https://www.wenku8.net/book/1.htm');
+    expect(rawStored, isA<Uint8List>());
+    expect((rawStored as Uint8List).length, lessThan(bigHtml.length));
+    expect(await PageStore.get('https://www.wenku8.net/book/1.htm'), bigHtml);
+
+    // 模拟老版本直接写入的未压缩 String
+    const legacyHtml = '<html><body>legacy plain html</body></html>';
+    await Hive.lazyBox('pages').put('https://www.wenku8.net/book/legacy.htm', legacyHtml);
+    expect(await PageStore.get('https://www.wenku8.net/book/legacy.htm'), legacyHtml);
   });
 }

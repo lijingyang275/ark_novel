@@ -13,14 +13,14 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../data/wenku8/wenku8_parser.dart';
 import '../cache.dart';
-import '../local_books.dart';
+import '../motion.dart';
 import '../read_state.dart';
 import '../routes.dart';
 import '../stats.dart';
 import '../text.dart';
 import '../theme.dart';
 import '../volume_covers.dart';
-import '../volumes.dart' show Vol, Volumes, volumeChangesProvider;
+import '../volumes.dart' show Vol, Volumes, volumeMetaChangesProvider;
 import '../widgets.dart';
 import 'stats_page.dart' show charsPerMinute;
 
@@ -151,7 +151,7 @@ class YearlySummary {
       for (final aid in chapterBooks)
         for (final e in chapterSecondsByBook[aid]!.entries)
           if (ReadState.isRead(aid, e.key))
-            if ((isLocalAid(aid) ? LocalBooks.chapterLength(aid, e.key) : (hasCache ? ChapterCache.length(aid, e.key) : null)) case final n?)
+            if ((hasCache ? ChapterCache.length(aid, e.key) : null) case final n?)
               (n, e.value.values.fold(0, (a, b) => a + b)),
     ]);
     return buildYearlySummary(
@@ -489,12 +489,27 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
   final _shot = GlobalKey();
   late int _year;
   bool _capturing = false;
+  (int, int, int?)? _yearsKey;
+  List<int> _cachedYears = const [];
+  (int, int, int)? _summaryKey;
+  YearlySummary? _cachedSummary;
+
+  void _onStatsChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   void initState() {
     super.initState();
-    final years = _availableYears();
+    ReadingStats.changes.addListener(_onStatsChanged);
+    final years = _getAvailableYears(Volumes.changes.value);
     _year = widget.year ?? years.first;
+  }
+
+  @override
+  void dispose() {
+    ReadingStats.changes.removeListener(_onStatsChanged);
+    super.dispose();
   }
 
   List<int> _availableYears() => yearlyReportYears(
@@ -503,13 +518,32 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
     fallbackYear: widget.year ?? DateTime.now().year,
   );
 
+  List<int> _getAvailableYears(int volVersion) {
+    final key = (ReadingStats.changes.value, volVersion, widget.year);
+    if (_yearsKey == key) return _cachedYears;
+    _yearsKey = key;
+    return _cachedYears = _availableYears();
+  }
+
+  YearlySummary _getSummary(int year, int volVersion) {
+    final key = (year, volVersion, ReadingStats.changes.value);
+    if (_summaryKey == key && _cachedSummary != null) return _cachedSummary!;
+    _summaryKey = key;
+    return _cachedSummary = YearlySummary.fromStore(year);
+  }
+
   Future<void> _share(int year) async {
     try {
       setState(() => _capturing = true);
       await WidgetsBinding.instance.endOfFrame;
       final boundary = _shot.currentContext!.findRenderObject() as RenderRepaintBoundary;
       final image = await boundary.toImage(pixelRatio: 2.0);
-      final bytes = (await image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+      final Uint8List bytes;
+      try {
+        bytes = (await image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+      } finally {
+        image.dispose();
+      }
       final file = File('${(await getTemporaryDirectory()).path}/ark_yearly_report_$year.png');
       await file.writeAsBytes(bytes);
       await SharePlus.instance.share(ShareParams(files: [XFile(file.path)], text: '$year 年度阅读报告 · Ark Novel'));
@@ -522,10 +556,10 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
 
   @override
   Widget build(BuildContext context) {
-    ref.watch(volumeChangesProvider);
-    final years = _availableYears();
+    final volVersion = ref.watch(volumeMetaChangesProvider);
+    final years = _getAvailableYears(volVersion);
     if (!years.contains(_year)) _year = years.first;
-    final summary = YearlySummary.fromStore(_year);
+    final summary = _getSummary(_year, volVersion);
     final queue = ref.read(volumeCoverQueueProvider);
     String coverOf(String aid, String img) => queue.bookCover(aid, img.isNotEmpty ? img : Wenku8Parser.coverUrl(aid));
 
@@ -721,7 +755,7 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  _MonthlyChart(monthlySeconds: summary.monthlySeconds, peakMonth: summary.peakMonth),
+                  _MonthlyChart(monthlySeconds: summary.monthlySeconds, peakMonth: summary.peakMonth, animate: !_capturing),
                   if (summary.peakMonth != null || summary.bestDayKey != null) ...[
                     const SizedBox(height: 14),
                     Container(
@@ -812,14 +846,13 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
                                       Text(book.author, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white54, fontSize: 11.5)),
                                     ],
                                     const SizedBox(height: 5),
-                                    ClipRRect(
-                                      borderRadius: BorderRadius.circular(3),
-                                      child: LinearProgressIndicator(
-                                        value: summary.topBooks.first.seconds > 0 ? book.seconds / summary.topBooks.first.seconds : 0,
-                                        minHeight: 4,
-                                        color: i == 0 ? _gold : Colors.white70,
-                                        backgroundColor: Colors.white.withValues(alpha: 0.12),
-                                      ),
+                                    AppProgressBar(
+                                      value: summary.topBooks.first.seconds > 0 ? book.seconds / summary.topBooks.first.seconds : 0,
+                                      minHeight: 4,
+                                      borderRadius: 3,
+                                      color: i == 0 ? _gold : Colors.white70,
+                                      backgroundColor: Colors.white.withValues(alpha: 0.12),
+                                      duration: _capturing ? Duration.zero : AppMotion.expressive,
                                     ),
                                   ],
                                 ),
@@ -979,7 +1012,7 @@ String _formatDayLabel(String key) {
   return dt == null ? key : '${dt.month} 月 ${dt.day} 日';
 }
 
-const _bigStyle = TextStyle(color: Colors.white, fontSize: 23, fontWeight: FontWeight.w700);
+const _bigStyle = TextStyle(color: Colors.white, fontSize: 23, fontWeight: FontWeight.w700, fontFeatures: [FontFeature.tabularFigures()]);
 
 List<(String, String)> _durationParts(int s) {
   if (s <= 0) return [('0', ' 分')];
@@ -1042,14 +1075,16 @@ class _MetricTile extends StatelessWidget {
 }
 
 class _MonthlyChart extends StatelessWidget {
-  const _MonthlyChart({required this.monthlySeconds, required this.peakMonth});
+  const _MonthlyChart({required this.monthlySeconds, required this.peakMonth, this.animate = true});
 
   final List<int> monthlySeconds;
   final int? peakMonth;
+  final bool animate;
 
   @override
   Widget build(BuildContext context) {
     final maxSec = monthlySeconds.fold(1, math.max);
+    final dur = animate ? AppMotion.dur(context, AppMotion.expressive) : Duration.zero;
     return SizedBox(
       height: 92,
       child: Row(
@@ -1062,7 +1097,9 @@ class _MonthlyChart extends StatelessWidget {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.end,
                   children: [
-                    Container(
+                    AnimatedContainer(
+                      duration: dur,
+                      curve: AppMotion.curve,
                       height: monthlySeconds[m] <= 0 ? 3.0 : math.max(5.0, 66.0 * monthlySeconds[m] / maxSec),
                       margin: const EdgeInsets.symmetric(horizontal: 3),
                       decoration: BoxDecoration(

@@ -18,4 +18,14 @@ void main() {
     final out = [for (final (s, e) in splitSentences(text)) text.substring(s, e)];
     expect(out, ['“怎么会这样……！？”', '少女惊讶地抬起头。', '下一幕开始了。']);
   });
+
+  test('codeUnit 扫描兼容空文本、纯空白、拉丁/日文假名/重音字母与括号尾标点', () {
+    expect(splitSentences(''), isEmpty);
+    expect(splitSentences('   \n　　\n  '), isEmpty);
+    expect(splitSentences('———\n***\n......'), isEmpty);
+
+    const mixed = 'あ！Café 123.\n「ありがとう！」Привет мир!（测试括号）然后继续读下去。';
+    final out = [for (final (s, e) in splitSentences(mixed)) mixed.substring(s, e)];
+    expect(out, ['あ！Café 123.\n', '「ありがとう！」', 'Привет мир!', '（测试括号）然后继续读下去。']);
+  });
 }

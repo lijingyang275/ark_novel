@@ -651,6 +651,35 @@ void main() {
     expect(c.read(shelfOptionsProvider).sort, ShelfSort.lastRead);
     expect(c.read(shelfOptionsProvider).display, 0);
   });
+
+  test('SyncMerge 无实质变更返回 false 且不触发 Sync.changes；localDiagnostics 正确统计 Map 型 lib:ops', () async {
+    await box.put('lib:ops', {
+      '1': {'op': 'add'},
+      '2': {'op': 'remove', 'bid': 'b2'},
+    });
+    expect(Sync.localDiagnostics().pendingOps, 2);
+
+    final snap = remote(extra: {
+      'progress': {'1': ['c1', 10, 1000]},
+      'history': [
+        {'aid': '1', 'title': 'T', 'img': '', 'cid': 'c1', 'chapter': '第一章', 'time': 1000},
+      ],
+      'bookmarks': [
+        {'aid': '1', 'book': 'T', 'cid': 'c1', 'chapter': '第一章', 'offset': 10, 'excerpt': 'e', 'time': 1000},
+      ],
+      'read': {'1': ['c1']},
+      'readchars': {'1': 500},
+      'stats': {'day': {'2026-11-26': 60}, 'book': {'1': 60}, 'chapters': 1, 'meta': {}, 'days': {'1': ['2026-11-26']}},
+    });
+    final beforeFirst = Sync.changes.value;
+    expect(await Sync.merge(snap), isTrue);
+    expect(Sync.changes.value, beforeFirst + 1);
+
+    // 再次合并完全一致的快照：应返回 false 且不触发 Sync.changes（避免 11 个核心 Provider 重建）
+    final beforeSecond = Sync.changes.value;
+    expect(await Sync.merge(snap), isFalse);
+    expect(Sync.changes.value, beforeSecond);
+  });
 }
 
 void statsDeleteTests(Box Function() box) {

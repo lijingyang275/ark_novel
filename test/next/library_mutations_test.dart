@@ -274,4 +274,23 @@ void main() {
     expect(box.get('lib:ops'), isEmpty);
     expect(library().state.books.keys, ['1']);
   });
+
+  test('后台定时 sync 仅扫描曾有书的远程书架（默认从 6 请求降至 1 请求），手动 force 仍扫全部 6 书架', () async {
+    api.books = [remote('1', 'b1')];
+    login();
+    // 首次导入扫描全部 6 个书架，并记录非空书架 [0]
+    expect(await library().sync(details: false, shelfDelay: Duration.zero), isNull);
+    expect(api.shelves, [0, 1, 2, 3, 4, 5]);
+
+    // 模拟 31 分钟后后台定时同步（force: false）：仅扫默认书架 [0]
+    api.shelves.clear();
+    await box.put('lib:sync', DateTime.now().subtract(const Duration(minutes: 31)).millisecondsSinceEpoch);
+    expect(await library().sync(force: false, details: false, shelfDelay: Duration.zero), isNull);
+    expect(api.shelves, [0]);
+
+    // 手动下拉刷新（force: true）：仍全量扫描 6 个书架
+    api.shelves.clear();
+    expect(await library().sync(force: true, details: false, shelfDelay: Duration.zero), isNull);
+    expect(api.shelves, [0, 1, 2, 3, 4, 5]);
+  });
 }

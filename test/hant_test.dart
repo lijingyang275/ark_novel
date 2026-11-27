@@ -1,5 +1,7 @@
+import 'dart:convert' show utf8;
 import 'dart:io';
 
+import 'package:archive/archive.dart' show GZipDecoder;
 import 'package:flutter/widgets.dart' hide Text;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ark_novel/next/hant.dart';
@@ -7,7 +9,8 @@ import 'package:ark_novel/next/text.dart';
 
 void main() {
   String read(String f) => File('assets/opencc/$f').readAsStringSync();
-  final hant = Hant.parse(read('STCharacters.txt'), read('STPhrases.txt'), read('TWVariants.txt'), read('ArkFixes.txt'));
+  final phrases = utf8.decode(GZipDecoder().decodeBytes(File('assets/opencc/STPhrases.txt.gz').readAsBytesSync()));
+  final hant = Hant.parse(read('STCharacters.txt'), phrases, read('TWVariants.txt'), read('ArkFixes.txt'));
 
   test('词组优先，区分一简多繁', () {
     expect(hant.convert('头发'), '頭髮');

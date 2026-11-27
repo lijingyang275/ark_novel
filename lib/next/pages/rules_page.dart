@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../color_picker.dart';
 import '../library.dart' show LibraryStore;
+import '../motion.dart';
 import '../reader/reader_page.dart';
 import '../rules.dart';
 import '../stats.dart';
@@ -112,16 +113,25 @@ class _RulesPageState extends ConsumerState<RulesPage> {
     final marks = [for (final (i, r) in _rules.indexed) if (r.kind != RuleKind.replace) (i, r)];
     return Scaffold(
       appBar: AppBar(title: const Text('正则规则'), actions: [IconButton(tooltip: hz(context, '添加规则'), icon: const Icon(Icons.add), onPressed: () => _edit(null))]),
-      body: _rules.isEmpty
-          ? contentWidth(XEmpty(icon: Icons.find_replace, title: '还没有规则', detail: '替换：去除章节中的广告、统一用字\n着色 / 高亮：标出人名等关键词，阅读时点按可添加备注', action: '添加规则', onAction: () => _edit(null)))
-          : contentWidth(ListView(
-              padding: const EdgeInsets.only(bottom: 32),
-              children: [
-                if (replaces.isNotEmpty) ...[const XGroupTitle('替换'), for (final (i, r) in replaces) _row(i, r)],
-                if (replaces.isNotEmpty && marks.isNotEmpty) const XDivider(),
-                if (marks.isNotEmpty) ...[const XGroupTitle('着色与高亮'), for (final (i, r) in marks) _row(i, r)],
-              ],
-            )),
+      body: AppCrossfade(
+        fill: true,
+        child: _rules.isEmpty
+            ? KeyedSubtree(
+                key: const ValueKey('empty'),
+                child: contentWidth(XEmpty(icon: Icons.find_replace, title: '还没有规则', detail: '替换：去除章节中的广告、统一用字\n着色 / 高亮：标出人名等关键词，阅读时点按可添加备注', action: '添加规则', onAction: () => _edit(null))),
+              )
+            : KeyedSubtree(
+                key: const ValueKey('list'),
+                child: contentWidth(ListView(
+                  padding: const EdgeInsets.only(bottom: 32),
+                  children: [
+                    if (replaces.isNotEmpty) ...[const XGroupTitle('替换'), for (final (i, r) in replaces) _row(i, r)],
+                    if (replaces.isNotEmpty && marks.isNotEmpty) const XDivider(),
+                    if (marks.isNotEmpty) ...[const XGroupTitle('着色与高亮'), for (final (i, r) in marks) _row(i, r)],
+                  ],
+                )),
+              ),
+      ),
     );
   }
 }
@@ -162,7 +172,10 @@ Future<ReplaceRule?> showRuleDialog(BuildContext context, {ReplaceRule? initial}
                   onSelectionChanged: (s) => setLocal(() => kind = s.first),
                 ),
                 const SizedBox(height: 6),
-                Text(kindDesc, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                AppCrossfade(
+                  alignment: Alignment.centerLeft,
+                  child: Text(kindDesc, key: ValueKey(kind), style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                ),
                 const SizedBox(height: 12),
                 TextField(
                   controller: pattern,
@@ -170,37 +183,64 @@ Future<ReplaceRule?> showRuleDialog(BuildContext context, {ReplaceRule? initial}
                   decoration: InputDecoration(label: const Text('匹配内容（正则表达式）'), errorText: error),
                 ),
                 const SizedBox(height: 12),
-                if (kind == RuleKind.replace) ...[
-                  TextField(
-                    controller: replacement,
-                    onChanged: (_) => setLocal(() {}),
-                    decoration: const InputDecoration(label: Text('替换为'), helper: Text(r'留空则删除匹配内容；用 $1 引用分组')),
+                AnimatedSize(
+                  duration: AppMotion.dur(context, AppMotion.fast),
+                  curve: AppMotion.curve,
+                  alignment: Alignment.topCenter,
+                  child: AppCrossfade(
+                    alignment: Alignment.topCenter,
+                    child: kind == RuleKind.replace
+                        ? Column(
+                            key: const ValueKey('replace-fields'),
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              TextField(
+                                controller: replacement,
+                                onChanged: (_) => setLocal(() {}),
+                                decoration: const InputDecoration(label: Text('替换为'), helper: Text(r'留空则删除匹配内容；用 $1 引用分组')),
+                              ),
+                              const SizedBox(height: 12),
+                              TextField(
+                                controller: sample,
+                                onChanged: (_) => setLocal(() {}),
+                                decoration: const InputDecoration(label: Text('测试样本文本（可选）'), hint: Text('输入一句话实时查看替换结果', maxLines: 1, overflow: TextOverflow.ellipsis)),
+                              ),
+                              AppCollapse(
+                                visible: preview != null,
+                                child: Padding(
+                                  padding: const EdgeInsets.only(top: 8),
+                                  child: Container(
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                    decoration: BoxDecoration(color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5), borderRadius: BorderRadius.circular(8)),
+                                    child: Text('结果：${preview ?? ''}', style: Theme.of(context).textTheme.bodySmall),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          )
+                        : Column(
+                            key: ValueKey('mark-fields-$kind'),
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              AppCollapse(
+                                visible: kind == RuleKind.highlight,
+                                child: Padding(
+                                  padding: const EdgeInsets.only(bottom: 12),
+                                  child: TextField(
+                                    controller: name,
+                                    onChanged: (_) => setLocal(() {}),
+                                    decoration: const InputDecoration(label: Text('名称（可选）'), helper: Text('例如人物名，备注按名称归类')),
+                                  ),
+                                ),
+                              ),
+                              ColorPickerField(color: color, highlight: kind == RuleKind.highlight, sample: name.text.isNotEmpty ? name.text : '示例', onChanged: (c) => setLocal(() => color = c)),
+                            ],
+                          ),
                   ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: sample,
-                    onChanged: (_) => setLocal(() {}),
-                    decoration: const InputDecoration(label: Text('测试样本文本（可选）'), hint: Text('输入一句话实时查看替换结果', maxLines: 1, overflow: TextOverflow.ellipsis)),
-                  ),
-                  if (preview != null) ...[
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      decoration: BoxDecoration(color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5), borderRadius: BorderRadius.circular(8)),
-                      child: Text('结果：$preview', style: Theme.of(context).textTheme.bodySmall),
-                    ),
-                  ],
-                ] else ...[
-                  if (kind == RuleKind.highlight) ...[
-                    TextField(
-                      controller: name,
-                      onChanged: (_) => setLocal(() {}),
-                      decoration: const InputDecoration(label: Text('名称（可选）'), helper: Text('例如人物名，备注按名称归类')),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
-                  ColorPickerField(color: color, highlight: kind == RuleKind.highlight, sample: name.text.isNotEmpty ? name.text : '示例', onChanged: (c) => setLocal(() => color = c)),
-                ],
+                ),
                 if ((initial?.aid ?? '').isNotEmpty) ...[
                   const SizedBox(height: 8),
                   CheckboxListTile(

@@ -189,6 +189,37 @@ void main() {
       expect(fallbackUrl, 'https://www.wenku8.net/a');
       expect(res, ['web:/a', 'ok:/b']);
     });
+
+    test('allowChallengeFallback 为 false 时撞 403 直接失败，不拉起无头 WebView 且不影响后续前景过盾', () async {
+      var fallbackCalls = 0;
+      var cleared = false;
+      final adapter = _CallbackAdapter((options, _) async {
+        if (!cleared) return _gbk('cf', status: 403, headers: {'server': ['cloudflare']});
+        return _gbk('ok:${options.uri.path}');
+      });
+      final client = Wenku8Client(
+        baseUrl: () => 'https://www.wenku8.net',
+        charset: () => CharsetType.gbk,
+        headers: const {},
+        dio: Dio()..httpClientAdapter = adapter,
+        rateLimitPause: Duration.zero,
+        challengeFallback: (url, {referer}) async {
+          fallbackCalls++;
+          cleared = true;
+          return 'web:${Uri.parse(url).path}';
+        },
+      );
+
+      await expectLater(
+        client.getPage('https://www.wenku8.net/bg', charsetParam: false, allowChallengeFallback: false),
+        throwsA(isA<DioException>()),
+      );
+      expect(fallbackCalls, 0);
+
+      final fg = await client.getPage('https://www.wenku8.net/fg', charsetParam: false);
+      expect(fallbackCalls, 1);
+      expect(fg, 'web:/fg');
+    });
   });
 
   group('Wenku8Client 去重、取消、429 与瞬态重试', () {
@@ -228,11 +259,13 @@ void main() {
       final adapter = _CallbackAdapter((options, cancelFuture) async {
         if (options.uri.path == '/1') {
           firstStarted.complete();
-          cancelFuture?.then((_) {
-            if (!firstBlocked.isCompleted) {
-              firstBlocked.completeError(DioException.requestCancelled(requestOptions: options, reason: 'aborted'));
-            }
-          });
+          unawaited(
+            cancelFuture?.then((_) {
+              if (!firstBlocked.isCompleted) {
+                firstBlocked.completeError(DioException.requestCancelled(requestOptions: options, reason: 'aborted'));
+              }
+            }),
+          );
           return firstBlocked.future;
         }
         return _gbk('ok:${options.uri.path}');

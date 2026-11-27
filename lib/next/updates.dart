@@ -9,7 +9,6 @@ import '../data/wenku8/wenku8_exceptions.dart';
 import 'app_prefs.dart';
 import 'data.dart';
 import 'library.dart';
-import 'local_books.dart' show isLocalAid;
 import 'net_state.dart';
 import 'progress.dart';
 import 'read_state.dart';
@@ -60,14 +59,12 @@ class UpdateStore {
 
   static Map get _known => (_box.get('updates:known') as Map?) ?? {};
 
-  static Future<void> save(Map<String, int> known, List<Map> feed, {required Map<String, int> at}) async {
-    await _box.put('updates:known', known);
-    await _box.put('updates', feed.take(300).toList());
-    await _box.put('updates:check', DateTime.now().millisecondsSinceEpoch);
-    for (final e in at.entries) {
-      await _box.put('updates:at:${e.key}', e.value);
-    }
-  }
+  static Future<void> save(Map<String, int> known, List<Map> feed, {required Map<String, int> at}) => _box.putAll({
+    'updates:known': known,
+    'updates': feed.take(300).toList(),
+    'updates:check': DateTime.now().millisecondsSinceEpoch,
+    for (final e in at.entries) 'updates:at:${e.key}': e.value,
+  });
 
   /// 只存基准，不算检查完成。
   static Future<void> saveBaseline(Map<String, int> known) => _box.put('updates:known', known);
@@ -183,7 +180,7 @@ class UpdateController extends Notifier<UpdateProgress> {
       final firstRun = UpdateStore.lastCheck == 0; // 第一次要查全部的书，中途关掉下次接着查
       final books = {
         for (final b in all)
-          if (!isLocalAid(b.aid) && (only == null ? _catOk(b) && !(firstRun && known.containsKey(b.aid)) : only.contains(b.aid)) && _wanted(b, known)) b.aid: (title: b.title, img: b.img),
+          if ((only == null ? _catOk(b) && !(firstRun && known.containsKey(b.aid)) : only.contains(b.aid)) && _wanted(b, known)) b.aid: (title: b.title, img: b.img),
       };
       final feed = UpdateStore.feed().map((e) => {'aid': e.aid, 'title': e.title, 'img': e.img, 'chapter': e.chapter, 'cid': e.cid, 'time': e.time.millisecondsSinceEpoch}).toList();
       final at = <String, int>{};

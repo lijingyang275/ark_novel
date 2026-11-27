@@ -9,10 +9,13 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'app_prefs.dart';
+import 'cache.dart';
 import 'characters.dart';
 import 'files.dart';
+import 'highlights.dart';
 import 'library.dart';
 import 'progress.dart';
+import 'rules.dart';
 import 'stats.dart';
 import 'sync_validation.dart';
 import 'theme.dart';
@@ -86,10 +89,30 @@ class SyncMerge {
     return ts == null ? null : {'ts': ts};
   }
 
+  /// 异步版 [avatarSnapshot]：使用异步 `exists()` / `lastModified()`，避免主线程同步文件 syscall。
+  static Future<Map<String, dynamic>?> avatarSnapshotAsync(String deviceId) async {
+    if (kIsWeb || !AppPrefs.read(P.syncAvatar, true)) return null;
+    final path = _box.get('avatar') as String?;
+    final ts = _box.get('avatar:ts') as int?;
+    if (path != null && path.isNotEmpty) {
+      final file = File(path);
+      if (await file.exists()) {
+        final actualTs = ts ?? (await file.lastModified()).millisecondsSinceEpoch;
+        final remoteFile = _box.get('sync:avatarUp') == actualTs ? (_box.get('sync:avatarFile') as String?) : null;
+        return {'ts': actualTs, 'ext': p.extension(path), 'file': remoteFile ?? '$deviceId.avatar'};
+      }
+    }
+    return ts == null ? null : {'ts': ts};
+  }
+
   /// 本机要同步的数据（不含从别的设备并入的统计）。
-  static Map<String, dynamic> snapshot(String deviceId) {
+  static Map<String, dynamic> snapshot(String deviceId) => _buildSnapshot(deviceId, avatarSnapshot(deviceId));
+
+  /// 异步版 [snapshot]：使用异步头像文件检测，避免主线程同步磁盘 I/O。
+  static Future<Map<String, dynamic>> snapshotAsync(String deviceId) async => _buildSnapshot(deviceId, await avatarSnapshotAsync(deviceId));
+
+  static Map<String, dynamic> _buildSnapshot(String deviceId, Map<String, dynamic>? avatar) {
     Map<String, dynamic> byAid(String prefix) => {for (final k in _keys(prefix)) k.substring(prefix.length): _box.get(k)};
-    final avatar = avatarSnapshot(deviceId);
     return {
       'v': 3,
       'device': deviceId,
@@ -97,6 +120,7 @@ class SyncMerge {
       'progress': byAid('progress:'),
       'history': _box.get('history2') ?? const [],
       'bookmarks': _box.get('bookmarks') ?? const [],
+      'highlights': _box.get('highlights') ?? const [],
       'read': byAid('read:'),
       'readchars': byAid('readchars:'),
       'rating': byAid('rating:'),
@@ -205,9 +229,28 @@ class SyncMerge {
     }
   }
 
+  static bool _deepEquals(Object? a, Object? b) {
+    if (identical(a, b)) return true;
+    if (a is List && b is List) {
+      if (a.length != b.length) return false;
+      for (var i = 0; i < a.length; i++) {
+        if (!_deepEquals(a[i], b[i])) return false;
+      }
+      return true;
+    }
+    if (a is Map && b is Map) {
+      if (a.length != b.length) return false;
+      for (final e in a.entries) {
+        if (!b.containsKey(e.key) || !_deepEquals(e.value, b[e.key])) return false;
+      }
+      return true;
+    }
+    return a == b;
+  }
+
   static List<Map> _maps(Object? v) => [for (final e in (v as List?) ?? const []) Map<String, dynamic>.from(e as Map)];
 
-  /// 把 [remote]（别的设备的快照，已解码的 JSON）按规则并入本机。
+  /// 把 [remote]（别的设备的快照，已解码的 JSON）按规则并入本机；无任何实质变更时返回 false。
   ///
   /// 超过 90 天没更新的快照抛 [StaleSnapshotException]：那之前的墓碑已经清掉了，并进来会把删过的东西加回来。
   static Future<bool> merge(Map<String, dynamic> remote, {required String deviceId}) async {
@@ -221,13 +264,16 @@ class SyncMerge {
     final dels = <String>{...avatar.dels};
 
     // 墓碑：取较新的删除时间，超过 90 天的丢掉；比删除时间旧的东西视为已删
+    final localTombRaw = _box.get('sync:tomb');
     final tomb = tombs();
     for (final e in ((remote['tomb'] as Map?) ?? const {}).entries) {
       if (e.value is int && (e.value as int) > (tomb[e.key] ?? 0)) tomb['${e.key}'] = e.value as int;
     }
     final cutoff = tombCutoff;
     tomb.removeWhere((_, t) => t < cutoff);
-    puts['sync:tomb'] = tomb;
+    if (!_deepEquals(localTombRaw ?? const {}, tomb)) {
+      puts['sync:tomb'] = tomb;
+    }
     bool dead(String key, int time) => tomb.containsKey(key) && tomb[key]! >= time;
 
     // 进度：[章, 偏移, 时间]，旧版本机数据可能只有前两项（当作时间 0）；对方格式不对的单条跳过
@@ -240,44 +286,116 @@ class SyncMerge {
     }
 
     // 历史：每本书取较新的；删除、清空过的（`h:书`、`h:*` 墓碑）不再带回来
+    final localHistRaw = _box.get('history2');
     final hist = <String, Map>{};
-    for (final h in [..._maps(_box.get('history2')), ..._maps(remote['history'])]) {
+    for (final h in [..._maps(localHistRaw), ..._maps(remote['history'])]) {
       final time = h['time'] as int;
       if (dead('h:${h['aid']}', time) || dead('h:*', time)) continue;
       final old = hist[h['aid']];
       if (old == null || time > (old['time'] as int)) hist[h['aid'] as String] = h;
     }
-    puts['history2'] = (hist.values.toList()..sort((a, b) => (b['time'] as int).compareTo(a['time'] as int))).take(300).toList();
+    final mergedHist = (hist.values.toList()..sort((a, b) => (b['time'] as int).compareTo(a['time'] as int))).take(300).toList();
+    if (!_deepEquals(localHistRaw ?? const [], mergedHist)) {
+      puts['history2'] = mergedHist;
+    }
 
-    // 书签
-    final marks = _maps(_box.get('bookmarks')).where((l) => !dead(bookmarkKey(l), l['time'] as int)).toList();
+    // 书签：按 (aid, cid) 建索引消除 O(N×M) 全表扫描
+    final localMarksRaw = _box.get('bookmarks');
+    final marks = <Map>[];
+    final markBuckets = <String, List<int>>{};
+    for (final l in _maps(localMarksRaw)) {
+      if (dead(bookmarkKey(l), l['time'] as int)) continue;
+      final idx = marks.length;
+      marks.add(l);
+      (markBuckets['${l['aid']}:${l['cid']}'] ??= []).add(idx);
+    }
     for (final r in _maps(remote['bookmarks'])) {
       if (dead(bookmarkKey(r), r['time'] as int)) continue;
-      final i = marks.indexWhere((l) => l['aid'] == r['aid'] && l['cid'] == r['cid'] && ((l['offset'] as int) - (r['offset'] as int)).abs() <= 40);
-      if (i < 0) {
+      final bucketKey = '${r['aid']}:${r['cid']}';
+      final bucket = markBuckets[bucketKey];
+      var matchIdx = -1;
+      if (bucket != null) {
+        final rOff = r['offset'] as int;
+        for (final idx in bucket) {
+          if (((marks[idx]['offset'] as int) - rOff).abs() <= 40) {
+            matchIdx = idx;
+            break;
+          }
+        }
+      }
+      if (matchIdx < 0) {
+        final idx = marks.length;
         marks.add(r);
-      } else if ((r['time'] as int) > (marks[i]['time'] as int)) {
-        marks[i] = r;
+        (markBuckets[bucketKey] ??= []).add(idx);
+      } else if ((r['time'] as int) > (marks[matchIdx]['time'] as int)) {
+        marks[matchIdx] = r;
       }
     }
-    puts['bookmarks'] = (marks..sort((a, b) => (b['time'] as int).compareTo(a['time'] as int)));
+    marks.sort((a, b) => (b['time'] as int).compareTo(a['time'] as int));
+    if (!_deepEquals(localMarksRaw ?? const [], marks)) {
+      puts['bookmarks'] = marks;
+    }
+
+    // 正文划线 / 摘录：按 id 建 Map 索引 O(1) 合并，取时间戳 at 较新的；删除通过 `hl:$id` 墓碑同步
+    var highlightsChanged = false;
+    final localHighlights = _maps(_box.get('highlights'));
+    final mergedHighlights = <Map>[];
+    final hlIndex = <String, int>{};
+    for (final h in localHighlights) {
+      final id = h['id'];
+      final at = h['at'];
+      if (id is! String || id.isEmpty || at is! int) continue;
+      if (dead('hl:$id', at)) {
+        highlightsChanged = true;
+        continue;
+      }
+      hlIndex[id] = mergedHighlights.length;
+      mergedHighlights.add(h);
+    }
+    for (final r in _maps(remote['highlights'])) {
+      final entry = HighlightEntry.fromMap(r);
+      if (entry == null || dead('hl:${entry.id}', entry.at)) continue;
+      final i = hlIndex[entry.id];
+      if (i == null) {
+        hlIndex[entry.id] = mergedHighlights.length;
+        mergedHighlights.add(entry.toMap());
+        highlightsChanged = true;
+      } else if (entry.at > ((mergedHighlights[i]['at'] as int?) ?? 0)) {
+        mergedHighlights[i] = entry.toMap();
+        highlightsChanged = true;
+      }
+    }
+    if (highlightsChanged) {
+      mergedHighlights.sort((a, b) => ((b['at'] as int?) ?? 0).compareTo((a['at'] as int?) ?? 0));
+      puts['highlights'] = mergedHighlights;
+    }
 
     // 已读章节、字数、评分
+    final changedReadAids = <String>{};
     for (final e in ((remote['read'] as Map?) ?? const {}).entries) {
-      puts['read:${e.key}'] = {...((_box.get('read:${e.key}') as List?) ?? const []).cast<String>(), ...(e.value as List).cast<String>()}.toList();
+      final localList = ((_box.get('read:${e.key}') as List?) ?? const []).cast<String>();
+      final localSet = localList.toSet();
+      final mergedSet = {...localSet, ...(e.value as List).cast<String>()};
+      if (mergedSet.length != localSet.length) {
+        puts['read:${e.key}'] = mergedSet.toList();
+        changedReadAids.add('${e.key}');
+      }
     }
     for (final e in ((remote['readchars'] as Map?) ?? const {}).entries) {
-      puts['readchars:${e.key}'] = max((_box.get('readchars:${e.key}') as int?) ?? 0, e.value as int);
+      final localVal = (_box.get('readchars:${e.key}') as int?) ?? 0;
+      final remoteVal = e.value as int;
+      if (remoteVal > localVal) puts['readchars:${e.key}'] = remoteVal;
     }
     final remoteRatingTs = (remote['ratingTs'] as Map?) ?? const {};
     for (final e in ((remote['rating'] as Map?) ?? const {}).entries) {
       if (e.value is! int) continue;
       final rTs = (remoteRatingTs[e.key] as int?) ?? 0;
       final lTs = (_box.get('ratingTs:${e.key}') as int?) ?? 0;
+      final lVal = (_box.get('rating:${e.key}') as int?) ?? 0;
       if (rTs > 0 && rTs > lTs) {
-        puts['rating:${e.key}'] = e.value;
+        if (lVal != e.value) puts['rating:${e.key}'] = e.value;
         puts['ratingTs:${e.key}'] = rTs;
-      } else if (rTs == 0 && ((_box.get('rating:${e.key}') as int?) ?? 0) == 0 && (e.value as int) > 0) {
+      } else if (rTs == 0 && lVal == 0 && (e.value as int) > 0) {
         puts['rating:${e.key}'] = e.value;
       }
     }
@@ -287,6 +405,7 @@ class SyncMerge {
       final local = Map<String, int>.from(((_box.get('vrate:${e.key}') as Map?) ?? const {}).map((k, v) => MapEntry('$k', v as int)));
       final localTs = Map<String, int>.from(((_box.get('vrateTs:${e.key}') as Map?) ?? const {}).map((k, v) => MapEntry('$k', v as int)));
       final rVolTs = (remoteVrateTs[e.key] as Map?) ?? const {};
+      var vrateChanged = false;
       var tsChanged = false;
       for (final vr in (e.value as Map).entries) {
         if (vr.value is! int) continue;
@@ -295,40 +414,65 @@ class SyncMerge {
         final rTs = (rVolTs[vol] as int?) ?? 0;
         final lTs = localTs[vol] ?? 0;
         if (rTs > 0 && rTs > lTs) {
-          local[vol] = stars;
+          if (local[vol] != stars) {
+            local[vol] = stars;
+            vrateChanged = true;
+          }
           localTs[vol] = rTs;
           tsChanged = true;
         } else if (rTs == 0 && (local[vol] ?? 0) == 0 && stars > 0) {
           local[vol] = stars;
+          vrateChanged = true;
         }
       }
-      if (local.isNotEmpty) puts['vrate:${e.key}'] = local;
+      if (vrateChanged) puts['vrate:${e.key}'] = local;
       if (tsChanged) puts['vrateTs:${e.key}'] = localTs;
     }
 
-    // 规则：按编号并集，同一条取修改时间较新的；备注：并集，本机优先
+    // 规则：按编号建索引 O(1) 合并，同一条取修改时间较新的；备注：并集，本机优先
     int ts(Map r) => (r['ts'] as int?) ?? 0;
-    final rules = _maps(_box.get('rules')).where((r) => !dead('r:${r['id']}', ts(r))).toList();
+    final localRules = _maps(_box.get('rules'));
+    final rules = <Map>[];
+    final ruleIndex = <Object?, int>{};
+    var rulesChanged = false;
+    for (final r in localRules) {
+      if (dead('r:${r['id']}', ts(r))) {
+        rulesChanged = true;
+        continue;
+      }
+      ruleIndex[r['id']] = rules.length;
+      rules.add(r);
+    }
     for (final r in _maps(remote['rules'])) {
-      if (r['id'] == null || dead('r:${r['id']}', ts(r))) continue;
-      final i = rules.indexWhere((l) => l['id'] == r['id']);
-      if (i < 0) {
+      final id = r['id'];
+      if (id == null || dead('r:$id', ts(r))) continue;
+      final i = ruleIndex[id];
+      if (i == null) {
+        ruleIndex[id] = rules.length;
         rules.add(r);
+        rulesChanged = true;
       } else if (ts(r) > ts(rules[i])) {
         rules[i] = r;
+        rulesChanged = true;
       }
     }
-    puts['rules'] = rules;
+    if (rulesChanged) puts['rules'] = rules;
     for (final e in ((remote['notes'] as Map?) ?? const {}).entries) {
       final local = Map<String, String>.from(((_box.get('notes:${e.key}') as Map?) ?? const {}).map((k, v) => MapEntry('$k', '$v')));
+      var notesChanged = false;
       for (final n in (e.value as Map).entries) {
-        local.putIfAbsent('${n.key}', () => '${n.value}');
+        final nk = '${n.key}';
+        if (!local.containsKey(nk)) {
+          local[nk] = '${n.value}';
+          notesChanged = true;
+        }
       }
-      puts['notes:${e.key}'] = local;
+      if (notesChanged) puts['notes:${e.key}'] = local;
     }
 
-    // 人物/设定词典：按书籍与 id 合并，取修改时间 ts 较新的；删除用 `ch:$aid:$id` 墓碑同步
+    // 人物/设定词典：按书籍与 id 建索引 O(1) 合并，取修改时间 ts 较新的；删除用 `ch:$aid:$id` 墓碑同步
     var charsChanged = false;
+    final removedCharAvatars = <String>{};
     final remoteChars = remote['chars'] is Map ? remote['chars'] as Map : const {};
     final charAids = <String>{
       for (final k in remoteChars.keys) '$k',
@@ -338,22 +482,45 @@ class SyncMerge {
     for (final aid in charAids) {
       final localRaw = _box.get('chars:$aid');
       if (localRaw == null && !remoteChars.containsKey(aid)) continue;
-      final merged = _maps(localRaw).where((c) => c['id'] is String && (c['id'] as String).isNotEmpty && !dead('ch:$aid:${c['id']}', ts(c))).toList();
+      final localList = _maps(localRaw);
+      final merged = <Map>[];
+      final charIndex = <String, int>{};
+      var bookCharsChanged = false;
+      for (final c in localList) {
+        final id = c['id'];
+        if (id is! String || id.isEmpty) continue;
+        if (dead('ch:$aid:$id', ts(c))) {
+          final av = c['localAvatar'];
+          if (av is String && av.isNotEmpty) removedCharAvatars.add(av);
+          bookCharsChanged = true;
+          continue;
+        }
+        charIndex[id] = merged.length;
+        merged.add(c);
+      }
       final rList = remoteChars[aid];
       if (rList is List) {
         for (final r in _maps(rList)) {
           final id = r['id'];
           if (id is! String || id.isEmpty || dead('ch:$aid:$id', ts(r))) continue;
-          final i = merged.indexWhere((l) => l['id'] == id);
-          if (i < 0) {
+          final i = charIndex[id];
+          if (i == null) {
+            charIndex[id] = merged.length;
             merged.add(r);
+            bookCharsChanged = true;
           } else if (ts(r) > ts(merged[i])) {
+            final oldAv = merged[i]['localAvatar'];
+            final newAv = r['localAvatar'];
+            if (oldAv is String && oldAv.isNotEmpty && oldAv != newAv) removedCharAvatars.add(oldAv);
             merged[i] = r;
+            bookCharsChanged = true;
           }
         }
       }
-      puts['chars:$aid'] = merged;
-      charsChanged = true;
+      if (bookCharsChanged) {
+        puts['chars:$aid'] = merged;
+        charsChanged = true;
+      }
     }
 
     // 书架分类（例如"在追"）与书架书籍（含重命名 name、所属分类 cats）
@@ -361,38 +528,63 @@ class SyncMerge {
     final readAfter = <LibBook>[]; // 被墓碑删掉、但本机在删除之后读过的书
     final localCatMap = <String, String>{}; // 本机分类换了 id：旧 → 新
     if (remote['cats'] != null || remote['books'] != null) {
-      final cats = _maps(_box.get('lib:cats')).where((c) => !dead('cat:${c['id']}', ts(c))).toList();
+      final localCatsRaw = _box.get('lib:cats');
+      final cats = <Map>[];
+      final catById = <String, int>{};
+      final catByName = <String, int>{};
+      for (final c in _maps(localCatsRaw)) {
+        if (dead('cat:${c['id']}', ts(c))) continue;
+        final idx = cats.length;
+        cats.add(c);
+        catById['${c['id']}'] = idx;
+        catByName.putIfAbsent('${c['name']}', () => idx);
+      }
       for (final r in _maps(remote['cats'])) {
         final rId = '${r['id']}';
         final rName = '${r['name']}';
         final rTs = ts(r);
         if (dead('cat:$rId', rTs)) continue;
-        final byId = cats.indexWhere((c) => c['id'] == rId);
-        if (byId >= 0) {
-          if (rTs > ts(cats[byId])) cats[byId] = {'id': rId, 'name': rName, 'ts': rTs};
+        final byId = catById[rId];
+        if (byId != null) {
+          if (rTs > ts(cats[byId])) {
+            final oldName = '${cats[byId]['name']}';
+            cats[byId] = {'id': rId, 'name': rName, 'ts': rTs};
+            if (oldName != rName) {
+              if (catByName[oldName] == byId) catByName.remove(oldName);
+              catByName.putIfAbsent(rName, () => byId);
+            }
+          }
         } else {
-          final byName = cats.indexWhere((c) => c['name'] == rName);
-          if (byName >= 0) {
+          final byName = catByName[rName];
+          if (byName != null) {
             // 同名分类两边统一成同一个 id（取较小的），之后改名、删除才能跨设备对上
             final lId = '${cats[byName]['id']}';
             if (rId.compareTo(lId) < 0) {
               cats[byName] = {...cats[byName], 'id': rId};
+              catById.remove(lId);
+              catById[rId] = byName;
               localCatMap[lId] = rId;
             } else {
               catIdMap[rId] = lId;
             }
           } else {
+            final idx = cats.length;
             cats.add({'id': rId, 'name': rName, 'ts': rTs});
+            catById[rId] = idx;
+            catByName.putIfAbsent(rName, () => idx);
           }
         }
       }
-      puts['lib:cats'] = cats;
+      if (!_deepEquals(localCatsRaw ?? const [], cats)) {
+        puts['lib:cats'] = cats;
+      }
 
       final validCatIds = {for (final c in cats) '${c['id']}'};
       // 书的删除只看加入时间：删除之后改名、改分类、阅读都不让它回来，重新加入才算（[LibraryController.restore]）
+      final localBooksRaw = _box.get('lib:books');
       final localBooks = <String, Map<String, dynamic>>{};
       final gone = <String, Map<String, dynamic>>{};
-      for (final e in ((_box.get('lib:books') as Map?) ?? const {}).entries) {
+      for (final e in ((localBooksRaw as Map?) ?? const {}).entries) {
         final aid = '${e.key}';
         final b = Map<String, dynamic>.from(e.value as Map);
         b['cats'] = {for (final c in ((b['cats'] as List?) ?? const []).cast<String>()) localCatMap[c] ?? c}.toList();
@@ -444,19 +636,26 @@ class SyncMerge {
           };
         }
       }
-      puts['lib:books'] = localBooks;
-      final ops = Map<String, Object?>.from((_box.get('lib:ops') as Map?) ?? const {});
+      if (!_deepEquals(localBooksRaw ?? const {}, localBooks)) {
+        puts['lib:books'] = localBooks;
+      }
+      final opsRaw = _box.get('lib:ops');
+      final ops = Map<String, Object?>.from((opsRaw as Map?) ?? const {});
+      var opsChanged = false;
       for (final MapEntry(key: aid, value: b) in gone.entries) {
         if (localBooks.containsKey(aid)) continue; // 对方删了之后又重新加过
         // 本机推到过网站书架的也从网站移出，不然下次对网站书架时又被加回来
-        if (b['bid'] != null) ops[aid] = {'op': 'remove', 'bid': b['bid']};
+        if (b['bid'] != null) {
+          ops[aid] = {'op': 'remove', 'bid': b['bid']};
+          opsChanged = true;
+        }
         if (ReadingProgress.lastRead(aid) > tomb['lib:$aid']!) {
           try {
             readAfter.add(LibBook.fromMap(b));
           } catch (_) {}
         }
       }
-      if (gone.isNotEmpty) puts['lib:ops'] = ops;
+      if (opsChanged) puts['lib:ops'] = ops;
       _renameCatRefs(localCatMap, puts, dels);
     }
 
@@ -483,7 +682,8 @@ class SyncMerge {
     final rVcover = (remote['vcover'] as Map?) ?? const {};
     final rVpick = (remote['vpick'] as Map?) ?? const {};
     for (final aid in {...rVcover.keys.map((k) => '$k'), ...rVpick.keys.map((k) => '$k')}) {
-      final lPick = ((_box.get('vpick:$aid') as List?) ?? const []).cast<String>().toSet();
+      final lPickOrig = ((_box.get('vpick:$aid') as List?) ?? const []).cast<String>().toSet();
+      final lPick = Set<String>.of(lPickOrig);
       final rPick = ((rVpick[aid] as List?) ?? const []).cast<String>().toSet();
       final lCover = Map<String, String>.from(((_box.get('vcover2:$aid') as Map?) ?? const {}).map((k, v) => MapEntry('$k', '$v')));
       final rCover = Map<String, String>.from(((rVcover[aid] as Map?) ?? const {}).map((k, v) => MapEntry('$k', '$v')));
@@ -492,11 +692,14 @@ class SyncMerge {
       bool manual(Set<String> picks, String title, String? url) => picks.contains(title) || (url?.contains('#crop=') ?? false);
       // 有一台设备恢复了自动封面：比那次恢复早的手动封面作废，两边都去掉
       bool reset(Map<String, int> time, String title) => dead('vcover:$aid:$title', time[title] ?? 0);
+      var aidCoverChanged = false;
+      var aidTimeChanged = false;
       for (final title in lCover.keys.toList()) {
         if (manual(lPick, title, lCover[title]) && reset(lTime, title)) {
           lCover.remove(title);
           lPick.remove(title);
-          lTime.remove(title);
+          if (lTime.remove(title) != null) aidTimeChanged = true;
+          aidCoverChanged = true;
           coverChanged = true;
         }
       }
@@ -511,32 +714,48 @@ class SyncMerge {
             : !lManual && (lUrl == null || lUrl.isEmpty) && rUrl.isNotEmpty;
         if (take && lUrl != rUrl) {
           lCover[title] = rUrl;
+          aidCoverChanged = true;
           coverChanged = true;
         }
-        if (rManual && (rTime[title] ?? 0) > (lTime[title] ?? 0)) lTime[title] = rTime[title]!;
+        if (rManual && (rTime[title] ?? 0) > (lTime[title] ?? 0)) {
+          lTime[title] = rTime[title]!;
+          aidTimeChanged = true;
+        }
       }
       rPick.removeWhere((title) => reset(rTime, title));
       final mergedPick = {...lPick, ...rPick};
-      puts['vcover2:$aid'] = lCover;
-      puts['vpick:$aid'] = mergedPick.toList();
-      if (lTime.isNotEmpty) puts['vpickTs:$aid'] = lTime;
+      if (aidCoverChanged) puts['vcover2:$aid'] = lCover;
+      if (mergedPick.length != lPickOrig.length || !mergedPick.containsAll(lPickOrig)) {
+        puts['vpick:$aid'] = mergedPick.toList();
+      }
+      if (aidTimeChanged && lTime.isNotEmpty) puts['vpickTs:$aid'] = lTime;
     }
 
     // 更新列表与章节基准（让手机和电脑看到的更新一致）
     if (remote['updates'] is Map) {
       final ru = remote['updates'] as Map;
+      final localFeedRaw = _box.get('updates');
       final feedMap = <String, Map>{};
-      for (final f in [..._maps(_box.get('updates')), ..._maps(ru['feed'])]) {
+      for (final f in [..._maps(localFeedRaw), ..._maps(ru['feed'])]) {
         final key = '${f['aid']}:${f['cid']}';
         final old = feedMap[key];
         if (old == null || (f['time'] as int) > (old['time'] as int)) feedMap[key] = f;
       }
-      puts['updates'] = (feedMap.values.toList()..sort((a, b) => (b['time'] as int).compareTo(a['time'] as int))).take(300).toList();
-      final known = Map<String, int>.from(((_box.get('updates:known') as Map?) ?? const {}).map((k, v) => MapEntry('$k', v as int)));
-      for (final e in ((ru['known'] as Map?) ?? const {}).entries) {
-        known['${e.key}'] = max(known['${e.key}'] ?? 0, e.value as int);
+      final mergedFeed = (feedMap.values.toList()..sort((a, b) => (b['time'] as int).compareTo(a['time'] as int))).take(300).toList();
+      if (!_deepEquals(localFeedRaw ?? const [], mergedFeed)) {
+        puts['updates'] = mergedFeed;
       }
-      puts['updates:known'] = known;
+      final known = Map<String, int>.from(((_box.get('updates:known') as Map?) ?? const {}).map((k, v) => MapEntry('$k', v as int)));
+      var knownChanged = false;
+      for (final e in ((ru['known'] as Map?) ?? const {}).entries) {
+        final k = '${e.key}';
+        final rVal = e.value as int;
+        if (rVal > (known[k] ?? 0)) {
+          known[k] = rVal;
+          knownChanged = true;
+        }
+      }
+      if (knownChanged) puts['updates:known'] = known;
       final rSeen = (ru['seen'] as int?) ?? 0;
       final lSeen = (_box.get('updates:seen') as int?) ?? 0;
       if (rSeen > lSeen) puts['updates:seen'] = rSeen;
@@ -596,24 +815,51 @@ class SyncMerge {
       ReadingStats.stripBook(stats, aid, before: e.value);
       if (e.value > (purged[aid] ?? 0)) purge[aid] = e.value;
     }
-    puts['sync:stats:${remote['device']}'] = jsonEncode(stats);
+    final statsKey = 'sync:stats:${remote['device']}';
+    final encodedStats = jsonEncode(stats);
+    final statsChanged = _box.get(statsKey) != encodedStats;
+    if (statsChanged) puts[statsKey] = encodedStats;
+
     // 删除和写入放在最后一起做：前面出错时本机什么都没改
     dels.removeAll(puts.keys);
+    dels.removeWhere((k) => !_box.containsKey(k));
+    if (puts.isEmpty && dels.isEmpty && purge.isEmpty && removedCharAvatars.isEmpty && readAfter.isEmpty) {
+      await avatar.cleanup?.call();
+      return false;
+    }
+
     // 两个调用都先更新 Hive 内存，再一起等落盘；删除和写入之间不能让出事件循环。
-    await Future.wait([if (dels.isNotEmpty) _box.deleteAll(dels), _box.putAll(puts)]);
+    await Future.wait([if (dels.isNotEmpty) _box.deleteAll(dels), if (puts.isNotEmpty) _box.putAll(puts)]);
+    if (rulesChanged) ReplaceRules.notifyChanged();
+    if (highlightsChanged) HighlightStore.notifyChanged();
+    if (puts.containsKey('lib:books')) PageStore.invalidateLooseCount();
     await avatar.cleanup?.call();
+    if (removedCharAvatars.isNotEmpty) {
+      final keptAvatars = <String>{
+        for (final k in _keys('chars:'))
+          for (final item in ((_box.get(k) as List?) ?? const []).whereType<Map>())
+            if (item['localAvatar'] is String && (item['localAvatar'] as String).isNotEmpty) item['localAvatar'] as String,
+      };
+      for (final fileName in removedCharAvatars) {
+        if (!keptAvatars.contains(fileName)) {
+          await BookCharacters.deleteLocalAvatar(fileName);
+        }
+      }
+    }
     // 先删本机的再记「删过了」：中途被打断的话下次合并会再删一次（按日期删，重复删没有副作用）
     for (final MapEntry(key: aid, value: at) in purge.entries) {
       await ReadingStats.purgeLocal(aid, before: at);
       purged[aid] = at;
     }
     if (purge.isNotEmpty) await _box.put('stats:purged', purged);
-    for (final aid in ((remote['read'] as Map?) ?? const {}).keys) {
-      await Volumes.refreshDone('$aid');
+    for (final aid in changedReadAids) {
+      await Volumes.refreshDone(aid);
     }
-    if (coverChanged) Volumes.changes.value++;
+    final rateChanged = puts.keys.any((k) => k.startsWith('vrate:'));
+    if (rateChanged) Volumes.metaChanges.value++;
+    if (coverChanged || rateChanged) Volumes.changes.value++;
     if (charsChanged) BookCharacters.changes.value++;
-    ReadingStats.changes.value++;
+    if (statsChanged || purge.isNotEmpty) ReadingStats.changes.value++;
     LibraryStore.noteRemovedElsewhere(readAfter);
     return true;
   }
@@ -721,6 +967,9 @@ class SyncMerge {
   ];
 
   static final _statsCache = <String, (String, Map<String, dynamic>)>{};
+
+  /// 释放其他设备阅读统计的内存解码缓存。
+  static void evictMemory() => _statsCache.clear();
 
   static Map<String, dynamic> _decodeStats(String key, String raw) {
     final hit = _statsCache[key];

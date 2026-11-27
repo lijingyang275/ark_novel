@@ -1,8 +1,28 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ark_novel/next/image_cache.dart';
 import 'package:ark_novel/next/reader/reader_body.dart';
 import 'package:ark_novel/next/widgets.dart';
+
+class _FailingImageStore implements ImageStore {
+  @override
+  final srVersion = ValueNotifier<int>(0);
+
+  @override
+  Uint8List? peek(String rawUrl) => null;
+
+  @override
+  Future<Uint8List> load(String rawUrl) => Future<Uint8List>.error('test');
+
+  @override
+  void cancel(String rawUrl) {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
 
 void main() {
   flowTests();
@@ -142,7 +162,10 @@ void flowTests() {
     final fallback = <int>[];
     await t.pumpWidget(
       ProviderScope(
-        overrides: [imageBytesProvider.overrideWith((ref, url) => Future.error('test'))],
+        overrides: [
+          imageStoreProvider.overrideWithValue(_FailingImageStore()),
+          imageBytesProvider.overrideWith((ref, url) => Future.error('test')),
+        ],
         child: MaterialApp(
         home: PagedBody(
           key: UniqueKey(),

@@ -1,8 +1,10 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/scheduler.dart';
 
+import '../motion.dart';
 import '../text.dart';
 import 'reader_sheets.dart' show ReaderPalette;
 
@@ -375,15 +377,21 @@ class ReaderAutoScrollBar extends StatelessWidget {
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 2),
-              child: Text(
-                controller.speedLabel,
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: fg.withValues(alpha: 0.85)),
+              child: AppCrossfade(
+                duration: AppMotion.instant,
+                child: Text(
+                  controller.speedLabel,
+                  key: ValueKey(controller.speedLabel),
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: fg.withValues(alpha: 0.85), fontFeatures: const [FontFeature.tabularFigures()]),
+                ),
               ),
             ),
             IconButton(
               tooltip: hz(context, paused ? '继续自动阅读' : '暂停自动阅读'),
               visualDensity: VisualDensity.compact,
-              icon: Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, size: 24, color: accent),
+              icon: AppIconSwap(
+                child: Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, key: ValueKey(paused), size: 24, color: accent),
+              ),
               onPressed: controller.togglePause,
             ),
             IconButton(
@@ -422,7 +430,8 @@ class ReaderAutoScrollBar extends StatelessWidget {
   }
 }
 
-/// 翻页模式自动翻页时贴在底部的极细柔和倒计时进度条。
+/// 翻页模式自动翻页时贴在底部的极细柔和倒计时进度条：
+/// 使用独立 [RepaintBoundary] + `CustomPaint(repaint: progress)` 直画，每帧零 Layout 与零 Widget 重建。
 class ReaderAutoTurnProgressBar extends StatelessWidget {
   const ReaderAutoTurnProgressBar({
     super.key,
@@ -439,22 +448,26 @@ class ReaderAutoTurnProgressBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: controller,
-      builder: (_, _) {
-        if (!controller.isActive || controller.isScrollMode) return const SizedBox.shrink();
+      builder: (context, _) {
+        final show = controller.isActive && !controller.isScrollMode;
         final barColor = accent.withValues(alpha: controller.isPaused ? 0.28 : 0.55);
         final trackColor = palette.fg.withValues(alpha: 0.08);
-        return IgnorePointer(
-          child: ValueListenableBuilder<double>(
-            valueListenable: controller.progress,
-            builder: (_, v, _) => SizedBox(
-              height: 2.5,
-              width: double.infinity,
-              child: ColoredBox(
-                color: trackColor,
-                child: FractionallySizedBox(
-                  alignment: Alignment.centerLeft,
-                  widthFactor: v.clamp(0.0, 1.0),
-                  child: ColoredBox(color: barColor),
+        return AppReveal(
+          visible: show,
+          offset: Offset.zero,
+          beginScale: 1.0,
+          duration: AppMotion.fast,
+          child: IgnorePointer(
+            child: RepaintBoundary(
+              child: SizedBox(
+                height: 2.5,
+                width: double.infinity,
+                child: CustomPaint(
+                  painter: _AutoTurnBarPainter(
+                    progress: controller.progress,
+                    barColor: barColor,
+                    trackColor: trackColor,
+                  ),
                 ),
               ),
             ),
@@ -463,4 +476,29 @@ class ReaderAutoTurnProgressBar extends StatelessWidget {
       },
     );
   }
+}
+
+class _AutoTurnBarPainter extends CustomPainter {
+  _AutoTurnBarPainter({
+    required this.progress,
+    required this.barColor,
+    required this.trackColor,
+  }) : super(repaint: progress);
+
+  final ValueListenable<double> progress;
+  final Color barColor;
+  final Color trackColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) return;
+    canvas.drawRect(Offset.zero & size, Paint()..color = trackColor);
+    final factor = progress.value.clamp(0.0, 1.0);
+    if (factor > 0) {
+      canvas.drawRect(Rect.fromLTWH(0, 0, size.width * factor, size.height), Paint()..color = barColor);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_AutoTurnBarPainter old) => old.progress != progress || old.barColor != barColor || old.trackColor != trackColor;
 }

@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show Uint8List, compute, kIsWeb;
@@ -14,16 +16,15 @@ import '../models/content.dart';
 import 'cache.dart';
 import 'data.dart' show NovelPage;
 import 'epub_codec.dart';
-import 'files.dart';
 import 'image_cache.dart';
 import 'library.dart' show LibraryStore;
-import 'local_books.dart';
 import 'text.dart';
 import 'volume_covers.dart';
 
 enum ExportFormat { epub, txt }
 
 typedef ExportResult = ({Uint8List bytes, String fileName, String mimeType, int chapterCount, int imageCount});
+typedef ExportFileResult = ({String filePath, String fileName, String mimeType, int chapterCount, int imageCount});
 
 Uint8List _encodeInIsolate(
   ({
@@ -53,18 +54,69 @@ Uint8List _encodeInIsolate(
   );
 }
 
-/// 导出已缓存书籍（在线书与本地导入书通用）为 EPUB 或 TXT。
+Future<void> _encodeToFileInIsolate(
+  ({
+    ExportFormat format,
+    String outputPath,
+    String title,
+    String author,
+    String description,
+    String? coverPath,
+    Uint8List? coverBytes,
+    List<EpubVolumeData> volumes,
+  })
+  args,
+) {
+  if (args.format == ExportFormat.epub) {
+    return EpubBuilder.buildToFile(
+      args.outputPath,
+      title: args.title,
+      author: args.author,
+      description: args.description,
+      coverPath: args.coverPath,
+      coverBytes: args.coverBytes,
+      volumes: args.volumes,
+    );
+  }
+  return TxtBuilder.buildToFile(
+    args.outputPath,
+    title: args.title,
+    author: args.author,
+    description: args.description,
+    volumes: args.volumes,
+  );
+}
+
+Future<void> _copyFileStreamed(String srcPath, String destPath) async {
+  final sink = File(destPath).openWrite();
+  try {
+    await File(srcPath).openRead().pipe(sink);
+  } catch (_) {
+    try {
+      await sink.close();
+    } catch (_) {}
+    rethrow;
+  }
+}
+
+Future<void> _deleteQuietly(String path) async {
+  try {
+    final file = File(path);
+    if (await file.exists()) await file.delete();
+  } catch (_) {}
+}
+
+/// 导出已缓存书籍为 EPUB 或 TXT。
 class ExportBook {
   ExportBook._();
 
-  /// 返回该书当前可供导出的本地/已缓存章节数。
+  /// 返回该书当前可供导出的已缓存章节数。
   static int availableCount(String aid, List<CatVolume> catalogue, {Set<String>? onlyCids}) {
-    final local = isLocalAid(aid);
     var count = 0;
     for (final v in catalogue) {
       for (final c in v.chapters) {
         if (onlyCids != null && !onlyCids.contains(c.cid)) continue;
-        if (local || ChapterCache.has(aid, c.cid)) count++;
+        if (ChapterCache.has(aid, c.cid)) count++;
       }
     }
     return count;
@@ -77,7 +129,162 @@ class ExportBook {
     return clean.length > 80 ? clean.substring(0, 80).trim() : clean;
   }
 
-  /// 收集已缓存章节与本地图片，在独立 isolate 中编码生成 EPUB / TXT 字节。
+  /// 与 [ImageStore] 保持一致的规范 URL 磁盘文件名计算（双 32 位 FNV-1a）。
+  static String _imageCacheFileName(String normUrl) {
+    final bytes = utf8.encode(normUrl);
+    String hash(int seed) {
+      var h = seed;
+      for (final b in bytes) {
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF;
+      }
+      return h.toRadixString(16).padLeft(8, '0');
+    }
+
+    return hash(0x811c9dc5) + hash(0x9747b28c);
+  }
+
+  static String _normImageUrl(String rawUrl) => splitCrop(rawUrl).url.replaceFirst('http://', 'https://');
+
+  /// 优先返回本机已缓存图片的磁盘路径（零字节读入主线程内存、不触发联网）；
+  /// 仅当磁盘无文件且内存 LRU 命中或测试桩覆写 `cached` 时回退内存字节。
+  static Future<({String? path, Uint8List? bytes})?> _resolveCachedImage(
+    ImageStore imageStore,
+    Directory? imgCacheDir,
+    String rawUrl,
+  ) async {
+    if (rawUrl.isEmpty) return null;
+    final norm = _normImageUrl(rawUrl);
+    if (!kIsWeb && imgCacheDir != null) {
+      final file = File(p.join(imgCacheDir.path, _imageCacheFileName(norm)));
+      final stat = await file.stat();
+      if (stat.type == FileSystemEntityType.file && stat.size > 0) {
+        return (path: file.path, bytes: null);
+      }
+    }
+    final mem = imageStore.peek(norm);
+    if (mem != null && mem.isNotEmpty) {
+      return (path: null, bytes: mem);
+    }
+    if (imageStore.runtimeType != ImageStore) {
+      final fallback = await imageStore.cached(rawUrl);
+      if (fallback != null && fallback.isNotEmpty) {
+        return (path: null, bytes: fallback);
+      }
+    }
+    return null;
+  }
+
+  /// 原生端流式导出：主 Isolate 仅收集章节正文与本地图片磁盘路径，
+  /// 在后台 Isolate 中通过 `ZipFileEncoder` / 流式文件写入直接输出到目标路径（默认临时目录），避免百兆级 OOM。
+  static Future<ExportFileResult> buildToFile({
+    required String aid,
+    required NovelPage novel,
+    required ExportFormat format,
+    required ImageStore imageStore,
+    String? outputPath,
+    String? coverUrl,
+    Set<String>? onlyCids,
+    void Function(String stage, double? progress)? onProgress,
+  }) async {
+    final shownTitle = LibraryStore.shown(aid, novel.detail.title);
+    final total = availableCount(aid, novel.catalogue, onlyCids: onlyCids);
+    if (total == 0) {
+      throw const FormatException('所选范围内没有可导出的已缓存章节');
+    }
+
+    onProgress?.call('正在准备封面…', 0);
+    final Directory? imgCacheDir = (!kIsWeb && format == ExportFormat.epub)
+        ? Directory(p.join((await getApplicationSupportDirectory()).path, 'imgcache'))
+        : null;
+
+    String? coverPath;
+    Uint8List? coverBytes;
+    if (format == ExportFormat.epub) {
+      for (final candidate in [?coverUrl, novel.detail.imgUrl]) {
+        if (candidate.isEmpty) continue;
+        final resolved = await _resolveCachedImage(imageStore, imgCacheDir, candidate);
+        if (resolved != null) {
+          coverPath = resolved.path;
+          coverBytes = resolved.bytes;
+          break;
+        }
+      }
+    }
+
+    final volumes = <EpubVolumeData>[];
+    var collected = 0;
+    var imageCount = 0;
+    final progressClock = Stopwatch()..start();
+    var lastProgressMs = -100;
+
+    for (final v in novel.catalogue) {
+      final chList = <EpubChapterData>[];
+      for (final c in v.chapters) {
+        if (onlyCids != null && !onlyCids.contains(c.cid)) continue;
+        if (!ChapterCache.has(aid, c.cid)) continue;
+        final Content? content = await ChapterCache.get(aid, c.cid);
+        if (content == null) continue;
+
+        final imageFiles = <EpubImageFile>[];
+        if (format == ExportFormat.epub && content.images.isNotEmpty) {
+          for (var i = 0; i < content.images.length; i++) {
+            final url = content.images[i];
+            final resolved = await _resolveCachedImage(imageStore, imgCacheDir, url);
+            if (resolved != null) {
+              imageFiles.add(EpubImageFile(name: 'img_$i', path: resolved.path, bytes: resolved.bytes));
+              imageCount++;
+            }
+          }
+        }
+
+        chList.add(EpubChapterData(title: c.title, text: content.text, imageFiles: imageFiles));
+        collected++;
+        final nowMs = progressClock.elapsedMilliseconds;
+        if (collected == 1 || collected == total || nowMs - lastProgressMs >= 100) {
+          lastProgressMs = nowMs;
+          onProgress?.call('正在收集章节 $collected / $total…', (collected / total) * 0.75);
+        }
+      }
+      if (chList.isNotEmpty) {
+        volumes.add(EpubVolumeData(title: v.title, chapters: chList));
+      }
+    }
+
+    if (volumes.isEmpty) {
+      throw const FormatException('未能读取到已缓存章节内容');
+    }
+
+    final ext = format == ExportFormat.epub ? 'epub' : 'txt';
+    final mime = format == ExportFormat.epub ? 'application/epub+zip' : 'text/plain';
+    final fileName = '${sanitizeFileName(shownTitle)}.$ext';
+    final targetPath = outputPath ?? p.join((await getTemporaryDirectory()).path, fileName);
+
+    onProgress?.call(format == ExportFormat.epub ? '正在打包 EPUB 文件…' : '正在生成 TXT 文件…', 0.85);
+    await compute(
+      _encodeToFileInIsolate,
+      (
+        format: format,
+        outputPath: targetPath,
+        title: shownTitle,
+        author: novel.detail.author == '未知作者' ? '' : novel.detail.author,
+        description: novel.detail.introduce,
+        coverPath: coverPath,
+        coverBytes: coverBytes,
+        volumes: volumes,
+      ),
+    );
+    onProgress?.call('正在准备导出…', 1.0);
+
+    return (
+      filePath: targetPath,
+      fileName: fileName,
+      mimeType: mime,
+      chapterCount: collected,
+      imageCount: imageCount,
+    );
+  }
+
+  /// 收集已缓存章节与本地图片，在独立 isolate 中编码生成 EPUB / TXT 字节（原生端复用流式文件生成避免内存峰值）。
   static Future<ExportResult> buildBytes({
     required String aid,
     required NovelPage novel,
@@ -87,7 +294,33 @@ class ExportBook {
     Set<String>? onlyCids,
     void Function(String stage, double? progress)? onProgress,
   }) async {
-    final local = isLocalAid(aid);
+    if (!kIsWeb) {
+      final ext = format == ExportFormat.epub ? 'epub' : 'txt';
+      final tmpPath = p.join(Directory.systemTemp.path, 'ark_export_${DateTime.now().microsecondsSinceEpoch}.$ext');
+      try {
+        final built = await buildToFile(
+          aid: aid,
+          novel: novel,
+          format: format,
+          imageStore: imageStore,
+          outputPath: tmpPath,
+          coverUrl: coverUrl,
+          onlyCids: onlyCids,
+          onProgress: onProgress,
+        );
+        final bytes = await File(built.filePath).readAsBytes();
+        return (
+          bytes: bytes,
+          fileName: built.fileName,
+          mimeType: built.mimeType,
+          chapterCount: built.chapterCount,
+          imageCount: built.imageCount,
+        );
+      } finally {
+        await _deleteQuietly(tmpPath);
+      }
+    }
+
     final shownTitle = LibraryStore.shown(aid, novel.detail.title);
     final total = availableCount(aid, novel.catalogue, onlyCids: onlyCids);
     if (total == 0) {
@@ -99,7 +332,7 @@ class ExportBook {
     if (format == ExportFormat.epub) {
       for (final candidate in [?coverUrl, novel.detail.imgUrl]) {
         if (candidate.isEmpty) continue;
-        final b = local ? await LocalBooks.readImageBytes(candidate) : await imageStore.cached(candidate);
+        final b = await imageStore.cached(candidate);
         if (b != null && b.isNotEmpty) {
           coverBytes = b;
           break;
@@ -110,20 +343,22 @@ class ExportBook {
     final volumes = <EpubVolumeData>[];
     var collected = 0;
     var imageCount = 0;
+    final progressClock = Stopwatch()..start();
+    var lastProgressMs = -100;
 
     for (final v in novel.catalogue) {
       final chList = <EpubChapterData>[];
       for (final c in v.chapters) {
         if (onlyCids != null && !onlyCids.contains(c.cid)) continue;
-        if (!local && !ChapterCache.has(aid, c.cid)) continue;
-        final Content? content = local ? await LocalBooks.loadChapter(aid, c.cid) : await ChapterCache.get(aid, c.cid);
+        if (!ChapterCache.has(aid, c.cid)) continue;
+        final Content? content = await ChapterCache.get(aid, c.cid);
         if (content == null) continue;
 
         final images = <({String name, Uint8List bytes})>[];
         if (format == ExportFormat.epub && content.images.isNotEmpty) {
           for (var i = 0; i < content.images.length; i++) {
             final url = content.images[i];
-            final b = isLocalImageUrl(url) ? await LocalBooks.readImageBytes(url) : await imageStore.cached(url);
+            final b = await imageStore.cached(url);
             if (b != null && b.isNotEmpty) {
               images.add((name: 'img_$i', bytes: b));
               imageCount++;
@@ -133,7 +368,11 @@ class ExportBook {
 
         chList.add(EpubChapterData(title: c.title, text: content.text, images: images));
         collected++;
-        onProgress?.call('正在收集章节 $collected / $total…', (collected / total) * 0.75);
+        final nowMs = progressClock.elapsedMilliseconds;
+        if (collected == 1 || collected == total || nowMs - lastProgressMs >= 100) {
+          lastProgressMs = nowMs;
+          onProgress?.call('正在收集章节 $collected / $total…', (collected / total) * 0.75);
+        }
       }
       if (chList.isNotEmpty) {
         volumes.add(EpubVolumeData(title: v.title, chapters: chList));
@@ -253,7 +492,7 @@ Future<void> showExportBookDialog(
                           dense: true,
                           contentPadding: EdgeInsets.zero,
                           value: 0,
-                          title: Text(isLocalAid(aid) ? '全书章节（$totalCached 章）' : '全部已缓存章节（$totalCached 章）'),
+                          title: Text('全部已缓存章节（$totalCached 章）'),
                         ),
                         if (exportableVols.length > 1)
                           RadioListTile<int>(
@@ -267,21 +506,21 @@ Future<void> showExportBookDialog(
                   ),
                   if (scope == 2 && exportableVols.length > 1)
                     ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 200),
-                      child: ListView(
-                        shrinkWrap: true,
-                        children: [
-                          for (final v in exportableVols)
-                            CheckboxListTile(
-                              dense: true,
-                              contentPadding: const EdgeInsets.only(left: 12),
-                              controlAffinity: ListTileControlAffinity.leading,
-                              value: pickedVols.contains(v.index),
-                              onChanged: (checked) => setState(() => checked == true ? pickedVols.add(v.index) : pickedVols.remove(v.index)),
-                              title: Text(v.vol.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-                              subtitle: Text('${v.count} 章'),
-                            ),
-                        ],
+                      constraints: BoxConstraints(maxHeight: math.min(200.0, exportableVols.length * 64.0)),
+                      child: ListView.builder(
+                        itemCount: exportableVols.length,
+                        itemBuilder: (_, idx) {
+                          final v = exportableVols[idx];
+                          return CheckboxListTile(
+                            dense: true,
+                            contentPadding: const EdgeInsets.only(left: 12),
+                            controlAffinity: ListTileControlAffinity.leading,
+                            value: pickedVols.contains(v.index),
+                            onChanged: (checked) => setState(() => checked == true ? pickedVols.add(v.index) : pickedVols.remove(v.index)),
+                            title: Text(v.vol.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                            subtitle: Text('${v.count} 章'),
+                          );
+                        },
                       ),
                     ),
                 ],
@@ -309,12 +548,15 @@ Future<void> showExportBookDialog(
   }
 
   final progress = ValueNotifier<({String stage, double? value})>((stage: '正在准备导出…', value: null));
+  final rootNav = Navigator.of(context, rootNavigator: true);
+  Route<void>? dialogRoute;
   var dialogOpen = true;
-  unawaited(
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => PopScope(
+  final dialogFuture = showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) {
+      dialogRoute = ModalRoute.of(ctx);
+      return PopScope(
         canPop: false,
         child: ValueListenableBuilder<({String stage, double? value})>(
           valueListenable: progress,
@@ -331,33 +573,54 @@ Future<void> showExportBookDialog(
             ),
           ),
         ),
-      ),
-    ).whenComplete(() => dialogOpen = false),
+      );
+    },
+  );
+  unawaited(
+    dialogFuture.whenComplete(() {
+      dialogOpen = false;
+      progress.dispose();
+    }),
   );
 
-  ExportResult? built;
+  ExportFileResult? built;
   Object? error;
   try {
     final cover = ref.read(volumeCoverQueueProvider).bookCover(aid, novel.detail.imgUrl);
-    built = await ExportBook.buildBytes(
+    built = await ExportBook.buildToFile(
       aid: aid,
       novel: novel,
       format: format,
       imageStore: ref.read(imageStoreProvider),
       coverUrl: cover,
       onlyCids: targetCids,
-      onProgress: (stage, value) => progress.value = (stage: stage, value: value),
+      onProgress: (stage, value) {
+        if (dialogOpen) progress.value = (stage: stage, value: value);
+      },
     );
   } catch (e) {
     error = e;
   } finally {
-    progress.dispose();
-    if (dialogOpen && context.mounted) {
-      Navigator.of(context, rootNavigator: true).pop();
+    if (dialogOpen) {
+      final route = dialogRoute;
+      if (route != null) {
+        if (route.isActive) {
+          if (route.isCurrent) {
+            rootNav.pop();
+          } else {
+            rootNav.removeRoute(route);
+          }
+        }
+      } else if (rootNav.mounted) {
+        rootNav.pop();
+      }
     }
   }
 
-  if (!context.mounted) return;
+  if (!context.mounted) {
+    if (built != null) unawaited(_deleteQuietly(built.filePath));
+    return;
+  }
   if (error != null || built == null) {
     final detail = error is FormatException ? error.message : '$error';
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出失败：$detail')));
@@ -367,27 +630,43 @@ Future<void> showExportBookDialog(
   try {
     final desktop = !kIsWeb && (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
     if (desktop) {
+      Uri? uri;
+      var dialogSucceeded = false;
       try {
-        final uri = await FilePicker.saveFile(
+        uri = await FilePicker.saveFile(
           dialogTitle: hz(context, '另存为'),
           fileName: built.fileName,
-          bytes: built.bytes,
+          bytes: Uint8List(0),
           mimeType: built.mimeType,
           type: FileType.custom,
           allowedExtensions: [format == ExportFormat.epub ? 'epub' : 'txt'],
         );
-        if (!context.mounted) return;
-        if (uri == null) return; // 用户取消保存
-        final shownPath = uri.scheme == 'file' ? uri.toFilePath() : uri.toString();
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已导出 ${built.chapterCount} 章到 $shownPath')));
-        return;
+        dialogSucceeded = true;
       } catch (_) {
-        // 桌面端另存为失败时回退到系统分享
+        // 桌面端另存为对话框拉起失败时回退到系统分享
+      }
+      if (dialogSucceeded) {
+        if (uri == null) {
+          await _deleteQuietly(built.filePath);
+          return; // 用户取消保存
+        }
+        if (uri.scheme == 'file') {
+          final destPath = uri.toFilePath();
+          if (p.canonicalize(destPath) != p.canonicalize(built.filePath)) {
+            await _copyFileStreamed(built.filePath, destPath);
+            await _deleteQuietly(built.filePath);
+          }
+          if (!context.mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已导出 ${built.chapterCount} 章到 $destPath')));
+          return;
+        }
+        await _deleteQuietly(built.filePath);
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已导出 ${built.chapterCount} 章到 $uri')));
+        return;
       }
     }
-    final outPath = p.join((await getTemporaryDirectory()).path, built.fileName);
-    await writeFileAtomic(File(outPath), built.bytes);
-    await SharePlus.instance.share(ShareParams(files: [XFile(outPath, mimeType: built.mimeType)], title: built.fileName));
+    await SharePlus.instance.share(ShareParams(files: [XFile(built.filePath, mimeType: built.mimeType)], title: built.fileName));
   } catch (e) {
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存或分享文件失败：$e')));
